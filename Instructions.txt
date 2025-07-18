@@ -1,0 +1,32 @@
+Initialize Project:
+
+    npm install --save-dev hardhat
+    npx hardhat
+        Choose: Create an empty hardhat.config.js
+
+        In hardhad.config.js:
+
+            require("@nomicfoundation/hardhat-toolbox");
+
+            /** @type import('hardhat/config').HardhatUserConfig */
+            module.exports = {
+                solidity: "0.8.28",
+                networks: {
+                    cronos: {
+                        url: "https://evm.cronos.org",
+                        chainId: 25,
+                        accounts: ["Owner private key"] // Owner private key
+                    }
+                },
+                sourcify: {
+                    enabled: true
+                }
+            };
+    
+    npm install @openzeppelin/contracts
+    npm install @openzeppelin/contracts-upgradeable
+    npm audit fix --force
+
+Publish contract(s):
+
+    

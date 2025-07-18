@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "B6",
+			"path": "../B6"
+		}
+	],
+	"settings": {
+		"solidity.compileUsingRemoteVersion": "latest",
+		"solidity.defaultCompiler": "remote",
+		"solidity.packageDefaultDependenciesDirectory": "node_modules"
+	}
+}
