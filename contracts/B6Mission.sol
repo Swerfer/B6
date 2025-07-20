@@ -3,9 +3,10 @@ pragma solidity ^0.8.30;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "./B6Manager.sol";
 
-contract B6Mission is Initializable, OwnableUpgradeable { 
+contract B6Mission is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable { 
     // Reference to the B6Manager contract
     B6Manager public b6Manager; 
 
@@ -15,7 +16,9 @@ contract B6Mission is Initializable, OwnableUpgradeable {
     }
 
     // add at contract level, for O(1) “has already won?” checks
+    mapping(address => bool) public enrolled;
     mapping(address => bool) public hasWon;
+    mapping(address => bool) public refunded;
 
     struct B6MissionData {
         address[]       players;
@@ -49,6 +52,8 @@ contract B6Mission is Initializable, OwnableUpgradeable {
     // Store mission data in a state variable
     B6MissionData public missionData;
 
+    event RefundFailed(address indexed player, uint256 amount); // Event to log refund failures
+
     function initialize(
         address         _owner,
         address         _b6Manager,
@@ -64,9 +69,17 @@ contract B6Mission is Initializable, OwnableUpgradeable {
     ) external payable initializer {
         __Ownable_init(_owner);
         _transferOwnership(_owner);
-        require(msg.value > 0,              "Insufficient initial funding");    // Ensure initial funding is sufficient
-        require(_b6Manager != address(0),   "Invalid B6Manager address");       // Ensure B6Manager address is valid
-        b6Manager = B6Manager(payable(_b6Manager));                             // Set the B6Manager contract reference
+        require(msg.value > 0,                      "Insufficient initial funding");                    // Ensure initial funding is sufficient
+        require(_b6Manager != address(0),           "Invalid B6Manager address");                       // Ensure B6Manager address is valid
+        require(bytes(_missionName).length > 0,     "Mission name cannot be empty");                    // Ensure mission name is not empty
+        require(_enrollmentStart < _enrollmentEnd,  "Enrollment start must be before end");             // Ensure enrollment start is before end
+        require(_enrollmentAmount > 0,              "Enrollment amount must be greater than 0");        // Ensure enrollment amount is greater than 0
+        require(_enrollmentMinPlayers >= 10,        "Enrollment min players must be minimum 10");       // Ensure minimum players is 10
+        require(_enrollmentMaxPlayers >= _enrollmentMinPlayers, 
+                                "Enrollment max players must be greater than or equal to min players"); // Ensure max players is greater than or equal to min players
+        require(_missionStart < _missionEnd,        "Mission start must be before end");                // Ensure mission start is before end
+        require(_missionRounds > 0,                 "Mission must have at least one round");            // Ensure mission has at least one round
+        b6Manager = B6Manager(payable(_b6Manager));                                                     // Set the B6Manager contract reference
 
         // Initialize mission data
         missionData.missionName             = _missionName;
@@ -79,8 +92,8 @@ contract B6Mission is Initializable, OwnableUpgradeable {
         missionData.missionEnd              = _missionEnd;
         missionData.missionRounds           = _missionRounds;
         missionData.roundCount              = 0;
-        missionData.ethStart                = 0;
-        missionData.ethCurrent              = 0;
+        missionData.ethStart                = msg.value;                        // Set initial ETH amount to the value sent during initialization
+        missionData.ethCurrent              = msg.value;                        // Set current ETH amount to the value sent during initialization
         missionData.missionStatus           = Status.Pending;                   // Set initial status to Pending
         missionData.pauseTime               = 0;                                // Initialize pause time to 0
         missionData.players                 = new address[](0);                 // Initialize players array
@@ -94,7 +107,7 @@ contract B6Mission is Initializable, OwnableUpgradeable {
      * @dev Enrolls a player in the mission.
      * @param player The address of the player to enroll.
      */
-    function enrollPlayer(address player) external payable {
+    function enrollPlayer(address player) external payable nonReentrant {
         // Logic to enroll a player in the mission
         // This function should check if the player can be enrolled based on the mission's rules
         require(player != address(0),                                           "Invalid player address");          // Ensure player address is valid
@@ -102,24 +115,25 @@ contract B6Mission is Initializable, OwnableUpgradeable {
         require(missionData.enrollmentEnd >= block.timestamp,                   "Enrollment has ended");            // Ensure enrollment has not ended  
         require(missionData.players.length < missionData.enrollmentMaxPlayers,  "Max players reached");             // Ensure max players limit is not exceeded
         require(msg.value == missionData.enrollmentAmount,                      "Incorrect enrollment amount");     // Ensure the correct amount is sent for enrollment
-        require(!isPlayerEnrolled(player),                                      "Player already enrolled");         // Ensure player is not already enrolled
+        require(!enrolled[player],                                              "Player already enrolled");         // Ensure player is not already enrolled
 
-        missionData.players.push(player);
-        missionData.ethStart    += msg.value; // Update the starting ETH amount for the mission
-        missionData.ethCurrent  += msg.value; // Update the current ETH amount for the mission
+        missionData.players.push(player);                                                                           // Add player to the players array
+        enrolled[player] = true;                                                                                    // Mark player as enrolled
+        missionData.ethStart    += msg.value;                                                                       // Update the starting ETH amount for the mission
+        missionData.ethCurrent  += msg.value;                                                                       // Update the current ETH amount for the mission
     }
 
     /**
      * @dev Starts the mission.
      * Only callable by the owner or an authorized address when the mission is ready.
      */
-    function startMission() external {
+    function startMission() external nonReentrant {
         require(msg.sender == owner() || b6Manager.isAuthorized(msg.sender),    "Not owner or authorized");         // Ensure only owner or authorized can start the mission);
         require(block.timestamp >= missionData.enrollmentEnd,                   "Enrollment still ongoing");        // Ensure enrollment has ended
         require(block.timestamp >= missionData.missionStart,                    "Mission start time not reached");  // Ensure mission start time has been reached
         if (missionData.players.length < missionData.enrollmentMinPlayers) {
             setStatus(Status.Failed);                                                                               // If not enough players, refund and set status to Failed
-            this.refundPlayers();
+            _refundPlayers();
         }
         else
         {
@@ -127,50 +141,44 @@ contract B6Mission is Initializable, OwnableUpgradeable {
         }
     }
 
-    function callRound() external {
+    function callRound() external nonReentrant {
         require(missionData.pauseTime == 0 || block.timestamp >= missionData.pauseTime +
             ((missionData.roundCount + 1 == missionData.missionRounds)
                 ? 1 minutes
                 : 5 minutes),                                                   "Mission is paused");               // Ensure mission is not paused (5 mins for normal rounds, 1 min for last round)
         require(!hasWon[msg.sender],                                            "Player already won this mission"); // Ensure player has not already won this round
-        require(isPlayerEnrolled(msg.sender),                                   "Not enrolled in mission");         // Ensure caller is enrolled in the mission
-        require(msg.sender == owner() || b6Manager.isAuthorized(msg.sender),    "Not owner or authorized");         // Ensure only owner or authorized can call the round
+        require(enrolled[msg.sender],                                           "Not enrolled in mission");         // Ensure caller is enrolled in the mission
         require(missionData.missionStatus == Status.Active,                     "Mission is not Active");           // Ensure mission is in Active status
         require(missionData.roundCount < missionData.missionRounds,             "All rounds completed");            // Ensure there are rounds left to play
         require(missionData.missionEnd > block.timestamp,                       "Mission has ended");               // Ensure mission has not ended
+        require(missionData.missionEnd > missionData.missionStart,              "Mission start time must be before end time"); // Ensure mission start time is before end time
         if (missionData.missionStatus == Status.Paused) {
             setStatus(Status.Active);                                                                               // If mission was paused, set status to Active
         }
         
-        // 1) Compute current missionProgress
-        uint256 progress = (block.timestamp - missionData.missionStart) * 100 /
-                     (missionData.missionEnd - missionData.missionStart);
-
-        // get % already paid out, based on last amount / original pot
+        uint256 progress = (block.timestamp - missionData.missionStart) * 100 /                                     
+            (missionData.missionEnd - missionData.missionStart);                                                    // Calculate the progress of the mission in percentage
         uint256 lastAmount = missionData.playersWon.length > 0
-            ? missionData.playersWon[missionData.playersWon.length - 1].amountWon
+            ? missionData.playersWon[missionData.playersWon.length - 1].amountWon                                   // Get the last amount won by a player, or 0 if no players have won yet
             : 0;
-        uint256 lastProgress = (lastAmount * 100) / missionData.ethStart;        
+        uint256 lastProgress = (lastAmount * 100) / missionData.ethStart;                                           // Calculate the last progress based on the last amount won     
+        uint256 payout = ((progress - lastProgress) * missionData.ethStart) / 100;                                  // Calculate the payout for the current round based on the progress and the initial ETH amount
 
-        uint256 payout = ((progress - lastProgress) * missionData.ethStart) / 100;
-
-        // ── Effects first ──
-        missionData.ethCurrent   -= payout;      // shrink remaining pot
+        missionData.ethCurrent   -= payout;                                                                         // shrink remaining pot
         missionData.roundCount++;
 
-        hasWon[msg.sender]      = true;
+        hasWon[msg.sender]      = true;                                                                             // Mark player as having won this round                                           
         missionData.playersWon.push(PlayersWon({
             player:    msg.sender,
             amountWon: payout
         }));
 
-        // ─── Interaction last ───
-        payable(msg.sender).transfer(payout);
+        (bool sent, ) = address(msg.sender).call{value: payout}("");                                                // Transfer the funds to the player
+        require(sent, "Payout transfer failed");                                                                    // Ensure the transfer was successful
 
-        // ─── finalize status ───
         if (missionData.roundCount == missionData.missionRounds) {
             setStatus(Status.Ended);                                                                                // If all rounds are completed, set status to Ended
-            this.withdrawFunds();                                                                                   // Withdraw funds to B6Manager contract
+            _withdrawFunds();                                                                                       // Withdraw funds to B6Manager contract
         }
         else {
             setStatus(Status.Paused);                                                                               // If not all rounds are completed, set status to Ready for the next round
@@ -182,16 +190,25 @@ contract B6Mission is Initializable, OwnableUpgradeable {
      * @dev Refunds players if the mission fails.
      * This function can be called by the owner or an authorized address.
      */
-    function refundPlayers() external {
-        require(msg.sender == owner() || b6Manager.isAuthorized(msg.sender),    "Not owner or authorized");         // Ensure only owner or authorized can start the mission);
+    function _refundPlayers() internal {
         require(block.timestamp >= missionData.enrollmentEnd,                   "Enrollment still ongoing");        // Ensure enrollment has ended
         require(missionData.missionStatus == Status.Failed,                     "Mission is not in Failed status"); // Ensure mission is in Failed status
         for (uint8 i = 0; i < missionData.players.length; i++) {
-            address player = missionData.players[i];
-            uint256 amount = missionData.enrollmentAmount;
-            payable(player).transfer(amount); // Refund the player
+            address player = missionData.players[i];                                                                // Get the player address
+            uint256 amount = missionData.enrollmentAmount;                                                          // Get the enrollment amount for refund
+            (bool ok, ) = player.call{ value: amount }("");                                                         // Attempt to transfer the refund amount to the player
+            if (ok) {
+                refunded[player] = true;                                                                            // Mark player as refunded
+            } else {
+                emit RefundFailed(player, amount);                                                                  // Log the failure, but don’t revert
+            }
         }
-        this.withdrawFunds();
+        _withdrawFunds();
+    }
+
+    function refundPlayers() external nonReentrant {
+        require(msg.sender == owner() || b6Manager.isAuthorized(msg.sender),    "Not owner or authorized");         // Ensure only owner or authorized can start the mission);
+        _refundPlayers();                                                                                           // Call internal refund function
     }
 
     /**
@@ -206,8 +223,8 @@ contract B6Mission is Initializable, OwnableUpgradeable {
      * @param newStatus The new status to set for the mission.
      */
     function setStatus(Status newStatus) internal {
-        missionData.missionStatus = newStatus;
-        b6Manager.setMissionStatus(address(this), B6Manager.Status(uint8(newStatus)));
+        missionData.missionStatus = newStatus;                                          // Update the mission status    
+        b6Manager.setMissionStatus(address(this), B6Manager.Status(uint8(newStatus)));  // Update the status in B6Manager
         if (newStatus == Status.Paused) {
             missionData.pauseTime = block.timestamp;                                    // Record the time when the mission was paused
         }
@@ -220,28 +237,21 @@ contract B6Mission is Initializable, OwnableUpgradeable {
      * @dev Withdraws funds from the mission contract.
      * Only callable by the owner or an authorized address when the mission is ended or failed.
      */
-    function withdrawFunds() external {
-        require(msg.sender == owner() || b6Manager.isAuthorized(msg.sender),    "Not owner or authorized"); // Ensure only owner or authorized can start the mission);
+    function _withdrawFunds() internal {
         require(missionData.missionStatus == Status.Ended || 
                 missionData.missionStatus == Status.Failed,                     "Mission not ended");       // Ensure mission is ended
         uint256 amount = address(this).balance;                                                             // Get the contract's balance
         require(amount > 0, "No funds to withdraw");                                                        // Ensure there are funds to withdraw
-        payable(address(b6Manager)).transfer(amount);                                                       // Transfer funds to B6Manager contract
+        (bool ok,) = address(b6Manager).call{value: amount}("");                                            // Transfer the funds to the B6Manager contract
+        require(ok, "Transfer failed");
     }
 
-    // ──────────────── Helper functions ────────────────
     /**
-     * @dev Checks if a player is already enrolled in the mission.
-     * @param player The address of the player to check.
-     * @return bool True if the player is enrolled, false otherwise.
+     * @dev Withdraws funds from the mission contract.
+     * This function can be called by the owner or an authorized address.
      */
-    function isPlayerEnrolled(address player) internal view returns (bool) {
-        for (uint8 i = 0; i < missionData.players.length; i++) {
-            if (missionData.players[i] == player) {
-                return true;
-            }
-        }
-        return false;
+    function withDrawFunds() external nonReentrant {
+        require(msg.sender == owner() || b6Manager.isAuthorized(msg.sender),    "Not owner or authorized"); // Ensure only owner or authorized can start the mission);
+        _withdrawFunds();                                                                                   // Call internal withdraw function
     }
-
 }
