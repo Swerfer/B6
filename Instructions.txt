@@ -28,4 +28,5 @@ Initialize Project:
 
 Publish contract(s):
 
+    Compile with configured Remote version
     
