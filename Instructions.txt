@@ -24,7 +24,6 @@ Initialize Project:
             };
     
     npm install @openzeppelin/contracts
-    npm install @openzeppelin/contracts-upgradeable
     npm audit fix --force
 
 Publish contract(s):
