@@ -5,7 +5,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
-import "./MissionTypes.sol";
+import "./CommonTypes.sol"; 
 import "./B6Manager.sol";
 
 /**
@@ -74,7 +74,7 @@ contract B6Mission is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradea
         _;
     }
 
-    // ───────────────────── Structs ────────────────────
+    // ───────────────────── Structs ──────────────────── 
     /**
      * @dev Struct to hold information about players who won the mission.
      * Contains the player's address and the amount they won.
@@ -105,20 +105,6 @@ contract B6Mission is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradea
         uint256         ethCurrent;
         PlayersWon[]    playersWon;
         uint256         pauseTime;
-    }
-
-    // ───────────────────── Enums ──────────────────────
-    /**
-     * @dev Enum to represent the status of the mission.
-     * The mission can be in one of several states: Pending, Enrolling, Ready, Active, Paused, Ended, or Failed.
-     */
-    enum Status {
-        Pending,
-        Enrolling,
-        Active,
-        Paused,
-        Ended,
-        Failed
     }
 
     // ───────────────────── Events ─────────────────────
@@ -168,6 +154,7 @@ contract B6Mission is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradea
     event MissionPaused(
         uint256         timestamp
     );
+
     event MissionResumed(
         uint256         timestamp
     );
@@ -229,8 +216,7 @@ contract B6Mission is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradea
         missionData.pauseTime               = 0;                                // Initialize pause time to 0
         missionData.players                 = new address[](0);                 // Initialize players array
         missionData.playersWon              = new PlayersWon[](0);              // Initialize playersWon array
-        b6Manager.setMissionStatus(address(this), 
-            B6Manager.Status(uint8(Status.Pending)));                           // Register mission status in B6Manager
+        b6Manager.setMissionStatus(address(this), Status.Pending);              // Register mission status in B6Manager
     }
 
     // ─────────────── External functions ───────────────

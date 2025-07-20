@@ -9,25 +9,17 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 
-import "./MissionTypes.sol";
+import "./CommonTypes.sol";
 import "./B6Mission.sol";
 
 contract B6Manager is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using Clones    for address;
     using Strings   for uint256;
+    
+    // ────────────── State Variables ───────────────────
 
     mapping(address => bool)    public  authorized;     // Mapping to track authorized addresses
-
-    enum Status {                                       // Status of the mission
-        Pending,
-        Enrolling,
-        Active,
-        Paused,
-        Ended,
-        Failed
-    }
-
     mapping(MissionType => uint256) public reservedFunds;   // Track funds by type
     mapping(address => Status)      public missionStatus;   // Mapping to hold the status of each mission
     address[]                       public missions;        // Array to hold all mission addresses
