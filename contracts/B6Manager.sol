@@ -19,7 +19,7 @@ contract B6Manager is Ownable, ReentrancyGuard {
     
     // ────────────── State Variables ───────────────────
 
-    mapping(address => bool)    public  authorized;     // Mapping to track authorized addresses
+    mapping(address => bool)        public  authorized;     // Mapping to track authorized addresses
     mapping(MissionType => uint256) public reservedFunds;   // Track funds by type
     mapping(address => Status)      public missionStatus;   // Mapping to hold the status of each mission
     address[]                       public missions;        // Array to hold all mission addresses
