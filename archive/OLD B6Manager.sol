@@ -57,8 +57,8 @@ contract B6Manager is Ownable, ReentrancyGuard {
 
     /**
      * @dev Creates a new mission with the specified parameters.
-     * @param _owner                The owner of the mission.
-     * @param _b6Manager            The address of the B6Manager contract.
+     * //@param _owner                The owner of the mission.
+     * //@param _b6Manager            The address of the B6Manager contract.
      * @param _missionType          The type of the mission.
      * @param _enrollmentStart      The start time for enrollment.
      * @param _enrollmentEnd        The end time for enrollment.
@@ -70,8 +70,6 @@ contract B6Manager is Ownable, ReentrancyGuard {
      * @param _missionRounds        The number of rounds in the mission.
      */
     function createMission(
-        address         _owner,                 // Owner of the mission
-        address         _b6Manager,             // Address of the B6Manager contract
         MissionType     _missionType,           // Type of the mission
         uint256         _enrollmentStart,       // Start time for enrollment
         uint256         _enrollmentEnd,         // End time for enrollment
@@ -82,8 +80,6 @@ contract B6Manager is Ownable, ReentrancyGuard {
         uint256         _missionEnd,            // End time for the mission
         uint8           _missionRounds          // Number of rounds in the mission
         ) external payable onlyOwnerOrAuthorized returns (address) {
-            require(_owner != address(0),                               "Invalid owner address");                                       // Ensure valid addresses are provided
-            require(_b6Manager != address(0),                           "Invalid B6Manager address");                                   // Ensure valid addresses are provided
             require(_enrollmentStart < _enrollmentEnd,                  "Enrollment start must be before end");                         // Ensure enrollment start is before end
             require(_enrollmentMinPlayers >= 10,                        "Minimum players must be greater or equal to 10");              // Ensure minimum players is greater than zero
             require(_enrollmentMaxPlayers >= _enrollmentMinPlayers * 2, "Max players must be greater than or equal to min players");    // Ensure max players is at least 2x min players      
@@ -95,8 +91,8 @@ contract B6Manager is Ownable, ReentrancyGuard {
 
             B6Mission mission = new B6Mission();                                        // Create a new mission instance
             mission.initialize(
-                _owner,                                                                 // Set the owner of the mission
-                _b6Manager,                                                             // Set the B6Manager address
+				owner(),																// Set the owner of the mission to the owner of B6Manager
+				address(this),															// Set the B6Manager address
                 _missionType,                                                           // Set the type of the mission
                 _enrollmentStart,                                                       // Set the enrollment start time
                 _enrollmentEnd,                                                         // Set the enrollment end time
