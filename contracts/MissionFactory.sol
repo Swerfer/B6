@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
-
 /**
  * @title Be Brave Be Bold Be Banked (B6) Mission Game Smart Contract
  * @notice This contract represents a single "Mission" in the game system deployed via MissionFactory.
@@ -122,7 +119,6 @@ enum Status {
  * @dev     Uses OpenZeppelin's Ownable and ReentrancyGuard for security and ownership management.
  */
 contract MissionFactory is Ownable, ReentrancyGuard {
-    using SafeERC20 for IERC20;
     using Clones    for address;
     
     // ────────────────── Events ───────────────────────
@@ -130,15 +126,14 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Events emitted by the MissionFactory contract.
      * These events are used to log important actions and state changes within the contract.
      */
-    event AuthorizedAddressAdded                (address        indexed addr                                            );
-    event AuthorizedAddressRemoved              (address        indexed addr                                            );
-    event MissionCreated                        (address        indexed missionAddress, MissionType indexed missionType );
-    event FundsReceived                         (address        indexed sender,         uint256             amount      );
-    event MissionFundsRegistered                (MissionType    indexed missionType,    uint256             amount      );
-    event FundsWithdrawn                        (address        indexed to,             uint256             amount      );    
-    event OwnershipTransferProposed             (address        indexed proposer,       address             newOwner    );
-    event OwnershipTransferConfirmed            (address        indexed confirmer,      address             newOwner    );
-    event OwnershipTransferred                  (address        indexed previousOwner,  address             newOwner    );
+    event AuthorizedAddressAdded                (address        indexed addr                                                                    );
+    event AuthorizedAddressRemoved              (address        indexed addr                                                                    );
+    event MissionCreated                        (address        indexed missionAddress, MissionType indexed missionType                         );
+    event FundsReceived                         (address        indexed sender,         uint256             amount                                  );
+    event MissionFundsRegistered                (uint256                amount,         MissionType indexed missionType,    address indexed sender  );
+    event FundsWithdrawn                        (address        indexed to,             uint256             amount                                  );    
+    event OwnershipTransferProposed             (address        indexed proposer,       address             newOwner,       uint256 timestamp       );
+    event OwnershipTransferConfirmed            (address        indexed confirmer,      address             newOwner,       uint256 timestamp       );
 
     // ────────────────── Modifiers ─────────────────────
     /**
@@ -259,7 +254,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param _enrollmentEnd        The end time for enrollment.
      * @param _enrollmentAmount     The amount required for enrollment.
      * @param _enrollmentMinPlayers The minimum number of players required to start the mission.
-     * @param _enrollmentMaxPlayers The maximum number of players allowed to enroll.
      * @param _missionStart         The start time for the mission.
      * @param _missionEnd           The end time for the mission.
      * @param _missionRounds        The number of rounds in the mission.
@@ -274,9 +268,9 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         uint256         _missionEnd,            // End time for the mission
         uint8           _missionRounds          // Number of rounds in the mission
         ) external payable onlyOwnerOrAuthorized returns (address) {
-            require(ennrollmentMinPlayers >=5,                          "Minimum players must be greater than or equal to 5");                // Ensure minimum players is at least 5
-            require(ennrollmentMinPlayers <= 50,                        "Minimum players must be less than or equal to 50");                // Ensure minimum players is less than or equal to 50
-            require(enrollmentMinPlayers >= _missionRounds,             "Minimum players must be greater than or equal to mission rounds"); // Ensure minimum players is at least equal to mission rounds
+            require(_enrollmentMinPlayers >=5,                          "Minimum players must be greater than or equal to 5");              // Ensure minimum players is at least 5
+            require(_enrollmentMinPlayers <= 50,                        "Minimum players must be less than or equal to 50");                // Ensure minimum players is less than or equal to 50
+            require(_enrollmentMinPlayers >= _missionRounds,            "Minimum players must be greater than or equal to mission rounds"); // Ensure minimum players is at least equal to mission rounds
             require(_enrollmentStart < _enrollmentEnd,                  "Enrollment start must be before end");                             // Ensure enrollment start is before end
             require(_enrollmentAmount > 0,                              "Enrollment amount must be greater than zero");                     // Ensure enrollment amount is greater than zero
             require(_missionStart > _enrollmentEnd,                     "Mission start must be after enrollment end");                      // Ensure mission start is after enrollment end
@@ -284,10 +278,10 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             require(_missionRounds >= 5,                                "Mission rounds must be greater than or equal to 5");               // Ensure mission rounds is greater than or equal to 5
             require(_missionRounds <= 100,                              "Mission rounds must be less than or equal to 100");                // Ensure mission rounds does not exceed 255
 
-            uint256 _enrollmentMaxPlayers = _enrollmentMinPlayers * 2;                  // Ensure maximum players is double the minimum players
+            uint8 _enrollmentMaxPlayers = _enrollmentMinPlayers * 2;                  // Ensure maximum players is double the minimum players
 			address clone = missionImplementation.clone(); 								// EIP-1167 minimal proxy
 
-            Mission(clone).initialize{value: msg.value} (
+            Mission(payable(clone)).initialize{value: msg.value} (
 				owner(),																// Set the owner of the mission to the owner of MissionFactory
 				address(this),															// Set the MissionFactory address
                 _missionType,                                                           // Set the type of the mission
@@ -344,8 +338,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 
     /**
      * @dev Registers mission funds for a specific mission type.
-     * @param _type The type of the mission.
-     * @param _amount The amount of funds to register.
+     * @param amount The amount of funds to register.
+     * @param missionType The type of the mission.
      */
     function registerMissionFunds(uint256 amount, MissionType missionType) external {
         require(amount > 0,                                                                                 "Amount must be greater than zero");    // Ensure the amount is greater than zero
@@ -353,7 +347,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         reservedFunds[missionType] += amount;
         emit MissionFundsRegistered(amount, missionType, msg.sender);
     }
-
 
     /**
      * @dev Called when ETH is sent with empty calldata.
@@ -399,7 +392,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
     function getMissionData(address missionAddress) external view returns (Mission.MissionData memory) {
         require(missionAddress != address(0), "Invalid mission address");          // Ensure mission address is valid
-        return Mission(missionAddress).getMissionData();                           // Return the mission data from the Mission contract
+        return Mission(payable(missionAddress)).getMissionData();                           // Return the mission data from the Mission contract
     }
 
     /**
@@ -518,56 +511,92 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 }
 
 // ───────────────── Contract Mission ───────────────────
+
 /**
- * @title   Mission
- * @author  Dennis Bakker
- * @notice  Manages a multi-round ETH-backed mission game where players enroll, compete across timed rounds,
- *          and receive proportional payouts. Integrates with a central MissionFactory for authorization, status tracking,
- *          fee collection, and final fund management.
- * @dev     Upgradeable via OpenZeppelin’s Initializable; tracks mission lifecycle (Pending → Enrolling → Active → Paused → Ended/Failed),
- *          enforces enrollment bounds, per-round timing and payout calculation, owner/authorized controls, safe ETH transfers,
- *          and automatic fee split (25% owner, 75% MissionFactory for future mission bonuses) or full refunds on failure.
+ * @title Be Brave Be Bold Be Banked (B6) Mission Game Smart Contract
+ * @notice This contract represents a single "Mission" in the game system deployed via MissionFactory.
  *
- * State Variables:
- * - missionFactory                  : Interface to central MissionFactory for status updates, authorization checks, and fee withdrawal.
- * - enrolled, hasWon, refunded : Mappings to track player enrollment, round wins, and refund status.
- * - missionData                : Struct capturing mission parameters, timing, ETH balances, players list, per-round records, etc.
+ * ## 📖 Overview
+ * A Mission is a time-based competitive game where players enroll by paying a fixed ETH amount
+ * during the enrollment period. Once the mission starts, players compete in multiple rounds
+ * to win portions of the prize pool. The game ends when all rounds are claimed or when
+ * the mission duration expires.
  *
- * Core Features:
- * - initialize(...)                    : Sets up mission parameters, funds initial ETH pot, registers with MissionFactory.
- * - enrollPlayer(...)                  : Allows valid addresses to join by paying the exact enrollment fee.
- * - armMission()                       : Transitions to Active or triggers refunds if minimum players unmet.
- * - callRound()                        : Lets each enrolled player claim their share based on elapsed time progress,
- *                                        pauses between rounds, and auto-ends or pauses after each claim.
- * - withdrawFunds(), _withdrawFunds()  : Splits final pot (25% fee to owner, 75% to MissionFactory) when mission ends.
- * - refundPlayers(), _refundPlayers()  : Returns enrollment fees to all if mission fails.
+ * ## 🎮 Game Rules
  *
- * Events:
- * - MissionStatusChanged, PlayerEnrolled, MissionArmed, RoundCalled, PlayerRefunded,
- *   FundsWithdrawn, MissionPaused, MissionResumed, RefundFailed
+ * 1. **Enrollment Phase**
+ *    - Starts at `enrollmentStart` and ends at `enrollmentEnd`.
+ *    - Players pay `enrollmentAmount` to enroll.
+ *    - Each address can enroll only once.
+ *    - Enrollment succeeds only if the enrollment window is open and max players not reached.
  *
- * Usage:
- * 1. Deploy via a proxy, calling initialize(...) with owner, MissionFactory, timing, player limits, and rounds.
- * 2. Enroll at least `enrollmentMinPlayers` before `enrollmentEnd` by sending `enrollmentAmount` ETH.
- * 3. After enrollment, owner or authorized address calls `armMission()`.
- * 4. Players call `callRound()` once each round to claim payouts in real time.
- * 5. On final round, contract auto-ends and splits remaining ETH.
+ * 2. **Start Conditions**
+ *    - After `enrollmentEnd`, mission can only start if `enrollmentMinPlayers` is met.
+ *    - If conditions fail, mission is marked as `Failed` and refunds are processed.
  *
- * Security:
- * - ReentrancyGuard on fund-moving functions.
- * - Strict timing and status checks.
- * - Safe ETH transfer patterns with require on `call`.
- */ 
+ * 3. **Mission Phases**
+ *    - **Active Phase**: Mission starts at `missionStart` and runs until `missionEnd`.
+ *    - Mission consists of `missionRounds` rounds.
+ *    - Each round can only be called after a cooldown:
+ *        - **Normal rounds**: 5-minute pause after each round.
+ *        - **Final round**: 1-minute pause before last round.
+ *    - A player can only win **once per mission**.
+ *
+ * 4. **Round Payouts**
+ *    - Prize pool starts as `ethStart` (initial ETH funding).
+ *    - At each round, payout = (progress since last round) * `ethStart` / 100.
+ *    - Progress = % of total mission duration elapsed since last claim.
+ *    - Example:
+ *        - If 10% of time passed since last claim, 10% of `ethStart` is paid out.
+ *    - Remaining ETH after final round is swept during withdrawal.
+ *
+ * 5. **Mission End**
+ *    - Mission ends when:
+ *        - All rounds claimed OR
+ *        - `missionEnd` timestamp reached.
+ *    - If time expires with incomplete rounds:
+ *        - Owner/authorized can call `forceFinalizeMission()`:
+ *            - If some rounds called → Remaining ETH is swept during withdrawal.
+ *            - If no rounds called → Mission is marked as `Failed`, all players refunded.
+ *
+ * 6. **Fees**
+ *    - After mission completion (or failure):
+ *        - 25% of remaining ETH → factory owner.
+ *        - 75% → MissionFactory for future missions (reservedFunds).
+ *    - Payout is processed in `_withdrawFunds()`.
+ *
+ * 7. **Refund Logic**
+ *    - If mission fails (not enough players), all enrolled players get refunded.
+ *    - If a refund fails (e.g., non-payable address), the amount is tracked in `failedRefundAmounts`.
+ *    - Failed refunds are excluded from normal withdrawals unless `force = true` in `_withdrawFunds()`.
+ *
+ * ## ⚠️ Key Constraints
+ * - `enrollmentMaxPlayers` >= `enrollmentMinPlayers * 2`.
+ * - `missionRounds` must be >= enrollmentMinPlayers.
+ * - A player can only win once per mission.
+ *
+ * ## 🛠 Admin Functions
+ * - Owner or authorized can:
+ *    - Force finalize the mission after time expiry.
+ *    - Withdraw leftover funds after mission end/failure.
+ *
+ * ## ✅ Security
+ * - Uses OpenZeppelin ReentrancyGuard for state-changing functions.
+ * - ETH transfers use `.call{value: ...}` to prevent gas griefing.
+ * - Refund failures are logged and tracked for later withdrawal.
+ *
+ * @dev This contract is deployed as a clone (minimal proxy) by MissionFactory.
+ */
 
 contract Mission is Ownable, ReentrancyGuard {
-
+    
     // ───────────────────── Events ─────────────────────
     event MissionStatusChanged  (Status     indexed previousStatus, Status      indexed newStatus,      uint256 timestamp                   );
     event PlayerEnrolled        (address    indexed player,         uint256             amount,         uint256 totalPlayers                );
     event MissionArmed          (uint256            timestamp,      uint256             totalPlayers                                        );
     event RoundCalled           (address    indexed player,         uint8       indexed roundNumber,    uint256 payout, uint256 ethRemaining);
     event PlayerRefunded        (address    indexed player,         uint256             amount                                              );
-    event FundsWithdrawn        (address    indexed to,             uint256             fee,            uint256 remainder                   );
+    event FundsWithdrawn        (uint256            ownerAmount,    uint256             factoryAmount                                       );
     event MissionPaused         (uint256            timestamp                                                                               );
     event MissionResumed        (uint256            timestamp                                                                               );
     event RefundFailed          (address    indexed player,         uint256             amount                                              ); 
@@ -581,7 +610,7 @@ contract Mission is Ownable, ReentrancyGuard {
      */
     modifier onlyOwnerOrAuthorized() {
         require(
-            msg.sender == owner() || missionFactory.isAuthorized(msg.sender),
+            msg.sender == owner() || missionFactory.authorized(msg.sender),
             "Not owner or authorized"
         );
         _;
@@ -607,8 +636,8 @@ contract Mission is Ownable, ReentrancyGuard {
      * Contains the player's address and the amount they won.
      */
     struct PlayersWon {
-        address player;
-        uint256 amountWon;
+        address player;                     // Address of the player who won
+        uint256 amountWon;                  // Amount won by the player
     }
 
     /**
@@ -616,22 +645,23 @@ contract Mission is Ownable, ReentrancyGuard {
      * Contains information about players, mission status, enrollment details, and financials.
      */
     struct MissionData {
-        address[]       players;
-        MissionType     missionType;
-        Status          missionStatus;
-        uint256         enrollmentStart;
-        uint256         enrollmentEnd;
-        uint256         enrollmentAmount;
-        uint8           enrollmentMinPlayers;
-        uint8           enrollmentMaxPlayers;
-        uint256         missionStart;
-        uint256         missionEnd;
-        uint8           missionRounds;
-        uint8           roundCount;
-        uint256         ethStart;    
-        uint256         ethCurrent;
-        PlayersWon[]    playersWon;
-        uint256         pauseTime;
+        address[]       players;                        // Array to hold addresses of players enrolled in the mission
+        MissionType     missionType;                    // Type of the mission
+        Status          missionStatus;                  // Current status of the mission
+        uint256         enrollmentStart;                // Start and end times for enrollment
+        uint256         enrollmentEnd;                  // Start and end times for enrollment
+        uint256         enrollmentAmount;               // Amount required for enrollment
+        uint8           enrollmentMinPlayers;           // Minimum number of players required to start the mission
+        uint8           enrollmentMaxPlayers;           // Maximum number of players allowed in the mission
+        uint256         missionStart;                   // Start time for the mission
+        uint256         missionEnd;                     // End time for the mission
+        uint8           missionRounds;                  // Total number of rounds in the mission
+        uint8           roundCount;                     // Current round count  
+        uint256         ethStart;                       // Initial ETH amount at the start of the mission
+        uint256         ethCurrent;                     // Current ETH amount in the mission
+        PlayersWon[]    playersWon;                     // Array to hold players who won in the mission     
+        uint256         pauseTime;                      // Time when the mission was paused
+        address[]       refundedPlayers;                // Track players who have been refunded
     }
 
     // ────────────────── Constructor ───────────────────
@@ -723,7 +753,7 @@ contract Mission is Ownable, ReentrancyGuard {
         missionData.ethStart    += msg.value;                                                                       // Update the starting ETH amount for the mission
         missionData.ethCurrent  += msg.value;                                                                       // Update the current ETH amount for the mission
         emit PlayerEnrolled(player, msg.value, uint256(missionData.players.length));                                // Emit PlayerEnrolled event with player address, amount, and total players count
-        _setStatus(newStatus(Status.Enrolling, missionData.missionStatus));                                         // Set status to Enrolling if not already in that status
+        _setStatus(Status.Enrolling);                                                                               // Set mission status to Enrolling
     }
 
     /**
@@ -790,7 +820,7 @@ contract Mission is Ownable, ReentrancyGuard {
 
         if (missionData.roundCount == missionData.missionRounds) {
             _setStatus(Status.Ended);                                                                               // If all rounds are completed, set status to Ended
-            _withdrawFunds();                                                                                       // Withdraw funds to MissionFactory contract
+            _withdrawFunds(false);                                                                                       // Withdraw funds to MissionFactory contract
         }
         else {
             _setStatus(Status.Paused);                                                                              // If not all rounds are completed, set status to Ready for the next round
@@ -835,7 +865,7 @@ contract Mission is Ownable, ReentrancyGuard {
         } else {
             // Case 2: Some rounds completed → End mission and payout remaining pot
             _setStatus(Status.Ended);
-            _withdrawFunds();
+            _withdrawFunds(false);
         }
     }
 
@@ -896,11 +926,11 @@ contract Mission is Ownable, ReentrancyGuard {
 
         uint256 distributable;
         if (force) {
-            distributable = balance;                                                    // If force is true, calculate distributable amount
+            distributable = balance;                                                    // If force is true, all funds are distributable
         } else {
             uint256 unclaimable = _getTotalFailedRefunds();                             // Get total failed refunds for all players  
-            if (unclaimable > amount) {                                                 // If unclaimable amount exceeds the specified amount      
-                unclaimable = amount;                                                   // safety check
+            if (unclaimable > balance) {                                                // If unclaimable amount exceeds the balance      
+                unclaimable = balance;                                                  // safety check
             }
             distributable = balance - unclaimable;                                      // Calculate distributable amount by subtracting unclaimable amounts
         }
@@ -918,7 +948,7 @@ contract Mission is Ownable, ReentrancyGuard {
 
         missionFactory.registerMissionFunds(factoryShare, missionData.missionType);     // Register the factory's share with the MissionFactory for future mission bonuses
 
-        emit FundsWithdrawn(mgrOwner, ownerShare, factoryShare);                        // Emit event for funds withdrawal  
+        emit FundsWithdrawn(ownerShare, factoryShare);                        // Emit event for funds withdrawal  
     }
 
     /**
@@ -945,15 +975,15 @@ contract Mission is Ownable, ReentrancyGuard {
         require(missionData.players.length > 0,                                 "No players to refund");                // Ensure there are players to refund
         for (uint256 i = 0; i < missionData.players.length; i++) {
             address player = missionData.players[i];                                                                    // Get the player address
-            if (!missionData.refunded[player]) {
-                missiondata.refunded[player] = true;                                                                    // Mark player as refunded
+            if (!refunded[player]) {                                                                                    // Check if player has not been refunded
                 (bool ok, ) = payable(player).call{ value: missionData.enrollmentAmount }("");                          // Attempt to transfer the refund amount to the player
                 if (ok) {
-                    refunded[player] = true;                                                                            // Mark player as refunded
-                    emit PlayerRefunded(player, amount);
+                    refunded[player] = true;                                                                            // If transfer successful, mark player as refunded
+                    missionData.refundedPlayers.push(player);                                                           // If transfer successful, track refunded player
+                    emit PlayerRefunded(player, missionData.enrollmentAmount);                                          // Emit PlayerRefunded event with player address and amount
                 } else {
                     failedRefundAmounts[player] += missionData.enrollmentAmount;                                        // Track failed refund amounts for players
-                    emit RefundFailed(player, amount);                                                                  // Log the failure, but don’t revert
+                    emit RefundFailed(player, missionData.enrollmentAmount);                                            // Log the failure, but don’t revert
                 }
             }
         }
