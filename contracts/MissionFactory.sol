@@ -17,6 +17,9 @@ pragma solidity ^0.8.30;
  *    - Starts at `enrollmentStart` and ends at `enrollmentEnd`.
  *    - Players pay `enrollmentAmount` to enroll.
  *    - Each address can enroll only once.
+ *    - Each player is checked if they can enroll based on anti-addiction limits:
+ *        - Weekly limit:  `weeklyLimit`  missions.
+ *        - Monthly limit: `monthlyLimit` missions.
  *    - Enrollment succeeds only if the enrollment window is open and max players not reached.
  *
  * 2. **Start Conditions**
@@ -126,14 +129,16 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Events emitted by the MissionFactory contract.
      * These events are used to log important actions and state changes within the contract.
      */
-    event AuthorizedAddressAdded                (address        indexed addr                                                                    );
-    event AuthorizedAddressRemoved              (address        indexed addr                                                                    );
-    event MissionCreated                        (address        indexed missionAddress, MissionType indexed missionType                         );
+    event AuthorizedAddressAdded                (address        indexed addr                                                                        );
+    event AuthorizedAddressRemoved              (address        indexed addr                                                                        );
+    event MissionCreated                        (address        indexed missionAddress, MissionType indexed missionType                             );
     event FundsReceived                         (address        indexed sender,         uint256             amount                                  );
     event MissionFundsRegistered                (uint256                amount,         MissionType indexed missionType,    address indexed sender  );
     event FundsWithdrawn                        (address        indexed to,             uint256             amount                                  );    
     event OwnershipTransferProposed             (address        indexed proposer,       address             newOwner,       uint256 timestamp       );
     event OwnershipTransferConfirmed            (address        indexed confirmer,      address             newOwner,       uint256 timestamp       );
+    event EnrollmentLimitUpdated                (uint8                  newWeekly,      uint8               newMonthly                              );
+    event EnrollmentRecorded                    (address        indexed user,           uint256             timestamp                               );
 
     // ────────────────── Modifiers ─────────────────────
     /**
@@ -152,13 +157,16 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev State variables for the MissionFactory contract.
      * These variables store the state of the contract, including authorized addresses, reserved funds, mission statuses, and the implementation address for missions.
      */
-    mapping(address => bool)                public authorized;              // Mapping to track authorized addresses
-    mapping(MissionType => uint256)         public reservedFunds;           // Track funds by type
-    mapping(address => Status)              public missionStatus;           // Mapping to hold the status of each mission
-    address[]                               public missions;                // Array to hold all mission addresses
-    address                                 public missionImplementation;   // Address of the Mission implementation contract for creating new missions
-    mapping(address => OwnershipProposal)   public ownershipProposals;      // Mapping to hold ownership proposals
+    mapping(address => bool)                public  authorized;             // Mapping to track authorized addresses
+    mapping(MissionType => uint256)         public  reservedFunds;          // Track funds by type
+    mapping(address => Status)              public  missionStatus;          // Mapping to hold the status of each mission
+    address[]                               public  missions;               // Array to hold all mission addresses
+    address                                 public  missionImplementation;  // Address of the Mission implementation contract for creating new missions
+    mapping(address => OwnershipProposal)   public  ownershipProposals;     // Mapping to hold ownership proposals
     uint256                                 public constant OWNERSHIP_PROPOSAL_WINDOW = 1 days; // Duration for ownership proposal validity
+    mapping(address => uint256[])           private enrollmentHistory;      // store timestamps
+    uint8                                   public  weeklyLimit = 4;        // Maximum number of missions a player can enroll in per week
+    uint8                                   public  monthlyLimit = 10;      // Maximum number of missions a player can enroll in per month
 
     // ─────────────────── Structs ──────────────────────
     /**
@@ -179,6 +187,80 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 		Mission impl = new Mission();
         missionImplementation = address(impl);
 	}
+
+    // ──────────── Anti-addiction Functions ────────────
+    /**
+     * @dev Sets the weekly and monthly enrollment limits.
+     * This function allows the owner or an authorized address to set the limits for how many missions a user can enroll in per week and per month.
+     * @param _weekly The new weekly limit for mission enrollments.
+     * @param _monthly The new monthly limit for mission enrollments.
+     */
+    function setEnrollmentLimits(uint8 _weekly, uint8 _monthly) external onlyOwnerOrAuthorized {
+        weeklyLimit = _weekly;
+        monthlyLimit = _monthly;
+        emit EnrollmentLimitUpdated(_weekly, _monthly);
+    }
+
+    /**
+     * @dev Records the enrollment of a user in a mission.
+     * This function is called when a user enrolls in a mission.
+     * It updates the user's enrollment history and emits an event.
+     * @param user The address of the user enrolling in the mission.
+     */
+    function canEnroll(address user) public view returns (bool allowed, string memory reason) {
+        uint256 nowTs = block.timestamp;
+        uint256 weeklyCount;
+        uint256 monthlyCount;
+
+        uint256[] memory history = enrollmentHistory[user];
+        for (uint256 i = 0; i < history.length; i++) {
+            if (history[i] + 30 days > nowTs) {
+                monthlyCount++;
+                if (history[i] + 7 days > nowTs) {
+                    weeklyCount++;
+                }
+            }
+        }
+
+        if (weeklyCount >= weeklyLimit) {
+            return (false, "AntiAddiction: Weekly limit reached");
+        }
+        if (monthlyCount >= monthlyLimit) {
+            return (false, "AntiAddiction: Monthly limit reached");
+        }
+        return (true, "");
+    }
+
+    /**
+     * @dev Records the enrollment of a user in a mission.
+     * This function is called when a user enrolls in a mission.
+     * It updates the user's enrollment history and emits an event.
+     * @param user The address of the user enrolling in the mission.
+     */
+    function recordEnrollment(address user) external {
+        require(missionStatus[msg.sender] == Status.Enrolling || missionStatus[msg.sender] == Status.Active, "Invalid caller");
+        (bool allowed, string memory reason) = canEnroll(user);
+        require(allowed, reason);
+
+        // Prune old entries (>30 days)
+        uint256 cutoff = block.timestamp - 30 days;
+        uint256[] storage history = enrollmentHistory[user];
+        uint256 i = 0;
+        while (i < history.length && history[i] < cutoff) {
+            i++;
+        }
+        if (i > 0) {
+            for (uint256 j = 0; j < history.length - i; j++) {
+                history[j] = history[j + i];
+            }
+            for (uint256 k = 0; k < i; k++) {
+                history.pop();
+            }
+        }
+
+        history.push(block.timestamp);
+        emit EnrollmentRecorded(user, block.timestamp);
+    }
 
     // ─────────── Internal Helper Functions ────────────
     /**
@@ -528,6 +610,9 @@ contract MissionFactory is Ownable, ReentrancyGuard {
  *    - Starts at `enrollmentStart` and ends at `enrollmentEnd`.
  *    - Players pay `enrollmentAmount` to enroll.
  *    - Each address can enroll only once.
+ *    - Each player is checked if they can enroll based on anti-addiction limits:
+ *        - Weekly limit:  `weeklyLimit`  missions.
+ *        - Monthly limit: `monthlyLimit` missions.
  *    - Enrollment succeeds only if the enrollment window is open and max players not reached.
  *
  * 2. **Start Conditions**
@@ -748,10 +833,16 @@ contract Mission is Ownable, ReentrancyGuard {
         require(msg.value == missionData.enrollmentAmount,                      "Incorrect enrollment amount");     // Ensure the correct amount is sent for enrollment
         require(!enrolled[player],                                              "Player already enrolled");         // Ensure player is not already enrolled
 
+        (bool allowed, string memory reason) = missionFactory.canEnroll(player);
+        require(allowed, reason);                                                                                   // Check if the player is allowed to enroll
+
         missionData.players.push(player);                                                                           // Add player to the players array
         enrolled[player] = true;                                                                                    // Mark player as enrolled
         missionData.ethStart    += msg.value;                                                                       // Update the starting ETH amount for the mission
         missionData.ethCurrent  += msg.value;                                                                       // Update the current ETH amount for the mission
+
+        missionFactory.recordEnrollment(player);                                                                    // Record the enrollment in the MissionFactory
+
         emit PlayerEnrolled(player, msg.value, uint256(missionData.players.length));                                // Emit PlayerEnrolled event with player address, amount, and total players count
         _setStatus(Status.Enrolling);                                                                               // Set mission status to Enrolling
     }
