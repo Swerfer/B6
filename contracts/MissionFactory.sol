@@ -151,6 +151,17 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         );
         _;
     }
+	
+	/**
+     * @dev Modifier that allows only a valid mission contract to call.
+     * This ensures that the caller is a contract that has been registered as a mission.
+     */
+	modifier onlyMission() {
+        require(
+			missionStatus[msg.sender] != Status(0), 
+			"MissionFactory: caller is not a valid mission contract");
+		_;
+	}
 
     // ────────────── State Variables ───────────────────
     /**
@@ -391,23 +402,18 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 
         if (allocation > 0 && address(this).balance >= allocation) {
             reservedFunds[_missionType] -= allocation;
-            (bool sent, ) = payable(clone).call{value: allocation}("");
-            require(sent, "Funding failed");
+            Mission(payable(clone)).increasePot{value: allocation}();								// Sends ETH and updates mission accounting
         }
 
-        return clone;						                                                         // Return the address of the newly created mission
+        return clone;						                                                        // Return the address of the newly created mission
     }
 
     /**
      * @dev Sets the status of a mission.
-     * @param missionAddress The address of the mission to update.
-     * @param status The new status to set for the mission.
+     * @param newStatus The new status to set for the mission.
      */
-    function setMissionStatus(address missionAddress, Status status) external onlyOwnerOrAuthorized {
-        require(missionAddress != address(0),                   "Invalid mission address");         // Ensure mission address is valid
-        require(missionStatus[missionAddress] != Status.Ended,  "Mission already ended");           // Ensure mission is not already ended
-        require(missionStatus[missionAddress] != Status.Failed, "Mission already failed");          // Ensure mission is not already failed
-        missionStatus[missionAddress] = status;                                                     // Update the mission status
+    function setMissionStatus(Status newStatus) external onlyMission {
+		missionStatus[msg.sender] = newStatus;                                                    	// Update the mission status
     } 
 
     // ──────────────── Financial Functions ─────────────
@@ -481,8 +487,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Returns the status of a mission.
      * @return all missions and their statuses.
      */
-    function getAllMissions() external view returns (address[] memory, Status[] memory)
-    {
+    function getAllMissions() external view returns (address[] memory, Status[] memory) {
         uint256 len = missions.length;
         address[] memory allMissions = new address[](len);
         Status[] memory allStatuses = new Status[](len);
@@ -501,8 +506,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param filter The status to filter missions by.
      * @return An array of mission addresses that match the specified status.
      */
-    function getMissionsByStatus(Status filter) external view returns (address[] memory)
-    {
+    function getMissionsByStatus(Status filter) external view returns (address[] memory) {
         uint256 len = missions.length;
         uint256 count;
  
@@ -593,7 +597,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 }
 
 // ───────────────── Contract Mission ───────────────────
-
 /**
  * @title Be Brave Be Bold Be Banked (B6) Mission Game Smart Contract
  * @notice This contract represents a single "Mission" in the game system deployed via MissionFactory.
@@ -687,6 +690,7 @@ contract Mission is Ownable, ReentrancyGuard {
     event RefundFailed          (address    indexed player,         uint256             amount                                              ); 
     event FailedRefund          (address    indexed player,         uint256             amount                                              );
     event MissionInitialized    (address    indexed owner,          MissionType indexed missionType,    uint256 timestamp                   );
+	event PotIncreased			(uint256			value,			uint256				ethCurrent											);
 
     // ──────────────────── Modifiers ───────────────────
     /**
@@ -823,10 +827,10 @@ contract Mission is Ownable, ReentrancyGuard {
      *      - Max players reached
      *      - Insufficient ETH sent
      */
-    function enrollPlayer(address player) external payable nonReentrant {
+    function enrollPlayer() external payable nonReentrant {
         // Logic to enroll a player in the mission
         // This function should check if the player can be enrolled based on the mission's rules
-        require(player != address(0),                                           "Invalid player address");          // Ensure player address is valid
+		address player = msg.sender;
         require(missionData.enrollmentStart <= block.timestamp,                 "Enrollment has not started yet");  // Ensure enrollment has started
         require(missionData.enrollmentEnd >= block.timestamp,                   "Enrollment has ended");            // Ensure enrollment has not ended  
         require(missionData.players.length < missionData.enrollmentMaxPlayers,  "Max players reached");             // Ensure max players limit is not exceeded
@@ -928,6 +932,17 @@ contract Mission is Ownable, ReentrancyGuard {
         _refundPlayers();                                                                                           // Call internal refund function
     }
     
+	/**
+     * @dev Add funds to prize pool.
+     */
+	function increasePot() external payable {
+		require(msg.value > 0, "No funds sent");
+		require(msg.sender == address(missionFactory), "Only factory can fund");
+		missionData.ethStart 	+= msg.value;
+		missionData.ethCurrent 	+= msg.value;
+		emit PotIncreased(msg.value, missionData.ethCurrent);
+	}
+
     /**
      * @notice Distributes remaining ETH after mission completion or failure.
      * @dev Sends:
@@ -990,7 +1005,7 @@ contract Mission is Ownable, ReentrancyGuard {
     function _setStatus(Status newStatus) internal {
         Status oldStatus = missionData.missionStatus;                                   // Store the old status
         missionData.missionStatus = newStatus;                                          // Update the mission status    
-        missionFactory.setMissionStatus(address(this), Status(newStatus));                   // Update the status in MissionFactory
+        missionFactory.setMissionStatus(newStatus);                   					// Update the status in MissionFactory
         if (newStatus == Status.Paused) {
             missionData.pauseTime = block.timestamp;                                    // Record the time when the mission was paused
             emit MissionPaused(block.timestamp);
