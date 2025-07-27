@@ -1,0 +1,8 @@
+{
+  "network": "cronos",
+  "deployer": "0x8fD91b46513485e7FbE153c5AF6057B9256F13bA",
+  "MissionFactory": "0x10cCD267621bdB51A03FCcc22653884Bd92956AC",
+  "MissionImplementation": "0x556a687Faa3CaC9dEB3b9ced205c67DDbcd38578",
+  "funded": "10 ETH",
+  "timestamp": "2025-07-27T08:53:20.882Z"
+}
