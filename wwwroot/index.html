@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Wallet Connect Test</title>
+
+  <!-- CSS -->
+  <link rel="stylesheet" href="css/style.css?v55">
+
+  <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet';">
+  <noscript>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+  </noscript>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/css/bootstrap.min.css">
+
+  <!-- Ethers + Web3Modal (lokale kopieën) -->
+  <script src="js/ethers.umd.min.js"></script>
+  <script src="js/web3modal.js"></script>
+
+  <!-- onze connect-logica -->
+  <script type="module" src="js/main.js?v55"></script>
+</head>
+  <body>
+    <!-- HEADER — fixed to top -->
+    <header class="app-header">
+      <div class="inner">
+        <h1 class="brand-line">Be Brave&nbsp;Be Bold&nbsp;Be Banked</h1>
+      </div>
+    </header>
+
+    <!-- MAIN — future DApp content goes here -->
+    <main id="app" class="app-main">
+      <!-- placeholder so you can see the scroll-area working -->
+      <p style="opacity:.3;">DApp content renders here …</p>
+    </main>
+
+    <!-- FOOTER — fixed to bottom -->
+    <footer class="app-footer">
+      <div class="inner">
+        <!-- span id needed by existing JS -->
+        <button id="connectWalletBtn" class="wallet-btn">
+          <span id="connectBtnText">Connect Wallet</span>
+        </button>
+      </div>
+    </footer>
+
+    <!-- REUSABLE MODAL -->
+    <div id="modalOverlay" class="modal-overlay">
+
+      <!-- Confirm (Yes / Cancel) -->
+      <div id="confirmModal" class="modal-box hidden">
+        <p id="modalMessage" class="mb-4"></p>
+        <div class="d-flex gap-3 justify-content-center">
+          <button id="modalConfirm" class="btn btn-cyan px-4">Yes</button>
+          <button id="modalCancel"  class="btn btn-outline-cyan px-4">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Alert (Info, Success, Warning, Error) -->
+      <div id="alertModal" class="modal-box hidden">
+        <h3 id="alertModalTitle" class="modal-title mb-3"></h3>
+        <p  id="alertModalText"  class="mb-4"></p>
+        <button id="alertModalCloseBtn" class="btn btn-cyan px-4">Close</button>
+      </div>
+
+    </div>
+
+    <!-- scripts (already in the <head>) -->
+  </body>
+</html>
