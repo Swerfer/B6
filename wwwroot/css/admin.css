@@ -1,0 +1,27 @@
+ /* --------------------------------------------------
+   Admin-only tweaks – complements global core.css
+-------------------------------------------------- */
+.admin-main{
+  padding-inline: 1rem;          /* softer gutters on mobile */
+}
+
+.section-box{
+  background:#0d1a28;            /* same as modal card */
+  border:1px solid rgba(255,255,255,.25);
+  border-radius:12px;
+  box-shadow:0 0 12px rgba(0,0,0,.45);
+  padding:24px 28px;
+  display:flex; flex-direction:column; gap:1rem;
+}
+
+.section-title{
+  font-size:1.25rem;
+  color:var(--cyan);
+  margin:0;
+}
+
+.placeholder-text{
+  opacity:.6;
+  font-style:italic;
+  margin:0;
+}

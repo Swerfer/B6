@@ -80,12 +80,5 @@ export function disconnectWallet(){
   connectBtnText.textContent = "Connect Wallet";
 }
 
-/* -------- public: auto-connect on load -------- */
-export async function autoConnectOnLoad(){
-  if(web3Modal.cachedProvider){
-    await connectWallet();      // re-uses same logic & error handling
-  }
-}
-
 /* run immediately */
 initWeb3Modal();

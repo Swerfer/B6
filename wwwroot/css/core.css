@@ -1,7 +1,9 @@
 /* ---------- BRAND COLOURS ---------- */
 :root {
   --navy:       #000818;
+  --blueish:    #1dbdf5;
   --cyan:       #00C0F0;
+  --white:      #FFFFFF;
   --navy-text:  #001e38;
 
   /* accent hues used by showAlert() */
@@ -18,7 +20,7 @@ html,body { height:100%; min-width:360px; }
 
 body, .app-main{                     
   background:var(--navy);            
-  color:#fff;
+  color:var(--white);
   font-family:"Arial Black", Impact, sans-serif;
   display:flex; flex-direction:column;
 }
@@ -33,7 +35,7 @@ body, .app-main{
 
 .brand-line{
   font-size:clamp(22px,4vw,42px);    /* larger ceiling */
-  font-weight:700; color:var(--cyan); white-space:nowrap; line-height:1;
+  font-weight:700; color:var(--white); white-space:nowrap; line-height:1;
 }
 
 /* ---------- MAIN ---------- */
@@ -44,6 +46,10 @@ body, .app-main{
   overflow-y:auto;
   display:flex; align-items:center; justify-content:center;
   text-align:center;
+}
+.subtitle{
+  color:var(--blueish);
+  font-size:smaller;
 }
 
 /* ---------- FOOTER ---------- */

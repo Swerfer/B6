@@ -1,0 +1,175 @@
+ <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Mission Admin</title>
+
+    <!-- GLOBAL & ADMIN STYLES -->
+    <link rel="stylesheet" href="css/core.css">      <!-- existing base -->
+    <link rel="stylesheet" href="css/admin.css">      <!-- new overrides -->
+
+    <!-- Font Awesome & Bootstrap (same as index.html) -->
+    <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"
+            as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"></noscript>
+    <link rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/css/bootstrap.min.css">
+
+    <!-- Ethers & Web3Modal (local copies you already serve) -->
+    <script src="js/ethers.umd.min.js"></script>
+    <script src="js/web3modal.js"></script>
+
+    <!-- Wallet module & this page’s logic -->
+    <script type="module" src="js/core.js"></script>
+    <script type="module" src="js/admin.js"></script>
+</head>
+
+<body>
+    <!-- HEADER (copied “as is” from index.html) -->
+    <header class="app-header">
+            <div class="inner">
+                <h1 class="brand-line">BE BRAVE&nbsp;&nbsp;BE BOLD&nbsp;&nbsp;BE BANKED</h1>
+            </div>
+    </header>
+
+    <!-- MAIN: three placeholder panels -->
+    <main class="app-main admin-main container-xl">
+            <div class="row g-4 w-100">
+
+                <!-- 1 ▸ Create missions manually -->
+                <section id="createMissionSection" class="col-12 section-box hidden">
+                    <h2 class="section-title">
+                        <i class="fa-solid fa-plus me-2"></i>Create Missions Manually
+                    </h2>
+
+                    <!-- ─────── form ─────── -->
+                    <form id="createMissionForm" class="row g-3 text-start">
+
+                        <div class="col-md-6">
+                        <label class="form-label" for="missionType">Mission Type</label>
+                        <select id="missionType" name="missionType" class="form-select" required>
+                            <option value="0">Custom</option>
+                            <option value="1">Hourly</option>
+                            <option value="2">Quarter-Daily</option>
+                            <option value="3">Bi-Daily</option>
+                            <option value="4">Daily</option>
+                            <option value="5">Weekly</option>
+                            <option value="6">Monthly</option>
+                        </select>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label" for="enrollmentAmount">Enrollment Fee&nbsp;(ETH)</label>
+                            <input id="enrollmentAmount" name="enrollmentAmount"
+                                type="number" step="any" min="0"
+                                inputmode="decimal" placeholder="e.g. 12.34"
+                                class="form-control" required>
+                        </div>
+
+                        <div class="col-lg-6">
+                        <label class="form-label" for="enrollmentStart">Enrollment Start</label>
+                            <input id="enrollmentStart" name="enrollmentStart" type="datetime-local"
+                                    class="form-control" required>
+                        </div>
+
+                        <div class="col-lg-6">
+                            <label class="form-label" for="enrollmentEnd">Enrollment End</label>
+                            <input id="enrollmentEnd" name="enrollmentEnd" type="datetime-local"
+                                    class="form-control" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label" for="minPlayers">Min Players</label>
+                            <input id="minPlayers" name="minPlayers" type="number" min="1"
+                                    class="form-control" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label" for="maxPlayers">Max Players</label>
+                            <input id="maxPlayers" name="maxPlayers" type="number" min="1"
+                                    class="form-control" required>
+                        </div>
+
+                        <div class="col-lg-6">
+                            <label class="form-label" for="missionStart">Mission Start</label>
+                            <input id="missionStart" name="missionStart" type="datetime-local"
+                                    class="form-control" required>
+                        </div>
+
+                        <div class="col-lg-6">
+                            <label class="form-label" for="missionEnd">Mission End</label>
+                            <input id="missionEnd" name="missionEnd" type="datetime-local"
+                                    class="form-control" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label" for="rounds">Total Rounds</label>
+                            <input id="rounds" name="rounds" type="number" min="5" class="form-control" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label" for="initialPot">Initial&nbsp;Pot&nbsp;(ETH sent with&nbsp;tx)</label>
+                            <input id="initialPot" name="initialPot"
+                                type="number" step="any" min="0"
+                                inputmode="decimal" placeholder="0 (optional)"
+                                class="form-control" required>
+                        </div>
+
+                        <div class="col-12 d-flex justify-content-end">
+                            <button type="submit" class="btn btn-cyan px-4">
+                                <i class="fa-solid fa-rocket-launch me-2"></i>Create Mission
+                            </button>
+                        </div>
+                    </form>
+                </section>
+
+                <!-- 2 ▸ onlyOwner / authorized calls -->
+                <section class="col-12 section-box hidden">
+                    <h2 class="section-title">
+                        <i class="fa-solid fa-user-shield me-2"></i>Owner / Authorized Functions
+                    </h2>
+                    <p class="placeholder-text">Buttons & inputs will appear here.</p>
+                </section>
+
+                <!-- 3 ▸ view functions -->
+                <section class="col-12 section-box hidden">
+                    <h2 class="section-title">
+                        <i class="fa-solid fa-eye me-2"></i>Read-Only Views
+                    </h2>
+                    <p class="placeholder-text">Tables & stats will render here.</p>
+                </section>
+
+            </div>
+    </main>
+
+    <!-- FOOTER (same as index.html) -->
+    <footer class="app-footer">
+        <div class="inner">
+            <button id="connectWalletBtn" class="wallet-btn">
+                <span id="connectBtnText">Connect Wallet</span>
+            </button>
+        </div>
+    </footer>
+
+    <!-- REUSABLE MODALS (identical markup) -->
+    <div id="modalOverlay" class="modal-overlay">
+
+        <div id="confirmModal" class="modal-box hidden">
+            <p id="modalMessage" class="mb-4"></p>
+            <div class="d-flex gap-3 justify-content-center">
+                <button id="modalConfirm" class="btn btn-cyan px-4">Yes</button>
+                <button id="modalCancel"  class="btn btn-outline-cyan px-4">Cancel</button>
+            </div>
+        </div>
+
+        <div id="alertModal" class="modal-box hidden">
+            <h3 id="alertModalTitle" class="modal-title mb-3"></h3>
+            <p  id="alertModalText"  class="mb-4"></p>
+            <button id="alertModalCloseBtn" class="btn btn-cyan px-4">Close</button>
+        </div>
+
+    </div>
+</body>
+</html>
