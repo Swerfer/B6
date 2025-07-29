@@ -139,8 +139,33 @@ form?.addEventListener("submit", async e => {
     await tx.wait();
     showAlert("Mission created successfully!","success");
     form.reset();
-  }catch(err){
-    console.error(err);
-    showAlert(err?.data?.message || err.message,"error");
-  }
+    }catch (err){
+        console.error(err);
+
+        /* ---------- extract a meaningful revert reason ---------- */
+        let msg =
+                /* 1 ▸ common MetaMask shape                                 */
+                err?.data?.message
+            || err?.error?.data?.message
+            || err?.reason
+            /* 2 ▸ ethers.js ProviderError                                 */
+            || err?.error?.message
+            || null;
+
+        /* 3 ▸ last-resort: decode raw `Error(string)` ABI data (0x08c379a0…) */
+        if (!msg){
+            const hexData = err?.data?.originalError?.data
+                        || err?.data
+                        || err?.error?.data;
+            if (hexData && hexData.startsWith("0x08c379a0")){
+            try{
+                const iface = new ethers.utils.Interface(["function Error(string)"]);
+                msg = iface.decodeFunctionData("Error", hexData)[0];
+            }catch{/* ignore – fall through */}
+            }
+        }
+
+        if (!msg) msg = err.message || "Transaction failed";
+        showAlert(msg, "error");
+    }
 });

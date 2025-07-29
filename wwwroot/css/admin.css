@@ -3,6 +3,7 @@
 -------------------------------------------------- */
 .admin-main{
   padding-inline: 1rem;          /* softer gutters on mobile */
+  justify-content: flex-start;
 }
 
 .section-box{
