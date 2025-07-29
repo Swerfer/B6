@@ -61,10 +61,10 @@
                         </div>
 
                         <div class="col-md-6">
-                            <label class="form-label" for="enrollmentAmount">Enrollment Fee&nbsp;(ETH)</label>
-                            <input id="enrollmentAmount" name="enrollmentAmount"
-                                type="number" step="any" min="0"
-                                inputmode="decimal" placeholder="e.g. 12.34"
+                            <label class="form-label" for="initialPot">Initial&nbsp;Pot&nbsp;(ETH sent with&nbsp;tx)</label>
+                            <input id="initialPot" name="initialPot"
+                                type="number" step="any" min="10"
+                                inputmode="decimal" placeholder="10 (minimum)"
                                 class="form-control" required>
                         </div>
 
@@ -77,18 +77,6 @@
                         <div class="col-lg-6">
                             <label class="form-label" for="enrollmentEnd">Enrollment End</label>
                             <input id="enrollmentEnd" name="enrollmentEnd" type="datetime-local"
-                                    class="form-control" required>
-                        </div>
-
-                        <div class="col-md-6">
-                            <label class="form-label" for="minPlayers">Min Players</label>
-                            <input id="minPlayers" name="minPlayers" type="number" min="1"
-                                    class="form-control" required>
-                        </div>
-
-                        <div class="col-md-6">
-                            <label class="form-label" for="maxPlayers">Max Players</label>
-                            <input id="maxPlayers" name="maxPlayers" type="number" min="1"
                                     class="form-control" required>
                         </div>
 
@@ -105,15 +93,28 @@
                         </div>
 
                         <div class="col-md-6">
-                            <label class="form-label" for="rounds">Total Rounds</label>
-                            <input id="rounds" name="rounds" type="number" min="5" class="form-control" required>
+                            <label class="form-label" for="minPlayers">Min Players</label>
+                            <input id="minPlayers" name="minPlayers" type="number" min="5" placeholder=">= Misson Rounds"
+                                    class="form-control" required>
                         </div>
 
                         <div class="col-md-6">
-                            <label class="form-label" for="initialPot">Initial&nbsp;Pot&nbsp;(ETH sent with&nbsp;tx)</label>
-                            <input id="initialPot" name="initialPot"
+                            <label class="form-label" for="maxPlayers">Max Players</label>
+                            <input id="maxPlayers" name="maxPlayers" type="number" min="5" placeholder=">= Min Players"
+                                    class="form-control" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label" for="rounds">Mission Rounds</label>
+                            <input id="rounds" name="rounds" type="number" min="5" placeholder=">= 5"
+                                    class="form-control" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label" for="enrollmentAmount">Enrollment Fee&nbsp;(ETH)</label>
+                            <input id="enrollmentAmount" name="enrollmentAmount"
                                 type="number" step="any" min="0"
-                                inputmode="decimal" placeholder="0 (optional)"
+                                inputmode="decimal" placeholder="e.g. 12.34"
                                 class="form-control" required>
                         </div>
 

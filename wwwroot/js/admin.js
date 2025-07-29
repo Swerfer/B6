@@ -5,7 +5,8 @@ import { connectWallet, disconnectWallet, walletAddress } from "./walletConnect.
 import { showAlert, showConfirm } from "./core.js";
 
 /* ---------- constants ---------- */
-const FACTORY_ADDRESS = "0x10cCD267621bdB51A03FCcc22653884Bd92956AC";    
+const FACTORY_ADDRESS = "0x10cCD267621bdB51A03FCcc22653884Bd92956AC";
+const READ_ONLY_RPC   = "https://evm.cronos.org";   
 const FACTORY_ABI = [
   "function owner() view returns(address)",
   "function authorized(address) view returns(bool)",
@@ -27,6 +28,7 @@ function toggleSections(show){
 
 /* ---------- role check ---------- */
 async function isOwnerOrAuthorized(addr){
+  /* 1 — try via the wallet’s provider (requires the account to be “connected”) */
   try{
     const provider = new ethers.providers.Web3Provider(window.ethereum);
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
@@ -35,9 +37,25 @@ async function isOwnerOrAuthorized(addr){
       factory.authorized(addr)
     ]);
     return ownerAddr.toLowerCase() === addr || isAuth;
-  }catch(e){
-    console.error(e);
-    return false;
+  }catch(err){
+    /* MetaMask throws “dapp not connected” when the new account hasn’t granted access.
+       We silently fall back to a public RPC for a read-only check. */
+    if (String(err?.message).includes("dapp not connected")){
+      try{
+        const fallback  = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+        const factory   = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, fallback);
+        const [ownerAddr, isAuth] = await Promise.all([
+          factory.owner(),
+          factory.authorized(addr)
+        ]);
+        return ownerAddr.toLowerCase() === addr || isAuth;
+      }catch(e2){
+        console.warn("Read-only RPC failed:", e2.message);
+      }
+    } else {
+      console.warn(err.message);
+    }
+    return false;   // default: not owner / not authorized
   }
 }
 
@@ -54,17 +72,33 @@ connectBtn.addEventListener("click", () => {
 });
 
 /* ---------- after connect / account change ---------- */
-async function handlePostConnect(){
-  if(!walletAddress) return;
-  const allowed = await isOwnerOrAuthorized(walletAddress);
+async function handlePostConnect(addrOverride){
+  /* use the override (from the MetaMask event) or fall back to the
+     live-exported walletAddress coming from walletConnect.js */
+  const addr = addrOverride || walletAddress;
+  if(!addr){
+    toggleSections(false);
+    return;
+  }
+
+  const allowed = await isOwnerOrAuthorized(addr);
   toggleSections(allowed);
   if(!allowed){
-    showAlert("Connected wallet is neither <b>owner</b> nor <b>authorized</b>.","warning");
+    showAlert(
+      "Connected wallet is neither <b>owner</b> nor <b>authorized</b>.",
+      "warning"
+    );
   }
 }
 
+/* ---------- MetaMask account change ---------- */
 if(window.ethereum){
-  window.ethereum.on("accountsChanged", handlePostConnect);
+  window.ethereum.on("accountsChanged", accounts => {
+    /* walletConnect.js updates its export asynchronously, so we
+       pass the new address directly and wait one tick to be safe */
+    const newAddr = accounts[0] ? accounts[0].toLowerCase() : null;
+    setTimeout(() => handlePostConnect(newAddr), 0);
+  });
 }
 
 /* ---------- auto-connect on page load ---------- */
