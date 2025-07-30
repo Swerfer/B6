@@ -1,17 +1,19 @@
 /**********************************************************************
  admin.js – admin page logic (createMission + section gating)
 **********************************************************************/
-import { connectWallet, disconnectWallet, walletAddress } from "./walletConnect.js";
-import { showAlert, showConfirm } from "./core.js";
+import { 
+    connectWallet, 
+    disconnectWallet, 
+    walletAddress 
+} from "./walletConnect.js";
 
-/* ---------- constants ---------- */
-const FACTORY_ADDRESS = "0xe1A460cD14c6A02E0BE4AC620DfC7CD3fFD63B7a";
-const READ_ONLY_RPC   = "https://evm.cronos.org";   
-const FACTORY_ABI = [
-  "function owner() view returns(address)",
-  "function authorized(address) view returns(bool)",
-  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8) payable returns(address)"
-];
+import { 
+    FACTORY_ADDRESS, 
+    READ_ONLY_RPC, 
+    FACTORY_ABI, 
+    showAlert, 
+    showConfirm  
+} from "./core.js";
 
 /* ---------- DOM ---------- */
 const connectBtn     = document.getElementById("connectWalletBtn");

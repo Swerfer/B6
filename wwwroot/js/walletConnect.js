@@ -1,6 +1,7 @@
 /*--------------------------------------------------------------------
   walletConnect.js – all wallet / Web3Modal logic
 --------------------------------------------------------------------*/
+import { showAlert } from "./core.js";
 export let walletAddress = null;        // live export
 let web3Modal, provider, signer;
 

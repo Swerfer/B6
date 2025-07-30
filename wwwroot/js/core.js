@@ -1,6 +1,15 @@
 /**********************************************************************
  core.js  – shared UI utilities (modals, shortener, global caches)
 **********************************************************************/
+export const FACTORY_ADDRESS = "0xe1A460cD14c6A02E0BE4AC620DfC7CD3fFD63B7a";
+export const READ_ONLY_RPC   = "https://evm.cronos.org";
+
+export const FACTORY_ABI = [
+  "function owner() view returns(address)",
+  "function authorized(address) view returns(bool)",
+  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8) payable returns(address)"
+];
+
 export const shorten = addr =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
 
