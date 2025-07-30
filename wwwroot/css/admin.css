@@ -2,8 +2,18 @@
    Admin-only tweaks – complements global core.css
 -------------------------------------------------- */
 .admin-main{
-  padding-inline: 1rem;          /* softer gutters on mobile */
-  justify-content: flex-start;
+  padding-inline: 1rem;          /* softer gutters on mobile          */
+  justify-content: flex-start;   /* content sticks to the top         */
+}
+
+/* centred notice shown to non-authorised wallets */
+.unauth-notice{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  min-height:60vh;
+  text-align:center;
 }
 
 .section-box{

@@ -2,83 +2,76 @@
 pragma solidity ^0.8.30;
 
 /**
- * @title Be Brave Be Bold Be Banked (B6) Mission Game Smart Contract
- * @notice This contract represents a single "Mission" in the game system deployed via MissionFactory.
+ * @title   Be Brave Be Bold Be Banked (B6) – Mission & Factory Architecture
+ * @author  B6 Labs – Swerfer
+ * @notice
+ *  ▸ **Mission** – an on-chain, time-boxed competition where players enroll
+ *    by paying a fixed ETH fee and race through multiple payout rounds.  
+ *  ▸ **MissionFactory** – the manager contract that deploys Mission clones,
+ *    enforces enrolment limits, routes fees, and recycles funds for future
+ *    games.  Each Mission clone is created with `clone.initialize(...)`
+ *    and thereafter calls back into the factory for bookkeeping.
  *
- * ## 📖 Overview
- * A Mission is a time-based competitive game where players enroll by paying a fixed ETH amount
- * during the enrollment period. Once the mission starts, players compete in multiple rounds
- * to win portions of the prize pool. The game ends when all rounds are claimed or when
- * the mission duration expires.
+ * ## 📖 Mission Overview
+ * A Mission is a competitive game with three consecutive phases:
  *
- * ## 🎮 Game Rules
+ * 1. **Enrollment** (`enrollmentStart → enrollmentEnd`)  
+ *    • Players pay `enrollmentAmount` once.  
+ *    • Anti-addiction limits: max `weeklyLimit` per 7 days & `monthlyLimit`
+ *      per 30 days – enforced by the factory.  
+ *    • Mission requires `enrollmentMinPlayers` to arm; max is
+ *      `enrollmentMaxPlayers`.
  *
- * 1. **Enrollment Phase**
- *    - Starts at `enrollmentStart` and ends at `enrollmentEnd`.
- *    - Players pay `enrollmentAmount` to enroll.
- *    - Each address can enroll only once.
- *    - Each player is checked if they can enroll based on anti-addiction limits:
- *        - Weekly limit:  `weeklyLimit`  missions.
- *        - Monthly limit: `monthlyLimit` missions.
- *    - Enrollment succeeds only if the enrollment window is open and max players not reached.
+ * 2. **Active** (`missionStart → missionEnd`)  
+ *    • Consists of `missionRounds` payout rounds.  
+ *    • A cooldown: 5 min after normal rounds, 1 min before the final round.  
+ *    • A player can win **once per mission**.  
+ *    • Each round’s payout = time-progress since last claim × `ethStart` / 100.
  *
- * 2. **Start Conditions**
- *    - After `enrollmentEnd`, mission can only start if `enrollmentMinPlayers` is met.
- *    - If conditions fail, mission is marked as `Failed` and refunds are processed.
+ * 3. **End / Settle**  
+ *    • Ends when all rounds are claimed **or** `missionEnd` passes.  
+ *    • Owner/authorized may call `forceFinalizeMission()` if necessary.  
+ *    • Remaining ETH is distributed via `_withdrawFunds()`.
  *
- * 3. **Mission Phases**
- *    - **Active Phase**: Mission starts at `missionStart` and runs until `missionEnd`.
- *    - Mission consists of `missionRounds` rounds.
- *    - Each round can only be called after a cooldown:
- *        - **Normal rounds**: 5-minute pause after each round.
- *        - **Final round**: 1-minute pause before last round.
- *    - A player can only win **once per mission**.
+ * ## 🏭 MissionFactory Responsibilities
+ * • **Deployment** – clones the Mission implementation (EIP-1167) and sends
+ *   initial seed ETH.  
+ * • **Status Tracking** – every Mission reports its status back via
+ *   `setMissionStatus`; the factory stores this for dashboards and queries.  
+ * • **Enrollment Limits** – global weekly / monthly caps checked in
+ *   `canEnroll()` and recorded with `recordEnrollment()`.  
+ * • **Reserved Funds Pool** – collects 75 % of leftover ETH from finished
+ *   missions and redistributes part of it to newly-created games.  
+ * • **Authorization Layer** – owner can whitelist helpers; `onlyOwnerOrAuthorized`
+ *   guards all admin actions (create, withdraw, config).  
+ * • **Registry** – `isMission[addr]` and `missionStatus[addr]` let the factory
+ *   authenticate mission callbacks and list active / ended missions.
  *
- * 4. **Round Payouts**
- *    - Prize pool starts as `ethStart` (initial ETH funding).
- *    - At each round, payout = (progress since last round) * `ethStart` / 100.
- *    - Progress = % of total mission duration elapsed since last claim.
- *    - Example:
- *        - If 10% of time passed since last claim, 10% of `ethStart` is paid out.
- *    - Remaining ETH after final round is swept during withdrawal.
+ * ## 💰 Fee Split
+ * • 25 % of post-game pot → factory owner.  
+ * • 75 %                  → factory reserve (`reservedFunds[missionType]`).
  *
- * 5. **Mission End**
- *    - Mission ends when:
- *        - All rounds claimed OR
- *        - `missionEnd` timestamp reached.
- *    - If time expires with incomplete rounds:
- *        - Owner/authorized can call `forceFinalizeMission()`:
- *            - If some rounds called → Remaining ETH is swept during withdrawal.
- *            - If no rounds called → Mission is marked as `Failed`, all players refunded.
- *
- * 6. **Fees**
- *    - After mission completion (or failure):
- *        - 25% of remaining ETH → factory owner.
- *        - 75% → MissionFactory for future missions (reservedFunds).
- *    - Payout is processed in `_withdrawFunds()`.
- *
- * 7. **Refund Logic**
- *    - If mission fails (not enough players), all enrolled players get refunded.
- *    - If a refund fails (e.g., non-payable address), the amount is tracked in `failedRefundAmounts`.
- *    - Failed refunds are excluded from normal withdrawals unless `force = true` in `_withdrawFunds()`.
+ * ## 🔄 Refund & Failure Logic
+ * • If a mission never arms (not enough players) all enrollments are refunded.  
+ * • If ETH transfers to players fail, amounts are parked in
+ *   `failedRefundAmounts`; .
  *
  * ## ⚠️ Key Constraints
- * - `missionRounds` must be >= enrollmentMinPlayers.
- * - A player can only win once per mission.
+ * • `missionRounds` ≥ `enrollmentMinPlayers`.  
+ * • A player can win at most once per mission.
  *
- * ## 🛠 Admin Functions
- * - Owner or authorized can:
- *    - Force finalize the mission after time expiry.
- *    - Withdraw leftover funds after mission end/failure.
+ * ## 🛠 Admin Functions (Mission level)
+ * • `armMission`, `forceFinalizeMission`, `withdrawFunds`, `refundPlayers`.
  *
  * ## ✅ Security
- * - Uses OpenZeppelin ReentrancyGuard for state-changing functions.
- * - ETH transfers use `.call{value: ...}` to prevent gas griefing.
- * - Refund failures are logged and tracked for later withdrawal.
+ * • OpenZeppelin **Ownable** + **ReentrancyGuard**.  
+ * • ETH transfers via `.call{value: …}` to forward all gas and avoid
+ *   griefing.  
+ * • Factory verifies that callbacks come from registered missions
+ *   (`onlyMission`).
  *
- * @dev This contract is deployed as a clone (minimal proxy) by MissionFactory.
+ * @dev Each Mission is an EIP-1167 minimal proxy deployed by MissionFactory.
  */
-
 // ───────────────────── Imports ────────────────────────
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/proxy/Clones.sol";
@@ -113,13 +106,6 @@ enum Status {
 }
 
 // ────────────── Contract MissionFactory────────────────
-/** 
- * @title   MissionFactory
- * @author  Dennis Bakker
- * @notice  Factory contract for creating and managing missions.
- *          It allows authorized addresses to create missions, manage funds, and track mission statuses.
- * @dev     Uses OpenZeppelin's Ownable and ReentrancyGuard for security and ownership management.
- */
 contract MissionFactory is Ownable, ReentrancyGuard {
     using Clones    for address;
     
@@ -157,10 +143,11 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
 	modifier onlyMission() {
         require(
-			missionStatus[msg.sender] != Status(0), 
-			"MissionFactory: caller is not a valid mission contract");
-		_;
-	}
+            isMission[msg.sender],                                          // ← simple boolean lookup
+            "MissionFactory: caller is not a valid mission contract"
+        );
+        _;
+    }
 
     // ────────────── State Variables ───────────────────
     /**
@@ -170,6 +157,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     mapping(address => bool)                public  authorized;             // Mapping to track authorized addresses
     mapping(MissionType => uint256)         public  reservedFunds;          // Track funds by type
     mapping(address => Status)              public  missionStatus;          // Mapping to hold the status of each mission
+    mapping(address => bool)                public  isMission;              // ↪ quick “is this address a mission?” lookup
     address[]                               public  missions;               // Array to hold all mission addresses
     address                                 public  missionImplementation;  // Address of the Mission implementation contract for creating new missions
     mapping(address => OwnershipProposal)   public  ownershipProposals;     // Mapping to hold ownership proposals
@@ -360,6 +348,9 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 
 			address clone = missionImplementation.clone(); 	    // EIP-1167 minimal proxy
 
+            isMission[clone]     = true;                        // mark as a valid mission
+            missionStatus[clone] = Status.Pending;              // placeholder so first callback passes onlyMission
+
             Mission(payable(clone)).initialize{value: msg.value} (
 				owner(),									    // Set the owner of the mission to the owner of MissionFactory
 				address(this),								    // Set the MissionFactory address
@@ -403,8 +394,10 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param missionType The type of the mission.
      */
     function registerMissionFunds(uint256 amount, MissionType missionType) external {
-        require(amount > 0,                                                                                 "Amount must be greater than zero");    // Ensure the amount is greater than zero
-        require(missionStatus[msg.sender] == Status.Ended || missionStatus[msg.sender] == Status.Failed,    "Caller is not a valid mission");       // Ensure the caller is a valid mission
+        require(amount > 0, "Amount must be greater than zero");
+        bool isEndedMission = missionStatus[msg.sender] == Status.Ended || missionStatus[msg.sender] == Status.Failed;
+        bool isAdmin        = msg.sender == owner() || authorized[msg.sender];
+        require(isEndedMission || isAdmin, "Caller not a mission or admin");
         reservedFunds[missionType] += amount;
         emit MissionFundsRegistered(amount, missionType, msg.sender);
     }
@@ -596,84 +589,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 }
 
 // ───────────────── Contract Mission ───────────────────
-/**
- * @title Be Brave Be Bold Be Banked (B6) Mission Game Smart Contract
- * @notice This contract represents a single "Mission" in the game system deployed via MissionFactory.
- *
- * ## 📖 Overview
- * A Mission is a time-based competitive game where players enroll by paying a fixed ETH amount
- * during the enrollment period. Once the mission starts, players compete in multiple rounds
- * to win portions of the prize pool. The game ends when all rounds are claimed or when
- * the mission duration expires.
- *
- * ## 🎮 Game Rules
- *
- * 1. **Enrollment Phase**
- *    - Starts at `enrollmentStart` and ends at `enrollmentEnd`.
- *    - Players pay `enrollmentAmount` to enroll.
- *    - Each address can enroll only once.
- *    - Each player is checked if they can enroll based on anti-addiction limits:
- *        - Weekly limit:  `weeklyLimit`  missions.
- *        - Monthly limit: `monthlyLimit` missions.
- *    - Enrollment succeeds only if the enrollment window is open and max players not reached.
- *
- * 2. **Start Conditions**
- *    - After `enrollmentEnd`, mission can only start if `enrollmentMinPlayers` is met.
- *    - If conditions fail, mission is marked as `Failed` and refunds are processed.
- *
- * 3. **Mission Phases**
- *    - **Active Phase**: Mission starts at `missionStart` and runs until `missionEnd`.
- *    - Mission consists of `missionRounds` rounds.
- *    - Each round can only be called after a cooldown:
- *        - **Normal rounds**: 5-minute pause after each round.
- *        - **Final round**: 1-minute pause before last round.
- *    - A player can only win **once per mission**.
- *
- * 4. **Round Payouts**
- *    - Prize pool starts as `ethStart` (initial ETH funding).
- *    - At each round, payout = (progress since last round) * `ethStart` / 100.
- *    - Progress = % of total mission duration elapsed since last claim.
- *    - Example:
- *        - If 10% of time passed since last claim, 10% of `ethStart` is paid out.
- *    - Remaining ETH after final round is swept during withdrawal.
- *
- * 5. **Mission End**
- *    - Mission ends when:
- *        - All rounds claimed OR
- *        - `missionEnd` timestamp reached.
- *    - If time expires with incomplete rounds:
- *        - Owner/authorized can call `forceFinalizeMission()`:
- *            - If some rounds called → Remaining ETH is swept during withdrawal.
- *            - If no rounds called → Mission is marked as `Failed`, all players refunded.
- *
- * 6. **Fees**
- *    - After mission completion (or failure):
- *        - 25% of remaining ETH → factory owner.
- *        - 75% → MissionFactory for future missions (reservedFunds).
- *    - Payout is processed in `_withdrawFunds()`.
- *
- * 7. **Refund Logic**
- *    - If mission fails (not enough players), all enrolled players get refunded.
- *    - If a refund fails (e.g., non-payable address), the amount is tracked in `failedRefundAmounts`.
- *    - Failed refunds are excluded from normal withdrawals unless `force = true` in `_withdrawFunds()`.
- *
- * ## ⚠️ Key Constraints
- * - `missionRounds` must be >= enrollmentMinPlayers.
- * - A player can only win once per mission.
- *
- * ## 🛠 Admin Functions
- * - Owner or authorized can:
- *    - Force finalize the mission after time expiry.
- *    - Withdraw leftover funds after mission end/failure.
- *
- * ## ✅ Security
- * - Uses OpenZeppelin ReentrancyGuard for state-changing functions.
- * - ETH transfers use `.call{value: ...}` to prevent gas griefing.
- * - Refund failures are logged and tracked for later withdrawal.
- *
- * @dev This contract is deployed as a clone (minimal proxy) by MissionFactory.
- */
-
 contract Mission is Ownable, ReentrancyGuard {
     
     // ───────────────────── Events ─────────────────────
@@ -843,10 +758,12 @@ contract Mission is Ownable, ReentrancyGuard {
         missionData.ethStart    += msg.value;                                                                       // Update the starting ETH amount for the mission
         missionData.ethCurrent  += msg.value;                                                                       // Update the current ETH amount for the mission
 
+        /* set status first so factory sees “Enrolling” */
+        _setStatus(Status.Enrolling);                                                                               // Set mission status to Enrolling
+
         missionFactory.recordEnrollment(player);                                                                    // Record the enrollment in the MissionFactory
 
         emit PlayerEnrolled(player, msg.value, uint256(missionData.players.length));                                // Emit PlayerEnrolled event with player address, amount, and total players count
-        _setStatus(Status.Enrolling);                                                                               // Set mission status to Enrolling
     }
 
     /**

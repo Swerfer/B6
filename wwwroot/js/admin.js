@@ -5,7 +5,7 @@ import { connectWallet, disconnectWallet, walletAddress } from "./walletConnect.
 import { showAlert, showConfirm } from "./core.js";
 
 /* ---------- constants ---------- */
-const FACTORY_ADDRESS = "0x10cCD267621bdB51A03FCcc22653884Bd92956AC";
+const FACTORY_ADDRESS = "0xe1A460cD14c6A02E0BE4AC620DfC7CD3fFD63B7a";
 const READ_ONLY_RPC   = "https://evm.cronos.org";   
 const FACTORY_ABI = [
   "function owner() view returns(address)",
@@ -16,6 +16,7 @@ const FACTORY_ABI = [
 /* ---------- DOM ---------- */
 const connectBtn     = document.getElementById("connectWalletBtn");
 const adminSections  = document.querySelectorAll(".section-box");
+const unauth         = document.getElementById("unauthNotice");
 const form           = document.getElementById("createMissionForm");
 
 /* ---------- helpers ---------- */
@@ -23,7 +24,10 @@ const toUnix = iso => Math.floor(new Date(iso).getTime() / 1000);
 const eth    = ethers.utils;                       // alias
 
 function toggleSections(show){
+  /* show/hide the three admin panels */
   adminSections.forEach(sec => sec.classList.toggle("hidden", !show));
+  /* invert visibility for the friendly notice */
+  if (unauth) unauth.classList.toggle("hidden", show);
 }
 
 /* ---------- role check ---------- */
@@ -85,8 +89,8 @@ async function handlePostConnect(addrOverride){
   toggleSections(allowed);
   if(!allowed){
     showAlert(
-      "Connected wallet is neither <b>owner</b> nor <b>authorized</b>.",
-      "warning"
+      `This wallet is neither from an <b>owner</b> nor from an <b>authorized</b>.`, 'warning',
+      () => disconnectWallet()          // ← run only after the user clicks “OK”
     );
   }
 }
@@ -140,7 +144,6 @@ form?.addEventListener("submit", async e => {
     showAlert("Mission created successfully!","success");
     form.reset();
     }catch (err){
-        console.error(err);
 
         /* ---------- extract a meaningful revert reason ---------- */
         let msg =

@@ -38,8 +38,19 @@
     <main class="app-main admin-main container-xl">
             <div class="row g-4 w-100">
 
+                <!-- friendly notice for non-authorized visitors -->
+                <div id="unauthNotice" class="unauth-notice">
+                    <h2 class="mb-3">Admin Console</h2>
+                    <p class="mb-4">
+                        This area is for mission owners and authorised operators only.<br>
+                        Please connect an authorised wallet or&nbsp;
+                        <a href="../index.html" class="link-cyan">return to the homepage</a>.
+                    </p>
+                </div>
+
                 <!-- 1 ▸ Create missions manually -->
                 <section id="createMissionSection" class="col-12 section-box hidden">
+
                     <h2 class="section-title">
                         <i class="fa-solid fa-plus me-2"></i>Create Missions Manually
                     </h2>
