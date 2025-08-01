@@ -294,10 +294,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     function recordEnrollment(address user)                                 external {
         uint256 nowTs = block.timestamp;                                            // Get the current timestamp
         require(missionStatus[msg.sender] == Status.Enrolling, "Invalid caller");   // Ensure the caller is in the Enrolling status
-        (bool allowed, string memory reason) = canEnroll(user);                     // Check if the user can enroll based on anti-addiction limits
-        require(allowed, reason);                                                   // If not allowed, revert with the reason 
 
-        // Prune old entries (>30 days)
         uint256 cutoff = nowTs - 30 days;                                           // Calculate the cutoff timestamp for pruning  
         uint256[] storage history = enrollmentHistory[user];                        // Get the user's enrollment history    
         uint256 i = 0;
@@ -1122,6 +1119,7 @@ contract Mission is Ownable, ReentrancyGuard {
      * @return The pending payout amount for the player, or 0 if not applicable.
      */
     function pendingPayout(address player) external view returns (uint256) {
+        uint256 nowTs = block.timestamp;                                        // Get the current timestamp
         Status s = _getRealtimeStatus();                                        // Get the current real-time status of the mission
         if (s != Status.Active && s != Status.Paused) {
             return 0;                                                           // If the mission is not Active or Paused, return 0 pending payout
@@ -1132,8 +1130,14 @@ contract Mission is Ownable, ReentrancyGuard {
         if (hasWon[player]) {
             return 0;                                                           // If the player has already won, return 0 pending payout
         }
+        if (nowTs < missionData.missionStart) {
+            return 0;                                                           // If the mission has not started, return 0 pending payout
+        }
+        if (nowTs >= missionData.missionEnd) {
+            return 0;                                                           // If the mission has ended, return 0 pending payout
+        }
+        uint256 progress = (nowTs - missionData.missionStart) * 100 / (missionData.missionEnd - missionData.missionStart);  // Calculate progress percentage based on elapsed time
 
-        uint256 progress = currentProgressPct();                                // Get the current progress percentage of the mission
         uint256 lastAmt = missionData.playersWon.length > 0                     // Get the last payout amount, or 0 if no payouts have been made
             ? missionData.playersWon[missionData.playersWon.length-1].amountWon
             : 0;
