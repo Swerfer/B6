@@ -65,7 +65,8 @@ Publish contract(s):
 
     npx hardhat compile
     npx hardhat run scripts/deployAll.js
-
+ 
 For Cronoscan verification:
 
-    npx hardhat verify --network cronos <contract address> (both MissionFactory as Mission addresses, so 2 times calling verify)
+    npx hardhat verify --network cronos <factory address> <implementation address> 
+    npx hardhat verify --network cronos <mission address>

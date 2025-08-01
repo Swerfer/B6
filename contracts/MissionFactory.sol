@@ -167,7 +167,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     mapping(address => Status)              public  missionStatus;          // Mapping to hold the status of each mission
     mapping(address => bool)                public  isMission;              // ↪ quick “is this address a mission?” lookup
     address[]                               public  missions;               // Array to hold all mission addresses
-    address                                 public  missionImplementation;  // Address of the Mission implementation contract for creating new missions
+    address                                 public immutable missionImplementation;  // Address of the Mission implementation contract for creating new missions
     mapping(address => OwnershipProposal)   public  ownershipProposals;     // Mapping to hold ownership proposals
     uint256                                 public constant OWNERSHIP_PROPOSAL_WINDOW = 1 days; // Duration for ownership proposal validity
     mapping(address => uint256[])           private enrollmentHistory;      // store timestamps
@@ -189,17 +189,17 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Struct to hold information about players who won the mission.
      * Contains the player's address and the amount they won.
      */
-    constructor() Ownable(msg.sender) {
-		Mission impl = new Mission();           // Deploy the Mission implementation contract
-        impl.transferOwnership(address(0));     // Transfer ownership to zero address to prevent misuse
-        missionImplementation = address(impl);  // Set the implementation address for creating new missions
-	}
+    constructor(address _impl) Ownable(msg.sender) {
+        require(_impl != address(0), "impl zero");
+        missionImplementation = _impl;
+    }
 
     // ────────────────── Helper functions ──────────────
     /**
-     * @dev Returns the current real-time status of the mission.
-     * This function retrieves the status of the mission based on its current state.
-     * @return seconds The current status of the mission.
+     * @dev Returns the time until the next weekly slot for a user.
+     * This function calculates the time remaining until the next weekly slot based on the user's enrollment history.
+     * @param user The address of the user to check.
+     * @return The number of seconds until the next weekly slot.
      */
     function secondsTillWeeklySlot(address user)                            external view returns (uint256) {
         uint256 nowTs = block.timestamp;                                // Get the current timestamp
@@ -214,10 +214,10 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Returns the time until the next weekly slot for a user.
-     * This function calculates the time remaining until the next weekly slot based on the user's enrollment history.
+     * @dev Returns the time until the next monthly slot for a user.
+     * This function calculates the time remaining until the next monthly slot based on the user's enrollment history.
      * @param user The address of the user to check.
-     * @return seconds The number of seconds until the next weekly slot.
+     * @return The number of seconds until the next monthly slot.
      */
     function secondsTillMonthlySlot(address user)                           external view returns (uint256) {
         uint256 nowTs = block.timestamp;                                // Get the current timestamp
@@ -1075,9 +1075,7 @@ contract Mission is Ownable, ReentrancyGuard {
      * @return won A boolean indicating if the player has won in any round.
      */
     function playerState(address player) external view returns (bool joined, bool won) {
-        joined = enrolled[player];      // Check if the player is enrolled in the mission
-        won    = hasWon[player];        // Check if the player has won in any round
-        return (joined, won);           // Return the enrollment and win status of the player
+        return (enrolled[player], hasWon[player]);           // Return the enrollment and win status of the player
     }
 
     /**

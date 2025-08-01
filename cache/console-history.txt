@@ -1,3 +1,0 @@
-.exit
-(await ethers.provider.getBalance("0x8fD91b46513485e7FbE153c5AF6057B9256F13bA")).toString()
-(await ethers.provider.getBalance("0xYourAddress")).toString()
