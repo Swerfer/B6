@@ -13,6 +13,35 @@ export const FACTORY_ABI = [
 export const shorten = addr =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
 
+/* ---------- reusable spinner helpers ---------- */
+export function setBtnLoading(btn, state = true, label = "Creating&nbsp;Mission"){
+  if(!btn) return;
+
+  if(state){
+    /* already active? do nothing */
+    if(btn.dataset.loading) return;
+
+    /* store original content + width so the button never shrinks */
+    btn.dataset.loading       = btn.innerHTML;
+    btn.dataset.loadingWidth  = btn.offsetWidth;      // px value
+    btn.style.width           = `${btn.dataset.loadingWidth}px`;
+
+    /* swap in spinner & label */
+    btn.classList.add("btn-loading");
+    btn.innerHTML = `<span class="spinner"></span><span>${label}</span>`;
+  }else{
+    /* nothing to stop */
+    if(!btn.dataset.loading) return;
+
+    /* restore */
+    btn.classList.remove("btn-loading");
+    btn.innerHTML = btn.dataset.loading;
+    btn.style.width = "";                           // drop fixed width
+    delete btn.dataset.loading;
+    delete btn.dataset.loadingWidth;
+  }
+}
+
 /* ---------- DOM caches (present on both pages) ---------- */
 const modalOverlay = document.getElementById("modalOverlay");
 const confirmModal = document.getElementById("confirmModal");
@@ -55,3 +84,8 @@ export function showAlert(message, type = "info", onClose = null){
   alertClose.onclick  = close;
   modalOverlay.onclick = e => { if(e.target === modalOverlay) close(); };
 }
+
+export const clearSelection = () => {
+  const sel = window.getSelection?.();
+  if(sel && sel.removeAllRanges){ sel.removeAllRanges(); }
+};

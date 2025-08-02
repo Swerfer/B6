@@ -12,14 +12,78 @@ import {
     READ_ONLY_RPC, 
     FACTORY_ABI, 
     showAlert, 
-    showConfirm  
+    showConfirm,
+    setBtnLoading,
+    clearSelection,
 } from "./core.js";
 
 /* ---------- DOM ---------- */
-const connectBtn     = document.getElementById("connectWalletBtn");
-const adminSections  = document.querySelectorAll(".section-box");
-const unauth         = document.getElementById("unauthNotice");
-const form           = document.getElementById("createMissionForm");
+const adminSections     = document.querySelectorAll (".section-box");
+const connectBtn        = document.getElementById   ("connectWalletBtn");
+const unauth            = document.getElementById   ("unauthNotice");
+const form              = document.getElementById   ("createMissionForm");
+const createBtn         = document.getElementById   ("createMissionBtn");
+const invalidNotice     = document.getElementById   ("formInvalidNotice");
+const enrollmentStartIn = document.getElementById   ("enrollmentStart");
+const enrollmentEndIn   = document.getElementById   ("enrollmentEnd");
+const missionStartIn    = document.getElementById   ("missionStart");
+const missionEndIn      = document.getElementById   ("missionEnd");
+const missionTypeSel    = document.getElementById   ("missionType");
+const roundsIn          = document.getElementById   ("rounds");
+
+/* ---------- live-validation ---------- */
+const highlight = els => {
+  [...form.elements].forEach(el => el.classList.remove("field-invalid"));
+  els.forEach(el => el?.classList.add("field-invalid"));
+};
+
+const validate = () => {
+  if(!form) return {ok:false, bad:[]};
+
+  const f      = form.elements;
+  const bad    = [];
+
+  /* numeric helpers */
+  const valNum = el => el.value.trim() === "" ? NaN : +el.value;
+
+  /* grab all the things up-front */
+  const rounds = valNum(f.rounds);                  // ≥ 5
+  const minP   = valNum(f.minPlayers);              // ≥ rounds
+  const maxP   = valNum(f.maxPlayers);              // ≥ minP
+  const fee    = parseFloat(f.enrollmentAmount.value);
+  const sEraw  = f.enrollmentStart.value;
+  const eEraw  = f.enrollmentEnd.value;
+  const mSraw  = f.missionStart.value;
+  const mEraw  = f.missionEnd.value;
+  const sE     = sEraw ? new Date(sEraw) : NaN;
+  const eE     = eEraw ? new Date(eEraw) : NaN;
+  const mS     = mSraw ? new Date(mSraw) : NaN;
+  const mE     = mEraw ? new Date(mEraw) : NaN;
+
+  /* ---- mandatory & range checks ---- */
+  if(isNaN(rounds)         || rounds < 5)            bad.push(f.rounds);
+  if(isNaN(minP)           || minP   < rounds)       bad.push(f.minPlayers);
+  if(isNaN(maxP)           || maxP   < minP)         bad.push(f.maxPlayers);
+  if(!sEraw)                                         bad.push(f.enrollmentStart);
+  if(!eEraw  || !(sE < eE))                          bad.push(f.enrollmentEnd);
+  if(!mSraw  || !(mS >= eE))                         bad.push(f.missionStart);
+  if(!mEraw  || !(mE >  mS))                         bad.push(f.missionEnd);
+  if(isNaN(fee)            || fee   <= 0)            bad.push(f.enrollmentAmount);
+
+  return { ok: bad.length === 0, bad };
+};
+
+const updateBtn = () => {
+  const {ok, bad} = validate();
+  createBtn.disabled = !ok;
+  invalidNotice.classList.toggle("d-none", ok);
+  highlight(bad);
+};
+
+form?.addEventListener("input",  updateBtn);
+form?.addEventListener("change", updateBtn);
+document.addEventListener("DOMContentLoaded", updateBtn, {once:true});
+
 
 /* ---------- helpers ---------- */
 const toUnix = iso => Math.floor(new Date(iso).getTime() / 1000);
@@ -31,6 +95,55 @@ function toggleSections(show){
   /* invert visibility for the friendly notice */
   if (unauth) unauth.classList.toggle("hidden", show);
 }
+
+const MS = 1000, H = 3600*MS, D = 24*H, W = 7*D;
+const missionDefaults = {
+  1: { enroll:D, arm:H,  round:H        }, // Hourly
+  2: { enroll:D, arm:H,  round:6*H      }, // Quarter-Daily
+  3: { enroll:D, arm:H,  round:12*H     }, // Bi-Daily
+  4: { enroll:D, arm:H,  round:24*H     }, // Daily
+  5: { enroll:W, arm:H,  round:7*D      }, // Weekly
+  6: { enroll:W, arm:H,  round:30*D     }  // Monthly
+};
+const toLocalIso = dt =>
+  new Date(dt.getTime()-dt.getTimezoneOffset()*60*1000).toISOString().slice(0,16);
+
+/* ---------- auto-populate logic ---------- */
+function applyDateDefaults(){
+  const type = Number(missionTypeSel.value);
+  if(!missionDefaults[type]) return;               // ignore “Custom”
+
+  const base   = new Date(enrollmentStartIn.value);
+  if(isNaN(base)) return;                          // malformed date
+
+  const def    = missionDefaults[type];
+  const rounds = Math.max(Number(roundsIn.value)||1, 1);
+
+  const enrollEnd = new Date(+base + def.enroll);
+  const mStart    = new Date(+enrollEnd + def.arm);
+  const mEnd      = new Date(+mStart   + def.round * rounds);
+
+  enrollmentEndIn.value = toLocalIso(enrollEnd);
+  missionStartIn.value  = toLocalIso(mStart);
+  missionEndIn.value    = toLocalIso(mEnd);
+  updateBtn?.();
+}
+
+/* ---------- ask to apply defaults ---------- */
+const askDefaults = () => {
+  // only offer when a base date exists and type isn't "Custom"
+  if (!enrollmentStartIn.value || Number(missionTypeSel.value) === 0) return;
+  clearSelection();
+  const typeName = missionTypeSel.options[missionTypeSel.selectedIndex].textContent;
+  showConfirm(
+    `Apply default dates for <b>${typeName}</b>?<br><small>(you can still edit them afterwards)</small>`,
+    applyDateDefaults
+  );
+};
+
+/* show the dialog only when the user has *committed* a change */
+enrollmentStartIn?.addEventListener("change", askDefaults);  // fires when date-picker closes
+missionTypeSel?.addEventListener("change", askDefaults);
 
 /* ---------- role check ---------- */
 async function isOwnerOrAuthorized(addr){
@@ -115,6 +228,16 @@ if(window.ethereum){
 /* ---------- form submit ---------- */
 form?.addEventListener("submit", async e => {
   e.preventDefault();
+  if(createBtn) setBtnLoading(createBtn,true);         // start spinner
+
+  if(!walletAddress){ 
+    setBtnLoading(createBtn,false);  
+    return showAlert("Please connect a wallet first.","error"); 
+  }
+  if(!(await isOwnerOrAuthorized(walletAddress))){
+    setBtnLoading(createBtn,false); 
+    return showAlert("This wallet is not authorized.","error");
+  }
   if(!walletAddress)   return showAlert("Please connect a wallet first.","error");
   if(!(await isOwnerOrAuthorized(walletAddress)))
     return showAlert("This wallet is not authorized.","error");
@@ -172,5 +295,8 @@ form?.addEventListener("submit", async e => {
 
         if (!msg) msg = err.message || "Transaction failed";
         showAlert(msg, "error");
+    } finally {
+      setBtnLoading(createBtn,false);                  // always stop
+      updateBtn();                                     // re-validate after reset
     }
 });

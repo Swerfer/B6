@@ -144,3 +144,32 @@ body, .app-main{
   background:var(--cyan) !important;
   color:var(--navy-text) !important;
 }
+
+/* ---------- reusable spinner & disabled-btn ---------- */
+.spinner{
+  width:1.25rem;height:1.25rem;
+  border:3px solid currentColor;    /* full circle */
+  border-right-color:transparent;   /* gap for motion */
+  border-radius:50%;
+  animation:spin .6s linear infinite;
+  position:absolute;                /* allow perfect centring */
+  top:50%;left:50%;
+  transform:translate(-50%,-50%);
+  z-index:10;                       /* ensure spinner sits on top */
+  pointer-events:none;
+}
+
+.btn-loading{position:relative;pointer-events:none;opacity:.7;}
+/* keep label in normal flow but under spinner */
+.btn-loading .label-loading{visibility:visible;z-index:1;position:relative;}
+
+@keyframes spin{to{transform:translate(-50%,-50%) rotate(360deg)}}
+
+/* disabled button look */
+button:disabled{opacity:.5!important;cursor:not-allowed!important;}
+
+/* ---------- mild highlight for failing inputs ---------- */
+.field-invalid{
+  border-color:#dc3545!important;
+  box-shadow:0 0 0 .15rem rgba(220,53,69,.25);
+}
