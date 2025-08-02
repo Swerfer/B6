@@ -466,7 +466,7 @@ async function loadMissions(){
 /* ---------- form submit ---------- */
 form?.addEventListener("submit", async e => {
   e.preventDefault();
-  if(createBtn) setBtnLoading(createBtn, true, "Creating&nbsp;Mission");         // start spinner
+  if(createBtn) setBtnLoading(createBtn, true, "Creating...");         // start spinner
 
   if(!walletAddress){ 
     setBtnLoading(createBtn, false);  
