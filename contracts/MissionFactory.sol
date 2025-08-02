@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
-
 /**
- * @title   Be Brave Be Bold Be Banked (B6) – Mission & Factory Architecture
- * @author  B6 Labs – Swerfer
+ * © 2025 Be Brave Be Bold Be Banked™ | B6 Labs™ – Swerfer
+ * All rights reserved.
+ *
+ * @title   Be Brave Be Bold Be Banked™ – Mission & Factory Architecture
+ * @author  B6 Labs™ – Swerfer
  * @notice
+ *  ▸ **B6** – a decentralized gaming platform that runs on the Cronos blockchain.
  *  ▸ **Mission** – an on-chain, time-boxed competition where players enroll
  *    by paying a fixed CRO fee and race through multiple payout rounds.  
  *  ▸ **MissionFactory** – the manager contract that deploys Mission clones,
@@ -34,8 +36,7 @@ pragma solidity ^0.8.30;
  *    • Remaining CRO is distributed via `_withdrawFunds()`.
  *
  * ## 🏭 MissionFactory Responsibilities
- * • **Deployment** – clones the Mission implementation (EIP-1167) and sends
- *   initial seed CRO.  
+ * • **Deployment** – clones the Mission implementation (EIP-1167).  
  * • **Status Tracking** – every Mission reports its status back via
  *   `setMissionStatus`; the factory stores this for dashboards and queries.  
  * • **Enrollment Limits** – global weekly / monthly caps checked in
@@ -72,6 +73,9 @@ pragma solidity ^0.8.30;
  *
  * @dev Each Mission is an EIP-1167 minimal proxy deployed by MissionFactory.
  */
+
+pragma solidity ^0.8.30;
+
 // ───────────────────── Imports ────────────────────────
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/proxy/Clones.sol";
