@@ -81,37 +81,42 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 /**
  * @dev Enum to represent the type of mission.
  * The mission can be one of several types: Custom, Hourly, QuarterDaily, BiDaily, Daily, Weekly, or Monthly.
+ * The default use for each type is defined in the comments but is set in the dApp UI and can vary.
  */
 enum MissionType {
-    Custom,
-    Hourly,
-    QuarterDaily,
-    BiDaily,
-    Daily,
-    Weekly,
-    Monthly
+    Custom,         // No default use, completely custom
+    Hourly,         // Default use:  1 day  enrollment, 1 hour arming,  1 hour  rounds
+    QuarterDaily,   // Default use:  1 day  enrollment, 1 hour arming,  6 hours rounds
+    BiDaily,        // Default use:  1 day  enrollment, 1 hour arming, 12 hours rounds
+    Daily,          // Default use:  1 day  enrollment, 1 hour arming, 24 hours rounds
+    Weekly,         // Default use:  1 week enrollment, 1 hour arming,  7 days  rounds
+    Monthly         // Default use:  1 week enrollment, 1 hour arming, 30 days  rounds
 }
 
 /**
  * @dev Enum to represent the status of a mission.
  * The mission can be in one of several states: Pending, Enrolling, Active, Paused, Ended, or Failed.
  */
-enum Status {
-    Pending,
-    Enrolling,
-    Arming,
-    Active,
-    Paused,
-    PartlySuccess,
-    Success,
-    Failed
+enum Status     {
+    Pending,        // Mission is created but not yet enrolling
+    Enrolling,      // Mission is open for enrollment, waiting for players to join
+    Arming,         // Mission is armed and ready to start
+    Active,         // Mission is currently active and players can participate
+    Paused,         // Mission is paused, no further actions can be taken
+    PartlySuccess,  // Mission has ended with some players winning, but not all rounds were claimed
+    Success,        // Mission has ended successfully, all rounds were claimed
+    Failed          // Mission has failed, no players won or not enough players enrolled
 }
 
 /**
  * @dev Enum to represent the enrollment limits for a mission.
  * The limits can be None, Weekly, or Monthly.
  */
-enum Limit { None, Weekly, Monthly }
+enum Limit      { 
+    None,       // No limit breached
+    Weekly,     // Weekly limit breached
+    Monthly     // Monthly limit breached
+}
 
 // ────────────── Contract MissionFactory────────────────
 contract MissionFactory is Ownable, ReentrancyGuard {
@@ -139,7 +144,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
     modifier onlyOwnerOrAuthorized() {
         require(
-            msg.sender == owner() || authorized[msg.sender],
+            msg.sender == owner() || authorized[msg.sender],    // Check if the caller is the owner or an authorized address
             "Not owner or MissionFactory authorized"
         );
         _;
@@ -151,7 +156,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
 	modifier onlyMission() {
         require(
-            isMission[msg.sender],                                          // ← simple boolean lookup
+            isMission[msg.sender],                                      // Check if the caller is a registered mission
             "MissionFactory: caller is not a valid mission contract"
         );
         _;
@@ -497,18 +502,16 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     // ──────────────── Financial Functions ─────────────
     /**
      * @dev Registers mission funds for a specific mission type.
-     * @param amount The amount of funds to register.
      * @param missionType The type of the mission.
      */
-    function registerMissionFunds(uint256 amount, MissionType missionType)  external {
-        require(amount > 0, "Amount must be greater than zero");                                                            // Ensure the amount is greater than zero
+    function registerMissionFunds(MissionType missionType)  external payable onlyMission nonReentrant {
+        require(msg.value > 0, "Amount must be greater than zero");                                                         // Ensure the amount is greater than zero
         bool isEndedMission = missionStatus[msg.sender] == Status.Success || missionStatus[msg.sender] == Status.Failed;    // Check if the mission has ended successfully or failed
-        bool isAdmin        = msg.sender == owner() || authorized[msg.sender];                                              // Check if the caller is the owner or an authorized address
-        require(isEndedMission || isAdmin, "Caller not a mission or admin");                                                // Ensure the caller is either an ended mission or an authorized address    
-        reservedFunds[missionType] += amount;                                                                               // Add the amount to the reserved funds for the specified mission type
-        totalMissionFunds += amount;                                                                                        // Update the total mission funds
-        totalOwnerEarnedFunds += amount / 3;                                                                                // Update the total funds earned by the owner (25% of the amount)
-        emit MissionFundsRegistered(amount, missionType, msg.sender);                                                       // Emit an event for the registered mission funds
+        require(isEndedMission, "Caller not a mission");                                                                    // Ensure the caller is a valid mission that has ended 
+        reservedFunds[missionType] += msg.value;                                                                            // Add the amount to the reserved funds for the specified mission type
+        totalMissionFunds += msg.value;                                                                                     // Update the total mission funds
+        totalOwnerEarnedFunds += msg.value / 3;                                                                             // Update the total funds earned by the owner (25% of the amount)
+        emit MissionFundsRegistered(msg.value, missionType, msg.sender);                                                    // Emit an event for the registered mission funds
     }
 
     /**
@@ -755,7 +758,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 }
 
 // ───────────────── Contract Mission ───────────────────
-contract Mission is Ownable, ReentrancyGuard {
+contract Mission        is Ownable, ReentrancyGuard {
     
     // ───────────────────── Events ─────────────────────
     event MissionStatusChanged  (Status     indexed previousStatus, Status      indexed newStatus,      uint256 timestamp                   );
@@ -1334,18 +1337,17 @@ contract Mission is Ownable, ReentrancyGuard {
             distributable = balance - unclaimable;                                                  // Calculate distributable amount by subtracting unclaimable amounts
         }
 
-        require(distributable > 0, "No funds to withdraw");                                         // Ensure there are funds to withdraw after deducting unclaimable amounts
+        require(distributable > 0,                          "No funds to withdraw");                // Ensure there are funds to withdraw after deducting unclaimable amounts
 
         uint256 _ownerShare = (distributable * 25) / 100;                                           // Calculate the owner's share (25% of distributable funds)     
         uint256 _factoryShare = distributable - _ownerShare;                                        // Calculate the factory's share (75% of distributable funds)     
 
-        (bool ok1, ) = payable(missionFactory.owner()).call{value: _ownerShare}("");                // Attempt to transfer the owner's share to the MissionFactory owner
-        require(ok1, "Owner transfer failed");                                                      // Ensure the transfer was successful   
+        (bool ok, ) = payable(missionFactory.owner()).call{value: _ownerShare}("");                 // Attempt to transfer the owner's share to the MissionFactory owner
+        require(ok,                                         "Owner transfer failed");               // Ensure the transfer was successful   
 
-        (bool ok2, ) = payable(address(missionFactory)).call{value: _factoryShare}("");             // Attempt to transfer the factory's share to the MissionFactory contract
-        require(ok2, "Factory transfer failed");                                                    // Ensure the transfer was successful 
-
-        missionFactory.registerMissionFunds(_factoryShare, _missionData.missionType);               // Register the factory's share with the MissionFactory for future mission bonuses
+        missionFactory.registerMissionFunds{ value: _factoryShare }(                                // Register the factory's share in the MissionFactory contract  
+            _missionData.missionType                                                                // Pass the mission type
+        );
 
         emit FundsWithdrawn(_ownerShare, _factoryShare);                                            // Emit event for funds withdrawal
         ownerShare = _ownerShare;                                                                   // Update the owner's share
