@@ -57,7 +57,7 @@ export const Status = {
 export const statusText = code => Status[code] ?? `Unknown(${code})`;
 
 /* ---------- reusable spinner helpers ---------- */
-export function setBtnLoading(btn, state = true, label = "Creating&nbsp;Mission"){
+export function setBtnLoading(btn, state = true, label = ""){
   if(!btn) return;
 
   if(state){

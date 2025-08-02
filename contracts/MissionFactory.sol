@@ -771,6 +771,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     event PlayerRefunded        (address    indexed player,         uint256             amount                                              );
     event FundsWithdrawn        (uint256            ownerAmount,    uint256             factoryAmount                                       );
     event RefundFailed          (address    indexed player,         uint256             amount                                              ); 
+    event MissionRefunded       (uint256    indexed nrOfPlayers,    uint256     indexed amount,         address[] indexed player,  uint256 timestamp); // Event emitted when a player is refunded
     event MissionInitialized    (address    indexed owner,          MissionType indexed missionType,    uint256 timestamp                   );
 	event PotIncreased			(uint256			value,			uint256				ethCurrent											);
 
@@ -1042,11 +1043,14 @@ contract Mission        is Ownable, ReentrancyGuard {
      */
 	function increasePot()                  external payable {
 		require(msg.value > 0, "No funds sent");                                            // Ensure some funds are sent
-		require(msg.sender == address(missionFactory), "Only factory can fund");            // Ensure only MissionFactory can fund the mission
-        require(_getRealtimeStatus() <= Status.Arming, "Mission passed arming status");     // Ensure mission is in Arming or earlier status
-		_missionData.ethStart 	+= msg.value;
-		_missionData.ethCurrent 	+= msg.value;
-		emit PotIncreased(msg.value, _missionData.ethCurrent);
+        require(
+            msg.sender == address(missionFactory) || missionFactory.authorized(msg.sender) || msg.sender == owner(),
+            "Only factory or authorized can fund"
+        );                                                                                  // Ensure the sender is the MissionFactory or an authorized address
+        require(_getRealtimeStatus() > Status.Paused, "Mission still active");              // Ensure the mission is not in Active status
+		_missionData.ethStart 	    += msg.value;                                           // Increase the initial CRO amount by the value sent
+		_missionData.ethCurrent 	+= msg.value;                                           // Increase the current CRO amount by the value sent
+		emit PotIncreased(msg.value, _missionData.ethCurrent);                              // Emit event for pot increase
 	}
 
     /**
@@ -1079,20 +1083,6 @@ contract Mission        is Ownable, ReentrancyGuard {
         _setStatus(Status.Success);
         _withdrawFunds(false);                                                      // Withdraw funds to MissionFactory contract 
     }
-
-    /**
-     * @dev Fallback function to handle incoming CRO.
-     * This function is called when the contract receives CRO without matching calldata.
-     * It allows the contract to accept CRO and handle it appropriately.
-     */
-    receive()                               external payable {}
-
-    /**
-     * @dev Fallback function to handle incoming CRO with non-matching calldata.
-     * This function is called when the contract receives CRO with non-matching calldata.
-     * It allows the contract to accept CRO and handle it appropriately.
-     */
-    fallback()                              external payable {}
 
     // ───────────────── View Functions ─────────────────
 
@@ -1395,10 +1385,16 @@ contract Mission        is Ownable, ReentrancyGuard {
                 }
             }
         }
-        if (_missionData.players.length < _missionData.enrollmentMinPlayers) {                                    
-            _setStatus(Status.Failed);                                                                          // If not enough players, set status to Failed
+        _setStatus(Status.Failed);                                                                              // Set the mission status to Failed
+        if (address(this).balance > 0) {                                                                        // If there are still funds left in the contract
+            _withdrawFunds(_force);                                                                             // Withdraw funds to MissionFactory contract 
         }
-        _withdrawFunds(_force);                                                                                 // Withdraw funds to MissionFactory contract 
+        emit MissionRefunded(
+            _missionData.refundedPlayers.length,                                                                // Emit MissionRefunded event with number of players refunded
+            _missionData.enrollmentAmount,                                                                      // Emit MissionRefunded event with amount refunded to each player
+            _missionData.refundedPlayers,                                                                       // Emit MissionRefunded event with list of refunded players
+            block.timestamp                                                                                     // Emit MissionRefunded event with current timestamp
+        );
     }
 
 }

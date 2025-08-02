@@ -106,11 +106,11 @@ function missionTypeName(type) {
 }
 
 /* ---------- helpers ---------- */
-async function openMissionModal(item){
+async function openMissionModal(item, btnRef = null){
   try{
     const p  = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
     const mc = new ethers.Contract(item.addr, MISSION_ABI, p);
-
+    if (btnRef) setBtnLoading(btnRef, true, "Reloading");
   const [
     players,              // address[]
     missionType,          // uint8
@@ -170,7 +170,7 @@ async function openMissionModal(item){
     modalTitle.textContent = `Mission ${shorten(item.addr)}`;
 
     let buttons = `
-      <button class="btn btn-sm btn-outline-info me-2" onclick='openMissionModal(${JSON.stringify(item)})'>
+      <button class="btn btn-sm btn-outline-info me-2 reload-btn" data-addr="${item.addr}">
         <i class="fa-solid fa-rotate-right me-1"></i> Reload
       </button>
     `;
@@ -183,7 +183,7 @@ async function openMissionModal(item){
 
     if (needsRefund) {
       buttons = `
-        <button class="btn btn-sm btn-outline-warning me-2" onclick='triggerRefundModal("${item.addr}")'>
+        <button class="btn btn-sm btn-outline-warning me-2 refund-btn" data-addr="${item.addr}">
           <i class="fa-solid fa-coins me-1"></i> Refund
         </button>` + buttons;
     }
@@ -199,37 +199,68 @@ async function openMissionModal(item){
       <div class="text-center mt-4">${buttons}</div>
     `;
 
+    const reloadBtn = modalBody.querySelector('.reload-btn');
+    if (reloadBtn) {
+      reloadBtn.addEventListener('click', () => openMissionModal(item, reloadBtn));
+    }
+
+    const refundBtn = modalBody.querySelector('.refund-btn');
+    if (refundBtn) {
+      refundBtn.addEventListener('click', () => triggerRefundModal(item.addr, refundBtn));
+    }
+
     missionModal.classList.remove("hidden");
     document.body.classList.add("modal-open");
 
   }catch(e){
     showAlert(`getMissionData failed:<br>${e.message}`,"error");
+  } finally {
+    if (btnRef) setBtnLoading(btnRef, false);
   }
 }
 
-async function triggerRefundModal(address){
+async function triggerRefundModal(address, btnRef){
   try {
 
     const provider = new ethers.providers.Web3Provider(window.ethereum);
     const signer   = provider.getSigner();
     const mc       = new ethers.Contract(address, MISSION_ABI, signer); 
-    const owner = await mc.owner();
-    console.log("Contract owner:", owner);
-    console.log("Signer address:", await signer.getAddress());
-    console.log("Address:", address);
 
     showConfirm("This mission has <b>Failed</b>, but no players were refunded yet.<br>Do you want to call <code>refundPlayers()</code> now?", async () => {
       try {
+        const refundBtn = document.querySelector('button[onclick*="triggerRefundModal"]');
+        setBtnLoading(btnRef, true, "Refunding");
+
         const tx = await mc.refundPlayers();
         await tx.wait();
-        showInfo("Refund completed.");
+
+        setBtnLoading(btnRef, false);
+        showAlert("Refund completed.", "success");
         openMissionModal({ addr: address });
       } catch (e) {
         showAlert(`Refund failed: ${e.message}`, "error");
+      } finally {
+          setBtnLoading(btnRef, false);
       }
     });
   } catch (e) {
     showAlert("Unable to refund: " + e.message, "error");
+  }
+}
+
+function updateConnectButton(state = "idle", address = ""){
+  const text = document.getElementById("connectBtnText");
+  if(!text) return;
+
+  switch(state){
+    case "connecting":
+      text.innerHTML = "Connecting…";
+      break;
+    case "connected":
+      text.innerHTML = shorten(address);
+      break;
+    default:
+      text.innerHTML = "Connect Wallet";
   }
 }
 
@@ -340,8 +371,10 @@ connectBtn.addEventListener("click", () => {
     showConfirm("Disconnect current wallet?", () => {
       disconnectWallet();
       toggleSections(false);
+      updateConnectButton(); // reset
     });
-  }else{
+  } else {
+    updateConnectButton("connecting");
     connectWallet().then(handlePostConnect);
   }
 });
@@ -360,8 +393,10 @@ async function handlePostConnect(addrOverride){
   toggleSections(allowed);
 
   if (allowed) {
+    updateConnectButton("connected", addr);
     await loadMissions();   // ✅ load only after admin is confirmed
   } else {
+    updateConnectButton(); // reset
     showAlert(
       `This wallet is neither from an <b>owner</b> nor from an <b>authorized</b>.`, 'warning',
       () => disconnectWallet()
@@ -431,14 +466,14 @@ async function loadMissions(){
 /* ---------- form submit ---------- */
 form?.addEventListener("submit", async e => {
   e.preventDefault();
-  if(createBtn) setBtnLoading(createBtn,true);         // start spinner
+  if(createBtn) setBtnLoading(createBtn, true, "Creating&nbsp;Mission");         // start spinner
 
   if(!walletAddress){ 
-    setBtnLoading(createBtn,false);  
+    setBtnLoading(createBtn, false);  
     return showAlert("Please connect a wallet first.","error"); 
   }
   if(!(await isOwnerOrAuthorized(walletAddress))){
-    setBtnLoading(createBtn,false); 
+    setBtnLoading(createBtn, false); 
     return showAlert("This wallet is not authorized.","error");
   }
   if(!walletAddress)   return showAlert("Please connect a wallet first.","error");
@@ -507,3 +542,5 @@ form?.addEventListener("submit", async e => {
 
 /* ---------- export public functions for admin.html ---------- */
 window.triggerRefundModal = triggerRefundModal;
+window.openMissionModal   = openMissionModal;
+

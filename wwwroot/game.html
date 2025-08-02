@@ -36,34 +36,31 @@
       <p class="subtitle">THE ULTIMATE COMPETITIVE BLOCKCHAIN GAME</p>
     </main>
 
-    <!-- FOOTER — fixed to bottom -->
     <footer class="app-footer">
-      <div class="inner">
-        <!-- span id needed by existing JS -->
-        <button id="connectWalletBtn" class="wallet-btn">
-          <span id="connectBtnText">Connect Wallet</span>
-        </button>
-      </div>
+        <div class="inner">
+            <button id="connectWalletBtn" class="btn btn-sm btn-outline-info me-2">
+                <i class="fa-solid fa-wallet me-2"></i>
+                <span id="connectBtnText">Connect Wallet</span>
+            </button>
+        </div>
     </footer>
 
     <!-- REUSABLE MODAL -->
     <div id="modalOverlay" class="modal-overlay">
 
-      <!-- Confirm (Yes / Cancel) -->
-      <div id="confirmModal" class="modal-box hidden">
-        <p id="modalMessage" class="mb-4"></p>
-        <div class="d-flex gap-3 justify-content-center">
-          <button id="modalConfirm" class="btn btn-cyan px-4">Yes</button>
-          <button id="modalCancel"  class="btn btn-outline-cyan px-4">Cancel</button>
+        <div id="confirmModal" class="modal-box hidden">
+            <p id="modalMessage" class="mb-4"></p>
+            <div class="d-flex gap-3 justify-content-center">
+                <button id="modalConfirm" class="btn btn-cyan px-4">Yes</button>
+                <button id="modalCancel"  class="btn btn-outline-cyan px-4">Cancel</button>
+            </div>
         </div>
-      </div>
 
-      <!-- Alert (Info, Success, Warning, Error) -->
-      <div id="alertModal" class="modal-box hidden">
-        <h3 id="alertModalTitle" class="modal-title mb-3"></h3>
-        <p  id="alertModalText"  class="mb-4"></p>
-        <button id="alertModalCloseBtn" class="btn btn-cyan px-4">Close</button>
-      </div>
+        <div id="alertModal" class="modal-box hidden">
+            <h3 id="alertModalTitle" class="modal-title mb-3"></h3>
+            <p  id="alertModalText"  class="mb-4"></p>
+            <button id="alertModalCloseBtn" class="btn btn-cyan px-4">Close</button>
+        </div>
 
     </div>
 
