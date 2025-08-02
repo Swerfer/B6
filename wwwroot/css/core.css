@@ -1,5 +1,7 @@
 /* ---------- BRAND COLOURS ---------- */
-:root {
+:root{
+  --header-h: 3.5rem;   /* header height – adjust if you resize the header */
+  --footer-h: 3.5rem;   /* footer height – adjust if you resize the footer */
   --navy:       #000818;
   --blueish:    #1dbdf5;
   --cyan:       #00C0F0;
@@ -16,33 +18,56 @@
 /* ---------- GLOBAL RESET & LAYOUT ---------- */
 * { box-sizing:border-box; margin:0; padding:0; }
 
-html,body { height:100%; min-width:360px; }
+html,body { 
+  height:100%; 
+  min-width:360px; 
+}
 
 body, .app-main{                     
   background:var(--navy);            
   color:var(--white);
   font-family:"Arial Black", Impact, sans-serif;
-  display:flex; flex-direction:column;
+  display:flex; 
+  flex-direction:column;
 }
 
 .inner{
-  max-width:1200px; margin:0 auto; width:100%; padding:0 16px;
-  display:flex; align-items:center; justify-content:center; height:52px;
+  max-width:1200px; 
+  margin:0 auto; 
+  width:100%; 
+  padding:0 16px;
+  display:flex; 
+  align-items:center; 
+  justify-content:center; 
+  height:44px;
 }
 
 /* ---------- HEADER ---------- */
-.app-header{position:fixed; top:0; left:0; right:0; background:var(--navy); z-index:100;}
+.app-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--header-h);        /* ← this is the key */
+  background: var(--navy);
+  z-index: 100;
+  display: flex;
+  align-items: center;            /* vertically center text */
+}
 
 .brand-line{
   font-size:clamp(22px,4vw,42px);    /* larger ceiling */
-  font-weight:700; color:var(--white); white-space:nowrap; line-height:1;
+  font-weight:700; 
+  color:var(--white); 
+  white-space:nowrap; 
+  line-height:1;
 }
 
 /* ---------- MAIN ---------- */
 .app-main{
   flex:1 1 auto; width:100%;
-  padding-top:52px;          /* same number as .inner height */
-  padding-bottom:52px;
+  padding-top:44px;          /* same number as .inner height */
+  padding-bottom:44px;
   overflow-y:auto;
   display:flex; align-items:center; justify-content:center;
   text-align:center;
@@ -53,24 +78,43 @@ body, .app-main{
 }
 
 /* ---------- FOOTER ---------- */
-.app-footer{position:fixed; bottom:0; left:0; right:0; background:var(--navy); z-index:100;}
+.app-footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: var(--footer-h);
+  background: var(--navy);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+}
 
 /* ---------- WALLET BUTTON ---------- */
 .wallet-btn{
-  background:var(--cyan); color:var(--navy-text);   /* uses new colour */
-  border:none; border-radius:8px;
+  background:var(--cyan); 
+  color:var(--navy-text);   /* uses new colour */
+  border:none; 
+  border-radius:8px;
   font:600 16px/1 "Arial Black", Impact, sans-serif;
-  padding:8px 16px; cursor:pointer;
+  padding:8px 16px; 
+  cursor:pointer;
   width:180px;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; 
+  overflow:hidden; 
+  text-overflow:ellipsis;
 }
 .wallet-btn:hover{filter:brightness(1.1);}
 
 /* ---------- MODAL ---------- */
 .modal-overlay{
-  position:fixed; inset:0; background:rgba(0,0,0,.6);
-  display:none; align-items:center; justify-content:center;
-  z-index: 2000;                     /* ← was missing: now higher than bars */
+  position:fixed; 
+  inset:0; 
+  background:rgba(0,0,0,.6);
+  display:none; 
+  align-items:center; 
+  justify-content:center;
+  z-index: 3000;                     /* ← was missing: now higher than bars */
 }
 .modal-overlay.active{            
   display:flex;
@@ -87,19 +131,44 @@ body, .app-main{
   color:#fff;
   font-family:sans-serif;
 }
-.modal-actions{margin-top:24px; display:flex; gap:24px; justify-content:center;}
-.btn-small{
-  padding:8px 18px; border:none; border-radius:6px;
-  font-weight:600; cursor:pointer;
+.modal-actions{
+  margin-top:24px; 
+  display:flex; 
+  gap:24px; 
+  justify-content:center;
 }
-.btn-alt{background:transparent; color:var(--cyan);}
-.btn-small:not(.btn-alt){background:var(--cyan); color:var(--navy);}
+.btn-small{
+  padding:8px 18px; 
+  border:none; 
+  border-radius:6px;
+  font-weight:600; 
+  cursor:pointer;
+}
+.btn-alt{
+  background:transparent; 
+  color:var(--cyan);
+}
+.btn-small:not(.btn-alt)
+{background:var(--cyan); 
+  color:var(--navy);
+}
 
 /* colour accents added by showAlert(type) */
 .modal.info    { border-color:var(--info);    }
 .modal.success { border-color:var(--success); }
 .modal.warning { border-color:var(--warning); }
 .modal.error   { border-color:var(--error);   }
+
+#confirmModal {
+  z-index: 3000 !important; /* Always on top exect for alert */
+  position: fixed
+}
+
+#alertModal {
+  z-index: 3001 !important; /* Always on top of confirm */
+  position: fixed;
+}
+
 
 /* ---------- ICON COLOURS ---------- */
 /* OLD – these lines don’t exist */
@@ -131,7 +200,9 @@ body, .app-main{
   border:none !important;
 }
 .btn-cyan:hover,
-.btn-cyan:focus{ filter:brightness(1.1); }
+.btn-cyan:focus{ 
+  filter:brightness(1.1); 
+}
 
 /* outline style for “Cancel” */
 .btn-outline-cyan{
@@ -147,7 +218,8 @@ body, .app-main{
 
 /* ---------- reusable spinner & disabled-btn ---------- */
 .spinner{
-  width:1.25rem;height:1.25rem;
+  width:1.25rem;
+  height:1.25rem;
   border:3px solid currentColor;    /* full circle */
   border-right-color:transparent;   /* gap for motion */
   border-radius:50%;
@@ -159,17 +231,27 @@ body, .app-main{
   pointer-events:none;
 }
 
-.btn-loading{position:relative;pointer-events:none;opacity:.7;}
+.btn-loading{
+  position:relative;
+  pointer-events:none;
+  opacity:.7;}
 /* keep label in normal flow but under spinner */
-.btn-loading .label-loading{visibility:visible;z-index:1;position:relative;}
+.btn-loading .label-loading{
+  visibility:visible;
+  z-index:1;
+  position:relative;}
 
 @keyframes spin{to{transform:translate(-50%,-50%) rotate(360deg)}}
 
 /* disabled button look */
-button:disabled{opacity:.5!important;cursor:not-allowed!important;}
+button:disabled{
+  opacity:.5!important;
+  cursor:not-allowed!important;
+}
 
 /* ---------- mild highlight for failing inputs ---------- */
 .field-invalid{
   border-color:#dc3545!important;
   box-shadow:0 0 0 .15rem rgba(220,53,69,.25);
 }
+

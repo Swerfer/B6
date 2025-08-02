@@ -7,11 +7,54 @@ export const READ_ONLY_RPC   = "https://evm.cronos.org";
 export const FACTORY_ABI = [
   "function owner() view returns(address)",
   "function authorized(address) view returns(bool)",
-  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8) payable returns(address)"
+  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8) payable returns(address)",
+  "function getAllMissions() view returns(address[] missions, uint8[] statuses)",
 ];
+
+/* ABI for a single Mission contract */
+/* ABI for a single Mission contract – matches getMissionData() tuple (15 fields) */
+/* ABI that mirrors struct MissionData exactly */
+export const MISSION_ABI = [
+  "function getMissionData() view returns (\
+      tuple(\
+        address[] players,\
+        uint8 missionType,\
+        uint256 enrollmentStart,\
+        uint256 enrollmentEnd,\
+        uint256 enrollmentAmount,\
+        uint8 enrollmentMinPlayers,\
+        uint8 enrollmentMaxPlayers,\
+        uint256 missionStart,\
+        uint256 missionEnd,\
+        uint8 missionRounds,\
+        uint8 roundCount,\
+        uint256 ethStart,\
+        uint256 ethCurrent,\
+        (address,uint256)[] playersWon,\
+        uint256 pauseTimestamp,\
+        address[] refundedPlayers\
+      )\
+  )",
+  "function getRealtimeStatus() view returns (uint8)",
+  "function refundPlayers()",
+  "function owner() view returns (address)",
+];
+
 
 export const shorten = addr =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
+
+export const Status = {
+  0:  "Pending",        // Mission is created but not yet enrolling
+  1:  "Enrolling",      // Mission is open for enrollment, waiting for players to join
+  2:  "Arming",         // Mission is armed and ready to start
+  3:  "Active",         // Mission is currently active and players can participate
+  4:  "Paused",         // Mission is paused, no further actions can be taken
+  5:  "PartlySuccess",  // Mission has ended with some players winning, but not all rounds were claimed
+  6:  "Success",        // Mission has ended successfully, all rounds were claimed
+  7:  "Failed",         // Mission has failed, no players won or not enough players enrolled
+};
+export const statusText = code => Status[code] ?? `Unknown(${code})`;
 
 /* ---------- reusable spinner helpers ---------- */
 export function setBtnLoading(btn, state = true, label = "Creating&nbsp;Mission"){
@@ -54,17 +97,36 @@ const alertText    = document.getElementById("alertModalText");
 const alertClose   = document.getElementById("alertModalCloseBtn");
 
 /* ---------- Confirm dialog ---------- */
-export function showConfirm(message, onYes){
+export function showConfirm(message, onYes) {
   alertModal.classList.add("hidden");
   confirmModal.classList.remove("hidden");
+
   modalMsg.innerHTML =
     `<i class="fa-solid fa-circle-question fa-lg text-cyan me-2"></i>${message}`;
+
   modalOverlay.classList.add("active");
 
-  const close = () => modalOverlay.classList.remove("active");
-  modalConfirm.onclick = () => { close(); onYes(); };
-  modalCancel .onclick = close;
-  modalOverlay.onclick  = e => { if(e.target === modalOverlay) close(); };
+  function close() {
+    modalOverlay.classList.remove("active");
+  }
+
+  modalConfirm.onclick = async () => {
+    close();
+    if (typeof onYes === "function") {
+      try {
+        await onYes();
+      } catch (err) {
+        console.error("Confirm action failed:", err);
+        showAlert("An error occurred while confirming.", "error");
+      }
+    }
+  };
+
+  modalCancel.onclick = close;
+
+  modalOverlay.onclick = e => {
+    if (e.target === modalOverlay) close();
+  };
 }
 
 /* ---------- Alert dialog ---------- */

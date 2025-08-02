@@ -1,9 +1,15 @@
  /* --------------------------------------------------
    Admin-only tweaks – complements global core.css
 -------------------------------------------------- */
-.admin-main{
-  padding-inline: 1rem;          /* softer gutters on mobile          */
-  justify-content: flex-start;   /* content sticks to the top         */
+.admin-main {
+  padding: 1rem;
+  justify-content: flex-start;
+  overflow-y: auto;
+  position: fixed;
+  top: var(--header-h);
+  bottom: var(--footer-h);
+  left: 0;
+  right: 0;
 }
 
 /* centred notice shown to non-authorised wallets */
@@ -36,3 +42,185 @@
   font-style:italic;
   margin:0;
 }
+
+/* ─────────── Missions list ─────────── */
+
+/* the <ul> itself becomes a responsive grid */
+#missionsList{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); /* 1-to-n cols */
+  gap:1rem;
+  margin:0 0 1rem;            /* a little bottom gap */
+  max-height:calc(2.8rem*10 + 1rem*9); /* ≈ 10 rows incl. gaps */
+  overflow-y:auto;
+  place-content:stretch center;         /* centre the grid in the box */
+}
+
+#missionsList .mission-item {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1.5rem;
+  background-color: #0f2b45;
+  padding: 0.5rem 1.25rem;
+  border-radius: 1rem;
+  font-size: 1rem;
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: max-content;
+  margin: 0 auto;
+}
+
+#missionsList .mission-item:hover{
+  background:#145a83;
+  cursor: pointer;
+}
+
+#missionsList .mission-item.partly-success{
+  background:#f9e79f!important;
+  color:#111;
+  font-weight:600;
+}
+
+#missionsList .mission-item span:first-child{
+  white-space:nowrap;
+}
+
+#missionsList .mission-item span:last-child{
+  margin-left:0.5rem;           /* small gap before status */
+}
+
+@media (max-width: 600px) {
+  #missionsList .mission-item {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 1rem;
+    padding: 0.75rem 1.25rem;
+    text-align: center;
+  }
+
+  #missionsList .mission-item span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: inline-block;
+  }
+}
+
+/* ─────────── Mission details modal ─────────── */
+
+.mission-modal {
+  position: fixed;
+  top: var(--header-h);
+  bottom: var(--footer-h);
+  left: 1rem;
+  right: 1rem;
+  background: #0d1a28;
+  border: 1px solid #1a3a56;
+  border-radius: .8rem;
+  overflow: auto;
+  z-index: 2050;
+  display: none;
+  box-shadow: 0 0 12px rgba(0,0,0,0.45);
+
+  /* Scrollbar styling merged in */
+  scrollbar-width: thin;
+  scrollbar-color: #0e93c7 #04243b;
+}
+
+.mission-modal::-webkit-scrollbar {
+  width: .6rem;
+}
+
+.mission-modal::-webkit-scrollbar-track {
+  background: #04243b;
+  border-radius: 4px;
+  margin-block: 4px;
+}
+
+.mission-modal::-webkit-scrollbar-thumb {
+  background: #0e93c7;
+  border-radius: 4px;
+}
+
+.mission-modal:not(.hidden) {
+  display: block;
+}
+
+.mission-modal-inner{
+  min-height:100%;
+  padding:1.75rem 2rem;
+}
+
+.mission-modal pre{
+  background:transparent;
+  color:#9fd0ff;
+  white-space:pre-wrap;        /* wrap long lines */
+  word-break:break-word;
+  margin:0; padding:0;
+}
+
+.mission-modal h3{
+  color:#00c0f0!important;
+}
+
+.mission-table{
+  border-collapse:collapse;
+  width:100%;
+}
+
+.mission-table th,
+.mission-table td{
+  padding:.35rem .5rem;
+  border-bottom:1px solid #1a3a56;
+  font-family:Arial,Helvetica,sans-serif;
+}
+.mission-table th{
+  color:#9fd0ff;
+  font-weight:600;
+  text-align:left;
+  width:14rem;
+}
+.mission-table td{
+  color:#ffffff;  /* pure white for better contrast */
+}
+
+body.modal-open .admin-main {
+  pointer-events: none;
+}
+
+body.modal-open::before {
+  content: '';
+  position: fixed;
+  top: var(--header-h);
+  bottom: var(--footer-h);
+  left: 0;
+  right: 0;
+  background: var(--navy);
+  z-index: 2040;
+}
+
+#formInvalidNotice {
+  font-size: 0.75rem;
+  line-height: 1.25;
+  white-space: normal;
+  word-break: break-word;
+}
+
+@media (max-width: 480px) {
+  #formInvalidNotice {
+    max-width: 100%;
+    flex: 1 1 100%;
+  }
+
+  #createMissionBtn {
+    min-width: 200px;
+    white-space: nowrap;
+  }
+}
+
+
+
+

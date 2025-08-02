@@ -10,11 +10,14 @@ import {
 import { 
     FACTORY_ADDRESS, 
     READ_ONLY_RPC, 
-    FACTORY_ABI, 
+    FACTORY_ABI,
+    MISSION_ABI,
     showAlert, 
     showConfirm,
     setBtnLoading,
     clearSelection,
+    shorten,          // new
+    statusText, 
 } from "./core.js";
 
 /* ---------- DOM ---------- */
@@ -30,6 +33,12 @@ const missionStartIn    = document.getElementById   ("missionStart");
 const missionEndIn      = document.getElementById   ("missionEnd");
 const missionTypeSel    = document.getElementById   ("missionType");
 const roundsIn          = document.getElementById   ("rounds");
+const missionsList      = document.getElementById   ("missionsList");
+const missionModal      = document.getElementById   ("missionModal");
+const modalTitle        = document.getElementById   ("missionModalTitle");
+const modalBody         = document.getElementById   ("missionModalBody");
+const modalCloseX       = document.getElementById   ("missionModalClose");
+const modalCloseBtn     = document.getElementById   ("missionModalCloseBtn");
 
 /* ---------- live-validation ---------- */
 const highlight = els => {
@@ -82,10 +91,157 @@ const updateBtn = () => {
 
 form?.addEventListener("input",  updateBtn);
 form?.addEventListener("change", updateBtn);
-document.addEventListener("DOMContentLoaded", updateBtn, {once:true});
+document.addEventListener("DOMContentLoaded", updateBtn,    {once:true});
 
+function missionTypeName(type) {
+  return {
+    0: "Custom",
+    1: "Hourly",
+    2: "Quarter-Daily",
+    3: "Bi-Daily",
+    4: "Daily",
+    5: "Weekly",
+    6: "Monthly"
+  }[type] || `Unknown (${type})`;
+}
 
 /* ---------- helpers ---------- */
+async function openMissionModal(item){
+  try{
+    const p  = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const mc = new ethers.Contract(item.addr, MISSION_ABI, p);
+
+  const [
+    players,              // address[]
+    missionType,          // uint8
+    enrollmentStart,      // uint256
+    enrollmentEnd,        // uint256
+    enrollmentAmount,     // uint256
+    enrollmentMinPlayers, // uint8
+    enrollmentMaxPlayers, // uint8
+    missionStart,         // uint256
+    missionEnd,           // uint256
+    missionRounds,        // uint8
+    roundCount,           // uint8
+    ethStart,             // uint256
+    ethCurrent,           // uint256
+    playersWon,           // array with { player, amountWon }
+    pauseTimestamp,       // uint256
+    refundedPlayers       // address[]
+  ] = await mc.getMissionData();
+
+    const status = await mc.getRealtimeStatus();
+
+    const ts = s => new Date(Number(s) * 1000).toLocaleString(navigator.language, {
+      dateStyle: 'short',
+      timeStyle: 'short'
+    });
+
+    /* build rows */
+    const rows = `
+      <tr><th>Status</th>             <td>${statusText(status)}</td></tr>
+      <tr><th>Players</th>            <td>${players.length}</td></tr>
+      <tr><th>Mission Type</th>       <td>${missionTypeName(missionType)}</td></tr>
+      <tr><th>Enrollment Start</th>   <td>${ts(enrollmentStart)}</td></tr>
+      <tr><th>Enrollment End</th>     <td>${ts(enrollmentEnd)}</td></tr>
+      <tr><th>Mission Start</th>      <td>${ts(missionStart)}</td></tr>
+      <tr><th>Mission End</th>        <td>${ts(missionEnd)}</td></tr>
+      <tr><th>Min Players</th>        <td>${enrollmentMinPlayers}</td></tr>
+      <tr><th>Max Players</th>        <td>${enrollmentMaxPlayers}</td></tr>
+      <tr><th>Round Count</th>        <td>${roundCount}</td></tr>
+      <tr><th>Enrollment Amount</th>  <td>${ethers.utils.formatEther(enrollmentAmount)} CRO</td></tr>
+      <tr><th>CRO Start</th>          <td>${ethers.utils.formatEther(ethStart)} CRO</td></tr>
+      <tr><th>CRO Current</th>        <td>${ethers.utils.formatEther(ethCurrent)} CRO</td></tr>
+      <tr><th>Rounds</th>             <td>${missionRounds}</td></tr>
+      <tr><th>Players Won</th>        <td>${playersWon.length}</td></tr>
+      <tr><th>Refunded Players</th>   <td>${refundedPlayers.length}</td></tr>
+    `;
+    
+    const shouldRefund = (
+      status === 7 && // Status.Failed
+      players.length > 0 &&
+      refundedPlayers.length === 0
+    );
+
+    if (shouldRefund) {
+      triggerRefundModal(item.addr);
+    }
+
+    modalTitle.textContent = `Mission ${shorten(item.addr)}`;
+
+    let buttons = `
+      <button class="btn btn-sm btn-outline-info me-2" onclick='openMissionModal(${JSON.stringify(item)})'>
+        <i class="fa-solid fa-rotate-right me-1"></i> Reload
+      </button>
+    `;
+
+    const needsRefund = (
+      status === 7 &&
+      players.length > 0 &&
+      refundedPlayers.length === 0
+    );
+
+    if (needsRefund) {
+      buttons = `
+        <button class="btn btn-sm btn-outline-warning me-2" onclick='triggerRefundModal("${item.addr}")'>
+          <i class="fa-solid fa-coins me-1"></i> Refund
+        </button>` + buttons;
+    }
+
+    buttons += `
+      <button id="missionModalCloseBtn" class="btn btn-sm btn-outline-info me-2">
+        <i class="fa-solid fa-xmark me-1"></i> Close
+      </button>
+    `;
+
+    modalBody.innerHTML = `
+      <table class="mission-table w-100">${rows}</table>
+      <div class="text-center mt-4">${buttons}</div>
+    `;
+
+    missionModal.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+
+  }catch(e){
+    showAlert(`getMissionData failed:<br>${e.message}`,"error");
+  }
+}
+
+async function triggerRefundModal(address){
+  try {
+
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const signer   = provider.getSigner();
+    const mc       = new ethers.Contract(address, MISSION_ABI, signer); 
+    const owner = await mc.owner();
+    console.log("Contract owner:", owner);
+    console.log("Signer address:", await signer.getAddress());
+    console.log("Address:", address);
+
+    showConfirm("This mission has <b>Failed</b>, but no players were refunded yet.<br>Do you want to call <code>refundPlayers()</code> now?", async () => {
+      try {
+        const tx = await mc.refundPlayers();
+        await tx.wait();
+        showInfo("Refund completed.");
+        openMissionModal({ addr: address });
+      } catch (e) {
+        showAlert(`Refund failed: ${e.message}`, "error");
+      }
+    });
+  } catch (e) {
+    showAlert("Unable to refund: " + e.message, "error");
+  }
+}
+
+/* close: add/remove modal-open class */
+function closeMissionModal(){
+  missionModal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+modalCloseX?.addEventListener("click", closeMissionModal);
+modalCloseBtn?.addEventListener("click", closeMissionModal);
+
 const toUnix = iso => Math.floor(new Date(iso).getTime() / 1000);
 const eth    = ethers.utils;                       // alias
 
@@ -202,12 +358,16 @@ async function handlePostConnect(addrOverride){
 
   const allowed = await isOwnerOrAuthorized(addr);
   toggleSections(allowed);
-  if(!allowed){
+
+  if (allowed) {
+    await loadMissions();   // ✅ load only after admin is confirmed
+  } else {
     showAlert(
       `This wallet is neither from an <b>owner</b> nor from an <b>authorized</b>.`, 'warning',
-      () => disconnectWallet()          // ← run only after the user clicks “OK”
+      () => disconnectWallet()
     );
   }
+
 }
 
 /* ---------- MetaMask account change ---------- */
@@ -224,6 +384,49 @@ if(window.ethereum){
 (document.readyState === "loading"
   ? document.addEventListener("DOMContentLoaded", () => connectWallet().then(handlePostConnect), { once:true })
   : connectWallet().then(handlePostConnect));
+
+/* ---------- missions list ---------- */
+async function loadMissions(){
+  try{
+    const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
+
+    /* fetch two parallel arrays */
+    const [addrs, stats] = await factory.getAllMissions();
+
+    /* combine, giving each an implicit index (newest = last element) */
+    const items = addrs.map((addr, i) => ({
+      addr,
+      status: Number(stats[i]),
+      idx: addrs.length - i   // for newest-first sort
+    }));
+
+    /* sort: all PartlySuccess first, then newest-to-oldest */
+    items.sort((a,b) => {
+      if(a.status === 5 && b.status !== 5) return -1;
+      if(b.status === 5 && a.status !== 5) return  1;
+      return b.idx - a.idx;
+    });
+
+    /* render */
+    missionsList.innerHTML = "";
+    items.forEach(m => {
+      const li = document.createElement("li");
+      li.className = "mission-item" + (m.status === 3 ? " partly-success" : "");
+      li.innerHTML = `
+        <span>${shorten(m.addr)}</span>
+        <span>${statusText(m.status)}</span>`;
+      li.addEventListener("click", () => openMissionModal(m));
+      missionsList.appendChild(li);
+    });
+
+    /* show / hide the whole section if empty */
+    missionsSection.classList.toggle("hidden", items.length === 0);
+
+  }catch(err){
+    console.warn("loadMissions()", err);
+  }
+}
 
 /* ---------- form submit ---------- */
 form?.addEventListener("submit", async e => {
@@ -267,6 +470,7 @@ form?.addEventListener("submit", async e => {
     showAlert("Transaction sent – waiting for confirmation…","info");
     await tx.wait();
     showAlert("Mission created successfully!","success");
+    await loadMissions();
     form.reset();
     }catch (err){
 
@@ -300,3 +504,6 @@ form?.addEventListener("submit", async e => {
       updateBtn();                                     // re-validate after reset
     }
 });
+
+/* ---------- export public functions for admin.html ---------- */
+window.triggerRefundModal = triggerRefundModal;

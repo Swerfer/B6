@@ -6,8 +6,8 @@
     <title>Mission Admin</title>
 
     <!-- GLOBAL & ADMIN STYLES -->
-    <link rel="stylesheet" href="css/core.css">      <!-- existing base -->
-    <link rel="stylesheet" href="css/admin.css">      <!-- new overrides -->
+    <link rel="stylesheet" href="css/core.css?v450">      <!-- existing base -->
+    <link rel="stylesheet" href="css/admin.css?v450">      <!-- new overrides -->
 
     <!-- Font Awesome & Bootstrap (same as index.html) -->
     <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"
@@ -22,8 +22,8 @@
     <script src="js/web3modal.js"></script>
 
     <!-- Wallet module & this page’s logic -->
-    <script type="module" src="js/core.js?v445"></script>
-    <script type="module" src="js/admin.js"></script>
+    <script type="module" src="js/core.js?v448"></script>
+    <script type="module" src="js/admin.js?v448"></script>
 </head>
 
 <body>
@@ -35,7 +35,7 @@
     </header>
 
     <!-- MAIN: three placeholder panels -->
-    <main class="app-main admin-main container-xl">
+    <main id="adminMain" class="app-main admin-main container-xl">
             <div class="row g-4 w-100">
 
                 <!-- friendly notice for non-authorized visitors -->
@@ -47,6 +47,16 @@
                         <a href="../index.html" class="link-cyan">return to the homepage</a>.
                     </p>
                 </div>
+
+                <!-- ─────────── Existing missions ─────────── -->
+                <section id="missionsSection" class="col-12 section-box hidden">
+                    <h2 class="section-title">
+                        <i class="fa-solid fa-list me-2"></i>Existing Missions
+                    </h2>
+
+                    <!-- list filled by admin.js -->
+                    <ul id="missionsList" class="list-unstyled mb-0"></ul>
+                </section>
 
                 <!-- 1 ▸ Create missions manually -->
                 <section id="createMissionSection" class="col-12 section-box hidden">
@@ -189,5 +199,17 @@
         </div>
 
     </div>
+
+    <!-- mission detail modal -->
+    <div id="missionModal" class="mission-modal hidden">
+        <div class="mission-modal-inner position-relative p-4">
+            <button id="missionModalClose" class="btn-close position-absolute top-0 end-0 m-3"></button>
+
+            <h3 id="missionModalTitle" class="mb-3"></h3>
+            <div id="missionModalBody"></div>
+
+        </div>
+    </div>
+
 </body>
 </html>
