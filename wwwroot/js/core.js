@@ -1,7 +1,7 @@
 /**********************************************************************
  core.js  – shared UI utilities (modals, shortener, global caches)
 **********************************************************************/
-export const FACTORY_ADDRESS = "0x9309f012C08Df9Af3a70b1187040A0d18ED18eed";
+export const FACTORY_ADDRESS = "0xdC96DC9466499ee290ABC6aCe2cB9718575B6815";
 export const READ_ONLY_RPC   = "https://evm.cronos.org";
 
 export const FACTORY_ABI = [

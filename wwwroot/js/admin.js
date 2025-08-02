@@ -420,7 +420,7 @@ if(window.ethereum){
   ? document.addEventListener("DOMContentLoaded", () => connectWallet().then(handlePostConnect), { once:true })
   : connectWallet().then(handlePostConnect));
 
-/* ---------- missions list ---------- */
+//* ---------- load missions list ---------- */
 async function loadMissions(){
   try{
     const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);

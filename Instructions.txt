@@ -63,7 +63,6 @@ Test compile:
 
 Publish contract(s):
 
-    npx hardhat compile
     npx hardhat run scripts/deployAll.js
  
 For Cronoscan verification:
