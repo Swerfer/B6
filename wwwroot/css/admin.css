@@ -221,6 +221,27 @@ body.modal-open::before {
   }
 }
 
+#missionModalClose {
+  color:#145a83;
+}
+
+.mission-item {
+  position: relative;  /* so spinner can center inside */
+}
+
+.mission-spinner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 3px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+}
 
 
 

@@ -231,6 +231,10 @@ body, .app-main{
   pointer-events:none;
 }
 
+.d-none {
+  display: none !important;
+}
+
 .btn-loading{
   position:relative;
   pointer-events:none;

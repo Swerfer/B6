@@ -199,6 +199,9 @@ async function openMissionModal(item, btnRef = null){
       <div class="text-center mt-4">${buttons}</div>
     `;
 
+    document.getElementById("missionModalCloseBtn")?.addEventListener("click", closeMissionModal);
+
+
     const reloadBtn = modalBody.querySelector('.reload-btn');
     if (reloadBtn) {
       reloadBtn.addEventListener('click', () => openMissionModal(item, reloadBtn));
@@ -271,7 +274,6 @@ function closeMissionModal(){
 }
 
 modalCloseX?.addEventListener("click", closeMissionModal);
-modalCloseBtn?.addEventListener("click", closeMissionModal);
 
 const toUnix = iso => Math.floor(new Date(iso).getTime() / 1000);
 const eth    = ethers.utils;                       // alias
@@ -396,9 +398,15 @@ async function handlePostConnect(addrOverride){
     updateConnectButton("connected", addr);
     await loadMissions();   // ✅ load only after admin is confirmed
   } else {
-    updateConnectButton(); // reset
+    updateConnectButton();
+    toggleSections(false);
+    missionsList.innerHTML = "";              
+    document.getElementById("missionsSection")?.classList.add("hidden");
+    form?.reset();
+    createBtn?.setAttribute("disabled", "true");
     showAlert(
-      `This wallet is neither from an <b>owner</b> nor from an <b>authorized</b>.`, 'warning',
+      `This wallet is neither from an <b>owner</b> nor from an <b>authorized</b>.`, 
+      'warning',
       () => disconnectWallet()
     );
   }
@@ -450,8 +458,16 @@ async function loadMissions(){
       li.className = "mission-item" + (m.status === 3 ? " partly-success" : "");
       li.innerHTML = `
         <span>${shorten(m.addr)}</span>
-        <span>${statusText(m.status)}</span>`;
-      li.addEventListener("click", () => openMissionModal(m));
+        <span>${statusText(m.status)}</span>
+        <span class="mission-spinner d-none"></span>`;
+      li.addEventListener("click", () => {
+        const spinner = li.querySelector(".mission-spinner");
+        spinner?.classList.remove("d-none");                 // show spinner
+        openMissionModal(m).finally(() => {
+          spinner?.classList.add("d-none");                  // hide spinner
+        });
+      });
+
       missionsList.appendChild(li);
     });
 
@@ -466,7 +482,7 @@ async function loadMissions(){
 /* ---------- form submit ---------- */
 form?.addEventListener("submit", async e => {
   e.preventDefault();
-  if(createBtn) setBtnLoading(createBtn, true, "Creating...");         // start spinner
+  if(createBtn) setBtnLoading(createBtn, true, "Creating&nbsp;Mission");         // start spinner
 
   if(!walletAddress){ 
     setBtnLoading(createBtn, false);  
