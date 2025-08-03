@@ -76,8 +76,8 @@ export async function connectWallet(){
     await afterWalletConnect(instance);
   }catch(err){
     console.error(err);
-    showAlert("Wallet connection failed.<br>Please try again.","error");
     resetBtn();
+    showAlert("Wallet connection failed.<br>Please try again.","error");
   }
 }
 
@@ -90,7 +90,7 @@ export function disconnectWallet(){
 }
 
 function resetBtn(){
-  if (connectBtn) setBtnLoading(connectBtn, false);
+  if (connectBtn) setBtnLoading(connectBtn, false, "Connect Wallet");
   setConnectText("Connect Wallet");
 }
 

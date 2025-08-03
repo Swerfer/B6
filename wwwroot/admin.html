@@ -187,18 +187,29 @@
 
                 <!-- 2 ▸ view functions -->
                 <section id="readViewSection" class="col-12 section-box hidden">
-                    <h2 class="section-title mb-3">
-                        <i class="fa-solid fa-eye me-2"></i>Read-Only Views
-                    </h2>
+                    <div class="section-header position-relative mb-3">
+                        <!-- Title centered between left and right -->
+                        <h2 class="section-title text-center mb-0 w-100">
+                            <i class="fa-solid fa-eye me-2"></i>Read-Only Views
+                        </h2>
+
+                        <!-- Reload button in top-right, with spinner overlaid -->
+                        <button id="reloadViewsBtn" class="btn btn-sm btn-outline-info position-absolute top-50 end-0 translate-middle-y me-2">
+                            <i class="fa-solid fa-rotate"></i>
+                            <span id="viewsSpinner" class="fade-spinner position-absolute top-50 start-50 translate-middle">
+                                <span class="spinner"></span>
+                            </span>
+                        </button>
+                    </div>
 
                     <!-- 1 ▸ Global stats -->
                     <div id="globalView" class="row g-3"></div>
 
                     <!-- 2 ▸ Player-specific -->
                     <div class="mt-4">
-                        <form id="playerForm" class="d-flex flex-wrap gap-2 align-items-end">
+                        <form id="playerForm" class="form-pair d-flex flex-wrap gap-2 align-items-end">
+                        <label class="form-label form-title mb-2 w-100 text-center">Player&nbsp;Info</label>
                         <div class="flex-grow-1">
-                            <label class="form-label mb-1">Player&nbsp;Info</label>
                             <input id="playerAddr" class="form-control form-control-sm" placeholder="0x…" />
                         </div>
                         <button class="btn btn-sm btn-cyan px-4" type="submit">Lookup</button>
@@ -208,9 +219,9 @@
 
                     <!-- 3 ▸ Address checks -->
                     <div class="mt-4">
-                        <form id="addrForm"  class="d-flex flex-wrap gap-2 align-items-end">
+                        <form id="addrForm"  class="form-pair d-flex flex-wrap gap-2 align-items-end">
+                        <label class="form-label form-title mb-2 w-100 text-center">Authorized or Mission?</label>
                         <div class="flex-grow-1">
-                            <label class="form-label mb-1">Authorized or Mission?</label>
                             <input id="addrCheck" class="form-control form-control-sm" placeholder="0x…" />
                         </div>
                         <button class="btn btn-sm btn-cyan px-4" type="submit">Check</button>
@@ -218,7 +229,6 @@
                         <div id="addrView" class="row g-3 mt-3"></div>
                     </div>
                 </section>
-
 
                 <!-- 3 ▸ onlyOwner / authorized calls -->
                 <section id="ownerWriteSection" class="col-12 section-box hidden">

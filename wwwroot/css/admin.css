@@ -255,6 +255,39 @@
   }
 }
 
+.missing-players {
+  color: #ffc107;      /* Bootstrap warning yellow */
+  font-weight: bold;
+}
+
+.form-pair {
+  display: flex;
+  flex-wrap: nowrap;              
+  gap: 0.5rem;
+  align-items: flex-end;
+  margin-bottom: 1rem;
+}
+
+.form-pair > .flex-grow-1 {
+  flex: 1 1 0%;
+  min-width: 0;
+}
+
+.form-pair input.form-control {
+  width: 100%;
+}
+
+.form-pair button {
+  flex: 0 0 auto;
+  width: 6.5rem;
+  white-space: nowrap;
+}
+
+.form-title {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
 body.modal-open .admin-main {
   pointer-events: none;
 }
@@ -315,6 +348,19 @@ body.modal-open::before {
 .view-card h4{font-size:1rem;color:var(--cyan);margin:0 0 .25rem}
 .view-card p {font-size:.95rem;margin:0}
 
+.section-header {
+  position: relative;
+}
+
+.section-title {
+  margin: 0 auto;
+  text-align: center;
+}
+
+#viewsSpinner .spinner {
+  border-color: rgba(255, 255, 255, 0.3);     /* base ring */
+  border-top-color: #77ffff !important;       /* spinner arc — match theme */
+}
 
 
 

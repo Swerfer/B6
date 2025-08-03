@@ -85,6 +85,20 @@ const validate = () => {
   return { ok: bad.length === 0, bad };
 };
 
+function formatSecondsToDHMS(seconds){
+  seconds = Number(seconds);
+  if (isNaN(seconds) || seconds <= 0) return "—";
+
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+
+  const pad = n => n.toString().padStart(2, "0");
+  const dhms = `${d}d ${pad(h)}:${pad(m)}:${pad(s)}`;
+  return dhms;
+}
+
 const updateBtn = () => {
   const {ok, bad} = validate();
   createBtn.disabled = !ok;
@@ -145,7 +159,7 @@ async function openMissionModal(item, btnRef = null){
     /* build rows */
     const rows = `
       <tr><th>Status</th>             <td>${statusText(status)}</td></tr>
-      <tr><th>Players</th>            <td>${players.length}</td></tr>
+      <tr><th>Players</th>            <td${players.length < enrollmentMinPlayers ? ' class="text-warning fw-bold"' : ''}>${players.length}</td></tr>
       <tr><th>Mission Type</th>       <td>${missionTypeName[missionType]}</td></tr>
       <tr><th>Enrollment Start</th>   <td>${ts(enrollmentStart)}</td></tr>
       <tr><th>Enrollment End</th>     <td>${ts(enrollmentEnd)}</td></tr>
@@ -347,6 +361,11 @@ async function refreshGlobalView(){
 }
 
 async function lookupPlayer(addr){
+  const wrap = document.getElementById("playerView");
+  wrap.innerHTML = `
+    <div class="text-info small">Looking up address…</div>
+  `;
+
   const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
@@ -357,7 +376,6 @@ async function lookupPlayer(addr){
     factory.secondsTillMonthlySlot(addr),
   ]);
 
-  const wrap = document.getElementById("playerView");
   wrap.innerHTML="";
   const add=(l,v)=>wrap.insertAdjacentHTML("beforeend",
     `<div class="view-card"><h4>${l}</h4><p>${v}</p></div>`);
@@ -365,11 +383,16 @@ async function lookupPlayer(addr){
   add("Weekly&nbsp;Limit&nbsp;Used", limits[0]);
   add("Monthly&nbsp;Limit&nbsp;Used",limits[2]);
   add("Can&nbsp;Enroll?", ok?"Yes":"No");
-  add("Next&nbsp;Weekly&nbsp;Slot&nbsp;(s)", wSec);
-  add("Next&nbsp;Monthly&nbsp;Slot&nbsp;(s)",mSec);
+  add("Next Weekly Slot",  formatSecondsToDHMS(wSec));
+  add("Next Monthly Slot", formatSecondsToDHMS(mSec));
 }
 
 async function lookupAddr(addr){
+  const wrap = document.getElementById("addrView");
+  wrap.innerHTML = `
+    <div class="text-info small">Looking up address…</div>
+  `;
+
   const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
@@ -387,7 +410,6 @@ async function lookupAddr(addr){
     authLabel = "Yes";
   }
 
-  const wrap = document.getElementById("addrView");
   wrap.innerHTML = "";
   wrap.insertAdjacentHTML("beforeend",
     `<div class="view-card"><h4>Authorized&nbsp;or&nbsp;Mission?</h4><p>${authLabel}</p></div>
@@ -397,14 +419,23 @@ async function lookupAddr(addr){
 /* ---------- bind forms once DOM ready ---------- */
 document.getElementById("playerForm")?.addEventListener("submit",e=>{
   e.preventDefault();
-  const a=e.target.playerAddr.value.trim();
-  if(ethers.utils.isAddress(a)) lookupPlayer(a);
+  const a=e.target.playerAddr.value.trim().toLowerCase();
+  if(ethers.utils.isAddress(a)) {
+    lookupPlayer(a);
+  } else {
+    showAlert("Invalid address","error");
+  }
+
 });
 
 document.getElementById("addrForm")?.addEventListener("submit",e=>{
   e.preventDefault();
-  const a=e.target.addrCheck.value.trim();
-  if(ethers.utils.isAddress(a)) lookupAddr(a);
+  const a=e.target.addrCheck.value.trim().toLowerCase();
+  if(ethers.utils.isAddress(a)) {
+    lookupAddr(a);
+  } else {
+    showAlert("Invalid address","error");
+  }
 });
 
 /* refresh global view whenever the section is shown */
@@ -551,6 +582,7 @@ function initializeAdminUI() {
 //* ---------- load missions list ---------- */
 async function loadMissions(filter = "all") {
   const spinner = document.getElementById("missionsLoadingSpinner");
+  spinner.classList.remove("hidden");
   try {
     fadeSpinner(spinner, true);
     missionsList.innerHTML = "";
@@ -611,7 +643,8 @@ async function loadMissions(filter = "all") {
   } catch (err) {
     console.warn("loadMissions()", err);
   } finally {
-    fadeSpinner(spinner, false);
+    spinner.classList.remove("show");
+    setTimeout(() => spinner.classList.add("hidden"), 500);
   }
 }
 
@@ -771,6 +804,22 @@ document.addEventListener("DOMContentLoaded", () => {
       loadMissions(filter); // use unified function
     });
   });
+});
+
+document.getElementById("reloadViewsBtn")?.addEventListener("click", async ()=>{
+  const spinner = document.getElementById("viewsSpinner");
+  if (!spinner) return;
+
+  spinner.classList.add("show");
+
+  // Ensure at least 1s spinner display
+  const delay = ms => new Promise(res => setTimeout(res, ms));
+  await Promise.all([
+    refreshGlobalView(),
+    delay(2000)
+  ]);
+
+  spinner.classList.remove("show");
 });
 
 /* ---------- export public functions for admin.html ---------- */
