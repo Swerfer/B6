@@ -339,7 +339,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return secToWeek The number of seconds until the next weekly slot.
      * @return secToMonth The number of seconds until the next monthly slot.
      */
-    function getPlayerLimits(address player)                                 external view returns 
+    function getPlayerLimits(address player)                                external view returns 
         (uint8 weekUsed, uint8 weekMax, uint8 monthUsed, uint8 monthMax, uint256 secToWeek, uint256 secToMonth) {
         uint256 nowTs = block.timestamp;                                        // Get the current timestamp
         uint256[] storage h = _enrollmentHistory[player];                       // Get the player's enrollment history
@@ -508,7 +508,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Registers mission funds for a specific mission type.
      * @param missionType The type of the mission.
      */
-    function registerMissionFunds(MissionType missionType)  external payable onlyMission nonReentrant {
+    function registerMissionFunds(MissionType missionType)                  external payable onlyMission nonReentrant {
         require(msg.value > 0, "Amount must be greater than zero");                                                         // Ensure the amount is greater than zero
         bool isEndedMission = missionStatus[msg.sender] == Status.Success || missionStatus[msg.sender] == Status.Failed;    // Check if the mission has ended successfully or failed
         require(isEndedMission, "Caller not a mission");                                                                    // Ensure the caller is a valid mission that has ended 
@@ -523,7 +523,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This function returns an array containing the reserved funds for each mission type.
      * @return breakdown An array containing the reserved funds for each mission type.
      */
-    function reservedFundsBreakdown() external view returns (uint256[7] memory) {
+    function reservedFundsBreakdown()                                       external view returns (uint256[7] memory) {
         uint256[7] memory breakdown;                        // Array to hold the breakdown of reserved funds for each mission type
         for (uint256 i = 0; i < 7; i++) {
             breakdown[i] = reservedFunds[MissionType(i)];   // Fill the array with the reserved funds for each mission type
@@ -650,9 +650,9 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Returns the addresses of missions filtered by status.
      * This function filters missions based on their status and returns an array of mission addresses that match the specified status.
      * @param s The status to filter missions by.
-     * @return An array of mission addresses that match the specified status.
+     * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsByStatus(Status s) external view returns (address[] memory) {
+    function getMissionsByStatus(Status s)                                  external view returns (address[] memory, uint8[] memory) {
         uint256 len = missions.length;                              // Get the total number of missions
         uint256 count;
 
@@ -663,91 +663,109 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             }
         }
 
-        // Second pass: populate result array
+        // Second pass: populate result arrays
         address[] memory filteredMissions = new address[](count);   // Create an array to hold the addresses of matching missions
+        uint8[] memory statuses = new uint8[](count);               // Create a parallel array for statuses
         uint256 index;
         for (uint256 i = 0; i < len; i++) {                         // Loop through all missions again
             if (missionStatus[missions[i]] == s) {                  // If the mission status matches the specified status
-                filteredMissions[index++] = missions[i];            // Add the mission address to the result array
+                filteredMissions[index] = missions[i];              // Add the mission address to the result array
+                statuses[index] = uint8(s);                         // Add the known status
+                index++;
             }
         }
 
-        return filteredMissions;                                    // Return the array of matching mission addresses
+        return (filteredMissions, statuses);                        // Return both arrays
     }
 
     /**
      * @dev Returns the addresses of missions that have not ended.
      * This function filters out missions that are in the Ended or Failed status.
-     * @return An array of mission addresses that have not ended.
+     * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsNotEnded()                                          external view returns (address[] memory) {
-        uint256 len = missions.length;
-        uint256 count;
+    function getMissionsNotEnded()                                          external view returns (address[] memory, uint8[] memory) {
+        uint256 len = missions.length;                          // Get the total number of missions 
+        uint256 count;                                          // Variable to count how many missions are not ended    
 
-        // First pass: count not ended missions
-        for (uint256 i = 0; i < len; i++) {
-            if (missionStatus[missions[i]] != Status.Success && missionStatus[missions[i]] != Status.Failed) {
+        // First pass: count how many missions are not ended
+        for (uint256 i = 0; i < len; i++) {                     // Loop through all missions    
+            Status s = missionStatus[missions[i]];
+            if (s != Status.Success && s != Status.Failed) {    // If the mission is not in Success or Failed status
                 count++;
             }
         }
 
-        // Second pass: populate result array
-        address[] memory notEndedMissions = new address[](count);
+        // Second pass: populate arrays
+        address[] memory result = new address[](count);         // Create an array to hold the addresses of missions that are not ended
+        uint8[] memory statuses = new uint8[](count);           // Create a parallel array for statuses
         uint256 index;
-        for (uint256 i = 0; i < len; i++) {
-            if (missionStatus[missions[i]] != Status.Success && missionStatus[missions[i]] != Status.Failed) {
-                notEndedMissions[index++] = missions[i];
+
+        for (uint256 i = 0; i < len; i++) {                     // Loop through all missions again
+            Status s = missionStatus[missions[i]];              // Get the status of the current mission
+            if (s != Status.Success && s != Status.Failed) {    // If the mission is not in Success or Failed status
+                result[index] = missions[i];                    // Add the mission address to the result array
+                statuses[index] = uint8(s);                     // Add the status to the statuses array
+                index++;
             }
         }
 
-        return notEndedMissions;
+        return (result, statuses);                              // Return both arrays: addresses of missions not ended and their statuses   
     }
 
     /**
      * @dev Returns the addresses of missions that have ended.
      * This function filters out missions that are in the Ended or Failed status.
-     * @return An array of mission addresses that have ended.
+     * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsEnded()                                             external view returns (address[] memory) {
-        uint256 cutoff = block.timestamp - 30 days;                                     // Calculate the cutoff timestamp for filtering 
-        uint256 len = missions.length;
-        uint256 count;
+    function getMissionsEnded()                                             external view returns (address[] memory, uint8[] memory) {
+        uint256 len = missions.length;                          // Get the total number of missions
+        uint256 count;                                          // Variable to count how many missions have ended
 
-        // First pass: count ended missions within 30 days
-        for (uint256 i = 0; i < len; i++) {                                             // Loop through all missions  
-            if ((missionStatus[missions[i]] == Status.Success || missionStatus[missions[i]] == Status.Failed) &&
-                Mission(payable(missions[i])).getMissionData().missionEnd >= cutoff) {  // If the mission has ended successfully or failed and is within the last 30 days
+        // First pass: count how many missions are ended
+        for (uint256 i = 0; i < len; i++) {                     // Loop through all missions
+            Status s = missionStatus[missions[i]];              // Get the status of the current mission
+            if (s == Status.Success || s == Status.Failed) {    // If the mission is in Success or Failed status
                 count++;
             }
         }
 
-        // Second pass: populate result array
-        address[] memory endedMissions = new address[](count);                          // Create an array to hold the addresses of ended missions
+        // Second pass: populate arrays
+        address[] memory result = new address[](count);         // Create an array to hold the addresses of missions that have ended
+        uint8[] memory statuses = new uint8[](count);           // Create a parallel array for statuses
         uint256 index;
-        for (uint256 i = 0; i < len; i++) {                                             // Loop through all missions again
-            if ((missionStatus[missions[i]] == Status.Success || missionStatus[missions[i]] == Status.Failed) &&
-                Mission(payable(missions[i])).getMissionData().missionEnd >= cutoff) {  // If the mission has ended successfully or failed and is within the last 30 days
-                endedMissions[index++] = missions[i];
+
+        for (uint256 i = 0; i < len; i++) {                     // Loop through all missions again
+            Status s = missionStatus[missions[i]];              // Get the status of the current mission
+            if (s == Status.Success || s == Status.Failed) {    // If the mission is in Success or Failed status
+                result[index] = missions[i];                    // Add the mission address to the result array  
+                statuses[index] = uint8(s);                     // Add the status to the statuses array
+                index++;
             }
         }
 
-        return endedMissions;                                                           // Return the array of ended mission addresses
+        return (result, statuses);                              // Return both arrays: addresses of missions ended and their statuses
     }
 
     /**
      * @dev Returns the addresses of the latest n missions.
      * This function retrieves the last n missions from the list of all missions.
      * @param n The number of latest missions to return.
-     * @return An array of addresses of the latest n missions.
+     * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getLatestMissions(uint256 n) external view returns (address[] memory) {
-        uint256 len = missions.length;              // Get the total number of missions
-        if (n > len) n = len;                       // If n is greater than the number of missions, set n to the total number of missions
-        address[] memory latest = new address[](n); // Create an array to hold the latest n mission addresses
+    function getLatestMissions(uint256 n)                                   external view returns (address[] memory, uint8[] memory) {
+        uint256 total = missions.length;            // Get the total number of missions
+        if (n > total) n = total;                   // If n is greater than the total number of missions, adjust n to total
+
+        address[] memory result = new address[](n); // Create an array to hold the addresses of the latest missions
+        uint8[] memory statuses = new uint8[](n);   // Create a parallel array for statuses
+
         for (uint256 i = 0; i < n; i++) {           // Loop through the last n missions
-            latest[i] = missions[len - 1 - i];      // Fill the array with the latest mission addresses
+            address m = missions[total - 1 - i];    // Get the address of the mission
+            result[i] = m;                          // Add the mission address to the result array  
+            statuses[i] = uint8(missionStatus[m]);  // Add the status of the mission to the statuses array
         }
-        return latest;                              // Return the array of latest mission addresses
+
+        return (result, statuses);                  // Return both arrays: addresses of the latest missions and their statuses
     }
 
     /**
@@ -889,7 +907,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         uint256         _missionStart,
         uint256         _missionEnd,
         uint8           _missionRounds
-    ) external payable nonReentrant {
+    )                                       external payable nonReentrant {
         require(!_initialized, "Already initialized");                          // Ensure the contract is not already initialized
 
         _initialized = true;
@@ -925,7 +943,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      *      - Max players reached
      *      - Insufficient CRO sent
      */
-    function enrollPlayer() external payable nonReentrant {
+    function enrollPlayer()                 external payable nonReentrant {
         uint256 nowTs = block.timestamp;                                                    // Get the current timestamp
         address player = msg.sender;                                                        // Get the address of the player enrolling  
 
@@ -993,7 +1011,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      *      - 1 minute before the final round
      * @dev Emits {RoundClaimed}.
      */
-    function callRound() external nonReentrant {
+    function callRound()                    external nonReentrant {
         Status s = _getRealtimeStatus();                                                                                // Get the current real-time status of the mission
         uint256 nowTs = block.timestamp;                                                                                // Get the current timestamp
 
@@ -1093,7 +1111,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @return joined A boolean indicating if the player is enrolled in the mission.
      * @return won A boolean indicating if the player has won in any round.
      */
-    function playerState(address player) external view returns (bool joined, bool won) {
+    function playerState(address player)    external view returns (bool joined, bool won) {
         return (enrolled[player], hasWon[player]);           // Return the enrollment and win status of the player
     }
 
@@ -1102,7 +1120,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function checks the current real-time status of the mission and calculates the time until the next round.
      * @return The number of seconds until the next round starts, or 0 if the mission is not paused.
      */
-    function secondsUntilNextRound() external view returns (uint256) {
+    function secondsUntilNextRound()        external view returns (uint256) {
         Status s = _getRealtimeStatus();                                        // Get the current real-time status of the mission
         if (s != Status.Paused) {
             return 0;                                                           // If the mission is not paused, return 0 seconds until next round
@@ -1118,7 +1136,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function calculates the progress based on the elapsed time since the mission started.
      * @return The current progress percentage of the mission.
      */
-    function currentProgressPct() external view returns (uint256){
+    function currentProgressPct()           external view returns (uint256){
         uint256 nowTs = block.timestamp;                                                                            // Get the current timestamp
         if (nowTs < _missionData.missionStart) {
             return 0;                                                                                               // If the mission has not started, return 0% progress
@@ -1135,7 +1153,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @param player The address of the player to check for pending payout.
      * @return The pending payout amount for the player, or 0 if not applicable.
      */
-    function pendingPayout(address player) external view returns (uint256) {
+    function pendingPayout(address player)  external view returns (uint256) {
         uint256 nowTs = block.timestamp;                                        // Get the current timestamp
         Status s = _getRealtimeStatus();                                        // Get the current real-time status of the mission
         if (s != Status.Active && s != Status.Paused) {
@@ -1168,7 +1186,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function checks the current real-time status of the mission and returns the number of rounds left.
      * @return The number of remaining rounds in the mission, or 0 if the mission is not in Active or Paused status.
      */
-    function remainingRounds() external view returns (uint8) {
+    function remainingRounds()              external view returns (uint8) {
         Status s = _getRealtimeStatus();                                        // Get the current real-time status of the mission
         if (s == Status.Active || s == Status.Paused) {
             return _missionData.missionRounds - _missionData.roundCount;        // If the mission is Active or Paused, return remaining rounds

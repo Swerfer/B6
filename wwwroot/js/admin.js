@@ -16,8 +16,11 @@ import {
     showConfirm,
     setBtnLoading,
     clearSelection,
-    shorten,          // new
-    statusText, 
+    statusText,
+    fadeSpinner,
+    missionTypeName,
+    copyableAddr,
+    shorten,
 } from "./core.js";
 
 /* ---------- DOM ---------- */
@@ -38,7 +41,7 @@ const missionModal      = document.getElementById   ("missionModal");
 const modalTitle        = document.getElementById   ("missionModalTitle");
 const modalBody         = document.getElementById   ("missionModalBody");
 const modalCloseX       = document.getElementById   ("missionModalClose");
-const modalCloseBtn     = document.getElementById   ("missionModalCloseBtn");
+const modalCloseBtn     = document.getElementById   ("missionModalCloseBtn"); // Do not remove this line, it is used in the modalBody
 
 /* ---------- live-validation ---------- */
 const highlight = els => {
@@ -93,17 +96,12 @@ form?.addEventListener("input",  updateBtn);
 form?.addEventListener("change", updateBtn);
 document.addEventListener("DOMContentLoaded", updateBtn,    {once:true});
 
-function missionTypeName(type) {
-  return {
-    0: "Custom",
-    1: "Hourly",
-    2: "Quarter-Daily",
-    3: "Bi-Daily",
-    4: "Daily",
-    5: "Weekly",
-    6: "Monthly"
-  }[type] || `Unknown (${type})`;
-}
+document.getElementById("latestMissionsLink")?.addEventListener("click", async e=>{
+  e.preventDefault();
+  let n = parseInt(prompt("How many missions?","10"),10);
+  if(isNaN(n)||n<=0) return;
+  await loadLatestMissions(n);
+});
 
 /* ---------- helpers ---------- */
 async function openMissionModal(item, btnRef = null){
@@ -132,6 +130,13 @@ async function openMissionModal(item, btnRef = null){
 
     const status = await mc.getRealtimeStatus();
 
+    if (btnRef && btnRef.dataset.loading){
+     await new Promise(res => {
+       setBtnLoading(btnRef, false);
+       btnRef.addEventListener("transitionend", res, { once:true });
+     });
+    }
+
     const ts = s => new Date(Number(s) * 1000).toLocaleString(navigator.language, {
       dateStyle: 'short',
       timeStyle: 'short'
@@ -141,7 +146,7 @@ async function openMissionModal(item, btnRef = null){
     const rows = `
       <tr><th>Status</th>             <td>${statusText(status)}</td></tr>
       <tr><th>Players</th>            <td>${players.length}</td></tr>
-      <tr><th>Mission Type</th>       <td>${missionTypeName(missionType)}</td></tr>
+      <tr><th>Mission Type</th>       <td>${missionTypeName[missionType]}</td></tr>
       <tr><th>Enrollment Start</th>   <td>${ts(enrollmentStart)}</td></tr>
       <tr><th>Enrollment End</th>     <td>${ts(enrollmentEnd)}</td></tr>
       <tr><th>Mission Start</th>      <td>${ts(missionStart)}</td></tr>
@@ -167,7 +172,7 @@ async function openMissionModal(item, btnRef = null){
       triggerRefundModal(item.addr);
     }
 
-    modalTitle.textContent = `Mission ${shorten(item.addr)}`;
+    modalTitle.innerHTML = `Mission ${copyableAddr(item.addr)}`;
 
     let buttons = `
       <button class="btn btn-sm btn-outline-info me-2 reload-btn" data-addr="${item.addr}">
@@ -217,9 +222,7 @@ async function openMissionModal(item, btnRef = null){
 
   }catch(e){
     showAlert(`getMissionData failed:<br>${e.message}`,"error");
-  } finally {
-    if (btnRef) setBtnLoading(btnRef, false);
-  }
+  } 
 }
 
 async function triggerRefundModal(address, btnRef){
@@ -230,21 +233,24 @@ async function triggerRefundModal(address, btnRef){
     const mc       = new ethers.Contract(address, MISSION_ABI, signer); 
 
     showConfirm("This mission has <b>Failed</b>, but no players were refunded yet.<br>Do you want to call <code>refundPlayers()</code> now?", async () => {
+      const btnRef = document.querySelector('button[onclick*="triggerRefundModal"]');
       try {
-        const refundBtn = document.querySelector('button[onclick*="triggerRefundModal"]');
         setBtnLoading(btnRef, true, "Refunding");
 
         const tx = await mc.refundPlayers();
         await tx.wait();
 
-        setBtnLoading(btnRef, false);
+        await new Promise(res => {
+          setBtnLoading(btnRef, false);
+          btnRef.addEventListener("transitionend", res, { once: true });
+          setTimeout(res, 600);    
+        });
+
         showAlert("Refund completed.", "success");
         openMissionModal({ addr: address });
       } catch (e) {
         showAlert(`Refund failed: ${e.message}`, "error");
-      } finally {
-          setBtnLoading(btnRef, false);
-      }
+      } 
     });
   } catch (e) {
     showAlert("Unable to refund: " + e.message, "error");
@@ -252,18 +258,23 @@ async function triggerRefundModal(address, btnRef){
 }
 
 function updateConnectButton(state = "idle", address = ""){
+  const btn  = document.getElementById("connectWalletBtn");
   const text = document.getElementById("connectBtnText");
-  if(!text) return;
-
+  if (!text) return;
   switch(state){
     case "connecting":
-      text.innerHTML = "Connecting…";
+      btn ? setBtnLoading(btn, true, "Connecting")
+          : text.textContent = "Connecting…";
       break;
+
     case "connected":
-      text.innerHTML = shorten(address);
+      if (btn) setBtnLoading(btn, false, "", false);
+      text.textContent = shorten(address);
       break;
-    default:
-      text.innerHTML = "Connect Wallet";
+
+    default:                    // idle / disconnected
+      if (btn) setBtnLoading(btn, false);
+      text.textContent = "Connect Wallet";
   }
 }
 
@@ -279,10 +290,12 @@ const toUnix = iso => Math.floor(new Date(iso).getTime() / 1000);
 const eth    = ethers.utils;                       // alias
 
 function toggleSections(show){
-  /* show/hide the three admin panels */
   adminSections.forEach(sec => sec.classList.toggle("hidden", !show));
-  /* invert visibility for the friendly notice */
+  document.querySelectorAll(".admin-only-btn").forEach(btn => {
+    btn.style.display = show ? "inline-flex" : "none";
+  });
   if (unauth) unauth.classList.toggle("hidden", show);
+  if (!show) closeMissionModal();
 }
 
 const MS = 1000, H = 3600*MS, D = 24*H, W = 7*D;
@@ -296,6 +309,107 @@ const missionDefaults = {
 };
 const toLocalIso = dt =>
   new Date(dt.getTime()-dt.getTimezoneOffset()*60*1000).toISOString().slice(0,16);
+
+/* ---------- Read-only view helpers ---------- */
+async function refreshGlobalView(){
+  const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
+
+  const [wk, mo, funds, ownerFunds, succ, fail, impl, totM] = await Promise.all([
+    factory.weeklyLimit(),
+    factory.monthlyLimit(),
+    factory.totalMissionFunds(),
+    factory.totalOwnerEarnedFunds(),
+    factory.totalMissionSuccesses(),
+    factory.totalMissionFailures(),
+    factory.missionImplementation(),
+    factory.getTotalMissions(),
+  ]);
+
+  const fundsByType = await Promise.all([1,2,3,4,5,6].map(t=>factory.getFundsByType(t)));
+  const fmt = v => ethers.utils.formatEther(v);
+  const g = document.getElementById("globalView");
+  g.innerHTML = "";
+  const add = (label,val)=>g.insertAdjacentHTML("beforeend",
+    `<div class="view-card"><h4>${label}</h4><p>${val}</p></div>`);
+
+  add("Factory&nbsp;Address", copyableAddr(FACTORY_ADDRESS));
+  add("Mission&nbsp;Impl.",   copyableAddr(impl));
+  add("Total&nbsp;Missions",  totM);
+  add("Weekly&nbsp;Limit",    wk);
+  add("Monthly&nbsp;Limit",   mo);
+  add("Total&nbsp;Funds",     fmt(funds)+" CRO");
+  add("Owner&nbsp;Earnings",  fmt(ownerFunds)+" CRO");
+  add("Successes",            succ);
+  add("Failures",             fail);
+  fundsByType.forEach((f,i)=>
+    add(`${missionTypeName[i + 1]}&nbsp;Funds`, fmt(f)+" CRO"));
+}
+
+async function lookupPlayer(addr){
+  const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
+
+  const [limits, ok, wSec, mSec] = await Promise.all([
+    factory.getPlayerLimits(addr),
+    factory.canEnroll(addr),
+    factory.secondsTillWeeklySlot(addr),
+    factory.secondsTillMonthlySlot(addr),
+  ]);
+
+  const wrap = document.getElementById("playerView");
+  wrap.innerHTML="";
+  const add=(l,v)=>wrap.insertAdjacentHTML("beforeend",
+    `<div class="view-card"><h4>${l}</h4><p>${v}</p></div>`);
+
+  add("Weekly&nbsp;Limit&nbsp;Used", limits[0]);
+  add("Monthly&nbsp;Limit&nbsp;Used",limits[2]);
+  add("Can&nbsp;Enroll?", ok?"Yes":"No");
+  add("Next&nbsp;Weekly&nbsp;Slot&nbsp;(s)", wSec);
+  add("Next&nbsp;Monthly&nbsp;Slot&nbsp;(s)",mSec);
+}
+
+async function lookupAddr(addr){
+  const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
+
+  const [ownerAddr, auth, isM] = await Promise.all([
+    factory.owner(),            // ✨ added
+    factory.authorized(addr),
+    factory.isMission(addr),
+  ]);
+
+  /* decide label: "Yes - Owner" supersedes regular "Yes" */
+  let authLabel = "No";
+  if (addr.toLowerCase() === ownerAddr.toLowerCase()) {
+    authLabel = "Yes&nbsp;-&nbsp;Owner";
+  } else if (auth) {
+    authLabel = "Yes";
+  }
+
+  const wrap = document.getElementById("addrView");
+  wrap.innerHTML = "";
+  wrap.insertAdjacentHTML("beforeend",
+    `<div class="view-card"><h4>Authorized&nbsp;or&nbsp;Mission?</h4><p>${authLabel}</p></div>
+     <div class="view-card"><h4>Is&nbsp;Mission?</h4><p>${isM ? "Yes" : "No"}</p></div>`);
+}
+
+/* ---------- bind forms once DOM ready ---------- */
+document.getElementById("playerForm")?.addEventListener("submit",e=>{
+  e.preventDefault();
+  const a=e.target.playerAddr.value.trim();
+  if(ethers.utils.isAddress(a)) lookupPlayer(a);
+});
+
+document.getElementById("addrForm")?.addEventListener("submit",e=>{
+  e.preventDefault();
+  const a=e.target.addrCheck.value.trim();
+  if(ethers.utils.isAddress(a)) lookupAddr(a);
+});
+
+/* refresh global view whenever the section is shown */
+document.querySelector('[data-target="readViewSection"]')
+  ?.addEventListener("click", ()=>refreshGlobalView());
 
 /* ---------- auto-populate logic ---------- */
 function applyDateDefaults(){
@@ -393,9 +507,10 @@ async function handlePostConnect(addrOverride){
 
   const allowed = await isOwnerOrAuthorized(addr);
   toggleSections(allowed);
-
   if (allowed) {
     updateConnectButton("connected", addr);
+    adminSections.forEach(sec => sec.classList.add("hidden"));
+    document.getElementById("missionsSection")?.classList.remove("hidden");
     await loadMissions();   // ✅ load only after admin is confirmed
   } else {
     updateConnectButton();
@@ -424,65 +539,143 @@ if(window.ethereum){
 }
 
 /* ---------- auto-connect on page load ---------- */
+function initializeAdminUI() {
+  toggleSections(false); // Hide all admin stuff immediately
+  connectWallet().then(handlePostConnect);
+}
+
 (document.readyState === "loading"
-  ? document.addEventListener("DOMContentLoaded", () => connectWallet().then(handlePostConnect), { once:true })
-  : connectWallet().then(handlePostConnect));
+  ? document.addEventListener("DOMContentLoaded", initializeAdminUI, { once: true })
+  : initializeAdminUI());
 
 //* ---------- load missions list ---------- */
-async function loadMissions(){
-  try{
+async function loadMissions(filter = "all") {
+  const spinner = document.getElementById("missionsLoadingSpinner");
+  try {
+    fadeSpinner(spinner, true);
+    missionsList.innerHTML = "";
+    missionsList.classList.remove("empty");
+
     const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 
-    /* fetch two parallel arrays */
-    const [addrs, stats] = await factory.getAllMissions();
+    let addrs = [], stats = [];
 
-    /* combine, giving each an implicit index (newest = last element) */
+    switch (filter) {
+      case "active":
+        [addrs, stats] = await factory.getMissionsNotEnded();
+        setTitle("Active Missions");
+        break;
+      case "partial":
+        [addrs, stats] = await factory.getMissionsByStatus(5);
+        setTitle("Partly Ended Missions");
+        break;
+      case "failed":
+        [addrs, stats] = await factory.getMissionsByStatus(7);
+        setTitle("Failed Missions");
+        break;
+      case "ended":
+        [addrs, stats] = await factory.getMissionsEnded();
+        setTitle("Ended Missions");
+        break;
+      default:
+        [addrs, stats] = await factory.getAllMissions();
+        setTitle("All Missions");
+    }
+
     const items = addrs.map((addr, i) => ({
       addr,
       status: Number(stats[i]),
-      idx: addrs.length - i   // for newest-first sort
+      idx: addrs.length - i
     }));
 
-    /* sort: all PartlySuccess first, then newest-to-oldest */
-    items.sort((a,b) => {
-      if(a.status === 5 && b.status !== 5) return -1;
-      if(b.status === 5 && a.status !== 5) return  1;
+    items.sort((a, b) => {
+      if (a.status === 5 && b.status !== 5) return -1;
+      if (b.status === 5 && a.status !== 5) return 1;
       return b.idx - a.idx;
     });
 
-    /* render */
     missionsList.innerHTML = "";
-    items.forEach(m => {
+    missionsList.classList.remove("empty");
+    if (items.length === 0) {
+      missionsList.classList.add("empty");
       const li = document.createElement("li");
-      li.className = "mission-item" + (m.status === 3 ? " partly-success" : "");
-      li.innerHTML = `
-        <span>${shorten(m.addr)}</span>
-        <span>${statusText(m.status)}</span>
-        <span class="mission-spinner d-none"></span>`;
-      li.addEventListener("click", () => {
-        const spinner = li.querySelector(".mission-spinner");
-        spinner?.classList.remove("d-none");                 // show spinner
-        openMissionModal(m).finally(() => {
-          spinner?.classList.add("d-none");                  // hide spinner
-        });
-      });
-
+      li.className = "mission-empty text-muted";
+      li.textContent = "No missions found for this filter.";
       missionsList.appendChild(li);
-    });
+    } else {
+        await buildMissionGrid(addrs, stats);
+    }
 
-    /* show / hide the whole section if empty */
-    missionsSection.classList.toggle("hidden", items.length === 0);
-
-  }catch(err){
+    missionsSection.classList.remove("hidden");
+  } catch (err) {
     console.warn("loadMissions()", err);
+  } finally {
+    fadeSpinner(spinner, false);
+  }
+}
+
+async function loadLatestMissions(n = 10){
+  const spinner = document.getElementById("missionsLoadingSpinner");
+  fadeSpinner(spinner, true);
+  try{
+    const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
+
+    const [addrs, stats] = await factory.getLatestMissions(n);
+    addrs.length == 1 
+      ? setTitle(`Latest ${addrs.length} Mission`)
+      : setTitle(`Latest ${addrs.length} Missions`);
+
+    /* reuse existing grid builder */
+    await buildMissionGrid(addrs, stats);
+  }catch(err){
+    console.warn("loadLatestMissions()", err);
+  }finally{
+    fadeSpinner(spinner, false);
+  }
+}
+
+async function buildMissionGrid(addrs, stats){
+  const items = addrs.map((addr,i)=>({ addr, status:Number(stats[i]), idx:addrs.length-i }));
+  items.sort((a,b)=> (a.status===5&&b.status!==5? -1 : b.status===5&&a.status!==5? 1 : b.idx-a.idx));
+
+  missionsList.innerHTML = "";
+  missionsList.classList.toggle("empty", items.length===0);
+
+  if(items.length===0){
+    const li = document.createElement("li");
+    li.className="mission-empty text-muted";
+    li.textContent="No missions found for this filter.";
+    missionsList.appendChild(li);
+    return;
+  }
+
+  items.forEach(m=>{
+    const li=document.createElement("li");
+    li.className="mission-item"+(m.status===3?" partly-success":"");
+    li.innerHTML=`<span>${shorten(m.addr)}</span><span>${statusText(m.status)}</span><span class="mission-spinner fade-spinner hidden"></span>`;
+    li.addEventListener("click",()=>{
+      const sp=li.querySelector(".mission-spinner");
+      fadeSpinner(sp,true);
+      openMissionModal(m).finally(()=>fadeSpinner(sp,false));
+    });
+    missionsList.appendChild(li);
+  });
+  missionsSection.classList.remove("hidden");
+}
+
+function setTitle(label) {
+  const titleEl = document.getElementById("missionsTitle");
+  if (titleEl) {
+    titleEl.innerHTML = `<i class="fa-solid fa-list me-2"></i>${label}`;
   }
 }
 
 /* ---------- form submit ---------- */
 form?.addEventListener("submit", async e => {
   e.preventDefault();
-  if(createBtn) setBtnLoading(createBtn, true, "Creating&nbsp;Mission");         // start spinner
+  if(createBtn) setBtnLoading(createBtn, true, "Creating&nbsp;Mission");      
 
   if(!walletAddress){ 
     setBtnLoading(createBtn, false);  
@@ -554,6 +747,30 @@ form?.addEventListener("submit", async e => {
       setBtnLoading(createBtn,false);                  // always stop
       updateBtn();                                     // re-validate after reset
     }
+});
+
+// Navigation icon handlers
+document.querySelectorAll(".icon-nav").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const targetId = btn.getAttribute("data-target");
+    adminSections.forEach(sec => {
+      if (sec.id === targetId) {
+        sec.classList.remove("hidden");
+      } else {
+        sec.classList.add("hidden");
+      }
+    });
+  });
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll('[data-filter]').forEach(item => {
+    item.addEventListener('click', e => {
+      e.preventDefault();
+      const filter = item.getAttribute('data-filter');
+      loadMissions(filter); // use unified function
+    });
+  });
 });
 
 /* ---------- export public functions for admin.html ---------- */

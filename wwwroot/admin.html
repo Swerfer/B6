@@ -24,6 +24,12 @@
     <!-- Wallet module & this page’s logic -->
     <script type="module" src="js/core.js?v448"></script>
     <script type="module" src="js/admin.js?v448"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/js/bootstrap.bundle.min.js"
+        integrity="sha512-pax4MlgXjHEPfCwcJLQhigY7+N8rt6bVvWLFyUMuxShv170X53TRzGPmPkZmGBhk+jikR8WBM4yl7A9WMHHqvg=="
+        crossorigin="anonymous" referrerpolicy="no-referrer">
+    </script>
+
 </head>
 
 <body>
@@ -50,9 +56,33 @@
 
                 <!-- ─────────── Existing missions ─────────── -->
                 <section id="missionsSection" class="col-12 section-box hidden">
-                    <h2 class="section-title">
-                        <i class="fa-solid fa-list me-2"></i>Existing Missions
-                    </h2>
+                    <div class="position-relative text-center">
+                        <!-- Spinner shown while loading -->
+                        <div id="missionsLoadingSpinner" class="missions-loading-spinner fade-spinner">
+                            <div class="spinner"></div>
+                        </div>
+                        <!-- Hamburger absolutely positioned in top-left -->
+                        <div class="dropdown position-absolute top-0 start-0">
+                            <button class="btn btn-sm btn-outline-info dropdown-toggle" type="button" id="missionFilterMenu"
+                                    data-bs-toggle="dropdown" aria-expanded="false">
+                                <i class="fa-solid fa-bars"></i>
+                            </button>
+                            <ul class="dropdown-menu" aria-labelledby="missionFilterMenu">
+                                <li><a class="dropdown-item" href="#" data-filter="all">All Missions</a></li>
+                                <li><a class="dropdown-item" href="#" data-filter="active">Active Missions</a></li>
+                                <li><a class="dropdown-item" href="#" data-filter="partial">Partly Ended Missions</a></li>
+                                <li><a class="dropdown-item" href="#" data-filter="failed">Failed Missions</a></li>
+                                <li><a class="dropdown-item" href="#" data-filter="ended">Ended Missions</a></li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li><a id="latestMissionsLink" class="dropdown-item" href="#">Latest Missions…</a></li>
+                            </ul>
+                        </div>
+
+                        <!-- Centered title -->
+                        <h2 id="missionsTitle" class="section-title m-0">
+                            <i class="fa-solid fa-list me-2"></i>All Missions
+                        </h2>
+                    </div>
 
                     <!-- list filled by admin.js -->
                     <ul id="missionsList" class="list-unstyled mb-0"></ul>
@@ -155,30 +185,71 @@
                     </form>
                 </section>
 
-                <!-- 2 ▸ onlyOwner / authorized calls -->
-                <section class="col-12 section-box hidden">
+                <!-- 2 ▸ view functions -->
+                <section id="readViewSection" class="col-12 section-box hidden">
+                    <h2 class="section-title mb-3">
+                        <i class="fa-solid fa-eye me-2"></i>Read-Only Views
+                    </h2>
+
+                    <!-- 1 ▸ Global stats -->
+                    <div id="globalView" class="row g-3"></div>
+
+                    <!-- 2 ▸ Player-specific -->
+                    <div class="mt-4">
+                        <form id="playerForm" class="d-flex flex-wrap gap-2 align-items-end">
+                        <div class="flex-grow-1">
+                            <label class="form-label mb-1">Player&nbsp;Info</label>
+                            <input id="playerAddr" class="form-control form-control-sm" placeholder="0x…" />
+                        </div>
+                        <button class="btn btn-sm btn-cyan px-4" type="submit">Lookup</button>
+                        </form>
+                        <div id="playerView" class="row g-3 mt-3"></div>
+                    </div>
+
+                    <!-- 3 ▸ Address checks -->
+                    <div class="mt-4">
+                        <form id="addrForm"  class="d-flex flex-wrap gap-2 align-items-end">
+                        <div class="flex-grow-1">
+                            <label class="form-label mb-1">Authorized or Mission?</label>
+                            <input id="addrCheck" class="form-control form-control-sm" placeholder="0x…" />
+                        </div>
+                        <button class="btn btn-sm btn-cyan px-4" type="submit">Check</button>
+                        </form>
+                        <div id="addrView" class="row g-3 mt-3"></div>
+                    </div>
+                </section>
+
+
+                <!-- 3 ▸ onlyOwner / authorized calls -->
+                <section id="ownerWriteSection" class="col-12 section-box hidden">
                     <h2 class="section-title">
                         <i class="fa-solid fa-user-shield me-2"></i>Owner / Authorized Functions
                     </h2>
                     <p class="placeholder-text">Buttons & inputs will appear here.</p>
                 </section>
 
-                <!-- 3 ▸ view functions -->
-                <section class="col-12 section-box hidden">
-                    <h2 class="section-title">
-                        <i class="fa-solid fa-eye me-2"></i>Read-Only Views
-                    </h2>
-                    <p class="placeholder-text">Tables & stats will render here.</p>
-                </section>
-
             </div>
     </main>
 
     <footer class="app-footer">
-        <div class="inner">
-            <button id="connectWalletBtn" class="btn btn-sm btn-outline-info me-2">
+        <div class="inner gap-2">
+            <button class="btn btn-sm btn-outline-info icon-nav admin-only-btn" data-target="missionsSection" title="Missions">
+                <i class="fa-solid fa-list"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-info icon-nav admin-only-btn" data-target="createMissionSection" title="Create Mission">
+                <i class="fa-solid fa-plus"></i>
+            </button>
+
+            <button id="connectWalletBtn" class="btn btn-sm btn-outline-info">
                 <i class="fa-solid fa-wallet me-2"></i>
                 <span id="connectBtnText">Connect Wallet</span>
+            </button>
+
+            <button class="btn btn-sm btn-outline-info icon-nav admin-only-btn" data-target="ownerWriteSection" title="Write Functions">
+                <i class="fa-solid fa-user-shield"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-info icon-nav admin-only-btn" data-target="readViewSection" title="Read-Only Views">
+                <i class="fa-solid fa-eye"></i>
             </button>
         </div>
     </footer>

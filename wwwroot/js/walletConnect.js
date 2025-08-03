@@ -1,13 +1,12 @@
 /*--------------------------------------------------------------------
   walletConnect.js – all wallet / Web3Modal logic
 --------------------------------------------------------------------*/
-import { showAlert } from "./core.js";
-export let walletAddress = null;        // live export
+// NEW ------------- walletConnect.js (imports + constants)
+import { showAlert, setBtnLoading, shorten } from "./core.js";
+export let walletAddress = null;
 let web3Modal, provider, signer;
 
-const connectBtnText      = document.getElementById("connectBtnText");
-
-const shortenAddress = a => a ? `${a.slice(0,6)}…${a.slice(-4)}` : "";
+const connectBtn     = document.getElementById("connectWalletBtn");
 
 /* -------- init Web3Modal once -------- */
 function initWeb3Modal(){
@@ -40,46 +39,66 @@ async function afterWalletConnect(instance){
   provider      = new ethers.providers.Web3Provider(instance);
   signer        = provider.getSigner();
   walletAddress = (await signer.getAddress()).toLowerCase();
-  connectBtnText.textContent = shortenAddress(walletAddress);
+  await new Promise(res => {
+    connectBtn.addEventListener("transitionend", res, { once:true });
+    setBtnLoading(connectBtn, false, shorten(walletAddress), false);       // fade spinner out
+    setTimeout(res, 600);                   // safety-net
+  });
 
-  /* account change handler */
+  setConnectText(shorten(walletAddress));
+
   provider.provider.on("accountsChanged", accts=>{
-    if(!accts.length){
+    if (!accts.length){
       disconnectWallet();
-    }else{
+    } else {
       walletAddress = accts[0].toLowerCase();
-      connectBtnText.textContent = shortenAddress(walletAddress);
+      setConnectText(shorten(walletAddress)); 
     }
   });
 }
 
 /* -------- public: connect -------- */
 export async function connectWallet(){
-  if(walletAddress) return;
-  connectBtnText.textContent = "Connecting…";
+  if (walletAddress) return;
+
+  if (connectBtn) {
+    setBtnLoading(connectBtn, true, "Connecting");
+  }
+  else            setConnectText("Connecting…");
 
   try{
     const instance = await retryWeb3ConnectWithTimeout(10, 1000);
-    if(!instance){
+    if (!instance){
       showAlert("Wallet connection timed out.<br>Please try again.","error");
-      connectBtnText.textContent = "Connect Wallet";
+      resetBtn();
       return;
     }
     await afterWalletConnect(instance);
   }catch(err){
     console.error(err);
     showAlert("Wallet connection failed.<br>Please try again.","error");
-    connectBtnText.textContent = "Connect Wallet";
+    resetBtn();
   }
 }
 
 /* -------- public: disconnect -------- */
 export function disconnectWallet(){
-  if(provider?.provider?.disconnect) provider.provider.disconnect();
+  if (provider?.provider?.disconnect) provider.provider.disconnect();
   web3Modal.clearCachedProvider && web3Modal.clearCachedProvider();
   walletAddress = null;
-  connectBtnText.textContent = "Connect Wallet";
+  resetBtn();
 }
+
+function resetBtn(){
+  if (connectBtn) setBtnLoading(connectBtn, false);
+  setConnectText("Connect Wallet");
+}
+
+// NEW — add just below the constants
+const setConnectText = (txt = "Connect Wallet") => {
+  const span = document.getElementById("connectBtnText");
+  if (span) span.textContent = txt;
+};
 
 /* run immediately */
 initWeb3Modal();

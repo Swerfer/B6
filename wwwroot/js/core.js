@@ -1,15 +1,38 @@
 /**********************************************************************
  core.js  – shared UI utilities (modals, shortener, global caches)
 **********************************************************************/
-export const FACTORY_ADDRESS = "0xdC96DC9466499ee290ABC6aCe2cB9718575B6815";
+export const FACTORY_ADDRESS = "0x70b126604dD695Bc062984303751edd365CfBe81";
 export const READ_ONLY_RPC   = "https://evm.cronos.org";
 
 export const FACTORY_ABI = [
-  "function owner() view returns(address)",
-  "function authorized(address) view returns(bool)",
+  // --------- Factory methods ----------
   "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8) payable returns(address)",
+  // --------- Get missions views ----------
   "function getAllMissions() view returns(address[] missions, uint8[] statuses)",
+  "function getMissionsByStatus(uint8 status) view returns(address[] missions, uint8[] statuses)",
+  "function getMissionsEnded() view returns(address[] missions, uint8[] statuses)",
+  "function getMissionsNotEnded() view returns(address[] missions, uint8[] statuses)",
+  "function getLatestMissions(uint256) view returns(address[] missions, uint8[] statuses)",
+  // ------------ global views ------------
+  "function owner() view returns(address)",
+  "function weeklyLimit() view returns(uint256)",
+  "function monthlyLimit() view returns(uint256)",
+  "function totalMissionFunds() view returns(uint256)",
+  "function totalOwnerEarnedFunds() view returns(uint256)",
+  "function totalMissionSuccesses() view returns(uint256)",
+  "function totalMissionFailures() view returns(uint256)",
+  "function missionImplementation() view returns(address)",
+  "function getTotalMissions() view returns(uint256)",
+  "function getFundsByType(uint8) view returns(uint256)",
+  // ---------- address-specific ----------
+  "function authorized(address) view returns(bool)",
+  "function getPlayerLimits(address) view returns(uint8, uint8, uint8, uint8, uint256, uint256)",
+  "function canEnroll(address) view returns(bool)",
+  "function secondsTillWeeklySlot(address) view returns(uint256)",
+  "function secondsTillMonthlySlot(address) view returns(uint256)",
+  "function isMission(address) view returns(bool)",
 ];
+
 
 /* ABI for a single Mission contract */
 /* ABI for a single Mission contract – matches getMissionData() tuple (15 fields) */
@@ -40,9 +63,35 @@ export const MISSION_ABI = [
   "function owner() view returns (address)",
 ];
 
-
 export const shorten = addr =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
+
+export function copyableAddr(addr){
+  if(!addr) return "";
+  return `
+    <span class="copy-wrap" data-copy="${addr}">
+      ${shorten(addr)}
+      <i class="fa-regular fa-copy ms-1 copy-icon"></i>
+    </span>`;
+}
+
+document.addEventListener("click", e=>{
+  const tgt = e.target.closest("[data-copy]");
+  if(!tgt) return;
+  navigator.clipboard.writeText(tgt.dataset.copy)
+    .then(()=>showAlert("Address copied ✓","success"))
+    .catch(()=>showAlert("Copy failed","error"));
+});
+
+export const missionTypeName = {
+  0:  "Custom",         // Custom mission type
+  1:  "Hourly",         // Hourly missions
+  2:  "Quarter-Daily",  // Quarter-Daily missions
+  3:  "Bi-Daily",       // Bi-Daily missions
+  4:  "Daily",          // Daily missions
+  5:  "Weekly",         // Weekly missions
+  6:  "Monthly"         // Monthly missions
+};
 
 export const Status = {
   0:  "Pending",        // Mission is created but not yet enrolling
@@ -54,34 +103,68 @@ export const Status = {
   6:  "Success",        // Mission has ended successfully, all rounds were claimed
   7:  "Failed",         // Mission has failed, no players won or not enough players enrolled
 };
+
+export const limit = {
+  0: "None",            // No limit
+  1: "Weekly",          // Weekly limit
+  2: "Monthly",         // Monthly limit  
+}
+
 export const statusText = code => Status[code] ?? `Unknown(${code})`;
 
 /* ---------- reusable spinner helpers ---------- */
-export function setBtnLoading(btn, state = true, label = ""){
-  if(!btn) return;
+export function setBtnLoading(btn, state = true, label = "", restore = true) {
+  if (!btn) return;
 
-  if(state){
-    /* already active? do nothing */
-    if(btn.dataset.loading) return;
+  /* ---------- START LOADING ---------- */
+  if (state) {
+    if (btn.dataset.loading) return;                 // already loading
 
-    /* store original content + width so the button never shrinks */
-    btn.dataset.loading       = btn.innerHTML;
-    btn.dataset.loadingWidth  = btn.offsetWidth;      // px value
-    btn.style.width           = `${btn.dataset.loadingWidth}px`;
+    btn.dataset.loading      = btn.innerHTML;        // remember markup
+    btn.dataset.loadingWidth = btn.offsetWidth;
+    btn.style.width = `${btn.dataset.loadingWidth}px`;
 
-    /* swap in spinner & label */
     btn.classList.add("btn-loading");
-    btn.innerHTML = `<span class="spinner"></span><span>${label}</span>`;
-  }else{
-    /* nothing to stop */
-    if(!btn.dataset.loading) return;
+    const labelSpan =
+      restore ? `<span class="label-loading">${label}</span>`
+              : `<span id="connectBtnText" class="label-loading">${label}</span>`;
 
-    /* restore */
+    btn.innerHTML = `
+      <span class="spinner fade-spinner"></span>
+      ${labelSpan}`;
+
+    const spinner = btn.querySelector(".fade-spinner");
+    void spinner.offsetWidth;                        // force reflow
+    spinner.classList.add("show");                   // fade-in 0 → 1
+    return;
+  }
+
+  /* ---------- STOP  LOADING ---------- */
+  if (!btn.dataset.loading) return;                  // not in loading state
+
+  const restoreMarkup = () => {
+    if (restore) {
+      btn.innerHTML = btn.dataset.loading;
+    } else {
+      btn.innerHTML = `<span id="connectBtnText" class="label-loading">${label}</span>`;
+    }
+  };
+  const cleanup = () => {
+    spinner?.removeEventListener("transitionend", cleanup);
     btn.classList.remove("btn-loading");
-    btn.innerHTML = btn.dataset.loading;
-    btn.style.width = "";                           // drop fixed width
+    restoreMarkup();
+    btn.style.width = "";
     delete btn.dataset.loading;
     delete btn.dataset.loadingWidth;
+  };
+
+  const spinner = btn.querySelector(".fade-spinner");
+  if (spinner) {
+    requestAnimationFrame(() => spinner.classList.remove("show"));  // 1 → 0
+    spinner.addEventListener("transitionend", cleanup, { once:true });
+    setTimeout(cleanup, 600);                    // ← unchanged fallback
+  } else {                                       // ← unchanged “no-spinner” path
+    cleanup();
   }
 }
 
@@ -151,3 +234,20 @@ export const clearSelection = () => {
   const sel = window.getSelection?.();
   if(sel && sel.removeAllRanges){ sel.removeAllRanges(); }
 };
+
+export function fadeSpinner(el, show) {
+  if (!el) return;
+
+  el.style.transition = `opacity 500ms ease`;
+
+  if (show) {
+    el.classList.remove("hidden");
+    void el.offsetWidth;
+    el.classList.add("show");
+  } else {
+    el.style.opacity = "0";
+    setTimeout(() => el.classList.add("hidden"), 500);
+  }
+}
+
+
