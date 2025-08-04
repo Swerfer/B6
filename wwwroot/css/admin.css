@@ -202,6 +202,10 @@
   width:100%;
 }
 
+.mission-table tr {
+   transition: opacity 0.3s ease;
+}
+
 .mission-table th,
 .mission-table td{
   padding:.35rem .5rem;
@@ -234,6 +238,10 @@
     border:1px solid #0e304c;
     border-radius:8px;
     overflow:hidden;
+  }
+
+  .mission-table tr {
+    transition: opacity 0.3s ease;
   }
 
   /* 3 ▸ label row */
@@ -347,6 +355,16 @@ body.modal-open::before {
 }
 .view-card h4{font-size:1rem;color:var(--cyan);margin:0 0 .25rem}
 .view-card p {font-size:.95rem;margin:0}
+
+@keyframes pulse-highlight {
+  0% { background-color: #0f2b45; }
+  50%   { background-color: rgba(0, 255, 255, 0.25); }
+  100% { background-color: #0f2b45; }
+}
+
+.view-card.flash {
+  animation: pulse-highlight 0.3s ease;
+}
 
 .section-header {
   position: relative;

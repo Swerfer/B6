@@ -564,6 +564,90 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     }
 
     // ──────────────── View Functions ────────────────
+
+    /**
+     * @dev Returns a summary of the factory's state.
+     * This function returns various details about the factory, including owner address, implementation address, total missions, limits, funds, and mission success/failure counts.
+     * @return ownerAddress The address of the owner of the factory.
+     * @return factoryAddress The address of the factory contract.
+     * @return implementation The address of the mission implementation contract.
+     * @return totalMissions The total number of missions created.
+     * @return weekly The weekly enrollment limit.
+     * @return monthly The monthly enrollment limit.
+     * @return missionFunds The total funds registered by missions.
+     * @return ownerFunds The total funds earned by the owner from missions.
+     * @return successes The total number of successful missions.
+     * @return failures The total number of failed missions.
+     * @return fundsPerType An array containing the reserved funds for each mission type (1–6).
+     */
+    function getFactorySummary()                                            public view
+        returns (
+            address ownerAddress,
+            address factoryAddress,
+            address implementation,
+            uint256 totalMissions,
+            uint256 weekly,
+            uint256 monthly,
+            uint256 missionFunds,
+            uint256 ownerFunds,
+            uint256 successes,
+            uint256 failures,
+            uint256[6] memory fundsPerTypeArray
+        )
+    {
+        for (uint8 i = 1; i <= 6; i++) {
+            fundsPerType[i - 1] = fundsByType[i]; // Mission types 1–6
+        }
+
+        return (
+            owner(),
+            address(this),
+            missionImplementation,
+            missions.length,
+            weeklyLimit,
+            monthlyLimit,
+            totalMissionFunds,
+            totalOwnerEarnedFunds,
+            totalMissionSuccesses,
+            totalMissionFailures,
+            fundsPerType
+        );
+    }
+
+    /**
+     * @dev Returns the missions a player is participating in and their statuses.
+     * This function retrieves all missions the player is enrolled in and their current statuses.
+     * @param player The address of the player to check.
+     * @return joined An array of addresses of the missions the player is enrolled in.
+     * @return statuses An array of statuses corresponding to each mission.
+     */
+    function getPlayerParticipation(address player)                         public view returns (address[] memory joined, Status[] memory statuses) {
+        uint256 len = missions.length;                                      // Get the total number of missions
+        uint256 count;                                                      // Variable to count how many missions the player is in
+
+        // First pass: count how many missions the player is in
+        for (uint256 i = len; i > 0; i--) {                                 // Loop through the missions from newest to oldest
+            if (Mission(payable(missions[i - 1])).isPlayer(player)) {       // Check if the player is enrolled in the mission
+                count++;
+            }
+        }
+
+        // Allocate return arrays
+        joined   = new address[](count);                                    // Create an array to hold the addresses of the missions the player is in
+        statuses = new Status[](count);                                     // Create an array to hold the statuses of the missions the player is in    
+        uint256 idx;                                                        // Index for the return arrays
+
+        // Second pass: fill both arrays
+        for (uint256 i = len; i > 0; i--) {                                 // Loop through the missions from newest to oldest
+            address m = missions[i - 1];                                    // Get the address of the current mission
+            if (Mission(payable(m)).isPlayer(player)) {                     // Check if the player is enrolled in the mission
+                joined[idx]   = m;                                          // Add the mission address to the joined array                          
+                statuses[idx] = Mission(payable(m)).getRealtimeStatus();    // Get the realtime status of the mission and add it to the statuses array
+                idx++;                                                      // Increment the index for the return arrays
+            }
+        }
+    }
+
     /**
      * @dev Returns the status of a mission.
      * @param missionAddress The address of the mission to check.
@@ -866,9 +950,10 @@ contract Mission        is Ownable, ReentrancyGuard {
     mapping(address => uint256) public  failedRefundAmounts; // Track failed refund amounts for players
     uint256                     public  ownerShare;          // Total share of funds for the owner
     uint256                     public  factoryShare;        // Total share of funds for the MissionFactory
-    MissionData                 private _missionData;       // Struct to hold all mission data  
-    bool                        private _initialized;       // Flag to track if the contract has been initialized
-    Status                      private _previousStatus;    // Track the previous status of the mission
+    bool                        public  missionStartConditionChecked = false; // Flag to check if the mission start condition has been checked
+    MissionData                 private _missionData;        // Struct to hold all mission data  
+    bool                        private _initialized;        // Flag to track if the contract has been initialized
+    Status                      private _previousStatus;     // Track the previous status of the mission
 
     // ────────────────── Constructor ───────────────────
     /**
@@ -993,12 +1078,14 @@ contract Mission        is Ownable, ReentrancyGuard {
      * calling refundPlayers() is the last chance to refund players.
      * @dev If conditions are not met, sets status to Failed and refunds players.
      */
-    function checkMissionStartCondition()   external nonReentrant onlyOwnerOrAuthorized {
-        uint256 nowTs = block.timestamp;                                        // Get the current timestamp
-         require(nowTs > _missionData.enrollmentEnd && nowTs < _missionData.missionStart, 
-                 "Mission not in arming window. Call refundPlayers instead");   // Ensure mission is in the correct time window to check start conditions
+    function checkMissionStartCondition()   external nonReentrant onlyOwnerOrAuthorized { 
+        uint256 nowTs = block.timestamp;                                                    // Get the current timestamp
+        require(nowTs > _missionData.enrollmentEnd && nowTs < _missionData.missionStart, 
+                 "Mission not in arming window. Call refundPlayers instead");               // Ensure mission is in the correct time window to check start conditions
+        require(missionStartConditionChecked == false, "Already checked start condition");  // Ensure the start condition has not been checked yet
+        missionStartConditionChecked = true;                                                // Set the flag to indicate that the mission start condition has been checked
         if (_missionData.players.length < _missionData.enrollmentMinPlayers) {
-            _setStatus(Status.Failed);                                          // If not enough players, refund and set status to Failed
+            _setStatus(Status.Failed);                                                      // If not enough players, refund and set status to Failed
             _refundPlayers();
         }
     }
@@ -1065,7 +1152,7 @@ contract Mission        is Ownable, ReentrancyGuard {
             msg.sender == address(missionFactory) || missionFactory.authorized(msg.sender) || msg.sender == owner(),
             "Only factory or authorized can fund"
         );                                                                                  // Ensure the sender is the MissionFactory or an authorized address
-        require(_getRealtimeStatus() > Status.Paused, "Mission still active");              // Ensure the mission is not in Active status
+        require(_getRealtimeStatus() < Status.Active, "Mission passed activation");         // Ensure the mission is not already active
 		_missionData.ethStart 	    += msg.value;                                           // Increase the initial CRO amount by the value sent
 		_missionData.ethCurrent 	+= msg.value;                                           // Increase the current CRO amount by the value sent
 		emit PotIncreased(msg.value, _missionData.ethCurrent);                              // Emit event for pot increase
@@ -1103,6 +1190,26 @@ contract Mission        is Ownable, ReentrancyGuard {
     }
 
     // ───────────────── View Functions ─────────────────
+
+    /**
+     * @dev Returns the current number of players enrolled in the mission.
+     * This function retrieves the length of the players array in the mission data.
+     */
+    function getPlayerCount()               public view returns (uint256) {
+        return _missionData.players.length;
+    }
+
+    /**
+     * @dev Returns true if the address is a player in the mission.
+     * This function checks if the address is present in the players array of the mission data.
+     */
+    function isPlayer(address addr)         public view returns (bool) {
+        require(addr != address(0), "Invalid address");                 // Ensure the address is not zero
+        for (uint256 i = 0; i < _missionData.players.length; i++) {     // Loop through the players array
+            if (_missionData.players[i] == addr) return true;           // If the address matches a player, return true
+        }
+        return false;                                                   // If no match found, return false                                   
+    }
 
     /**
      * @dev Returns the player state for a given address.
@@ -1211,6 +1318,27 @@ contract Mission        is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev Returns whether the mission is in the arming phase.
+     * This function checks if the current time is between the enrollment end and mission start times.
+     * @return A boolean indicating if the mission is in the arming phase.
+     */
+    function isArming()                     public view returns (bool) {
+        uint256 nowTs = block.timestamp;
+        return (nowTs > _missionData.enrollmentEnd && nowTs < _missionData.missionStart);
+    }
+
+    /**
+     * @dev Returns whether the mission is finalized by realtime status, 
+            not the status set in the factory which can lag behind.
+     * This function checks if the mission is in Success or Failed status.
+     * @return A boolean indicating if the mission is finalized.
+     */ 
+    function isFinalized()                  public view returns (bool) {
+        Status s = _getRealtimeStatus();
+        return (s == Status.Success || s == Status.Failed);
+    }
+
+    /**
      * @dev Returns the addresses of players who have failed refunds.
      * This function iterates through all players and collects those with failed refund amounts.
      * @return An array of player addresses who have failed refunds.
@@ -1232,6 +1360,32 @@ contract Mission        is Ownable, ReentrancyGuard {
             }
         }
         return failedPlayers;                                                               // Return the array of failed refund players
+    }
+
+    /**
+     * @dev Checks if a player has been refunded.
+     * This function iterates through the refundedPlayers array to check if the address is present.
+     * @param addr The address of the player to check for refund status.
+     * @return A boolean indicating if the player has been refunded.
+     */ 
+    function wasRefunded(address addr)      public view returns (bool) {
+        require(_getRealtimeStatus() == Status.Failed, "Mission is not in Failed status");  // Ensure mission is in Failed status
+        require(addr != address(0), "Invalid address");                                     // Ensure the address is not zero
+        require(enrolled[addr], "Player not enrolled");                                     // Ensure the address is enrolled
+        for (uint256 i = 0; i < _missionData.refundedPlayers.length; i++) {
+            if (_missionData.refundedPlayers[i] == addr) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @dev Returns the array of players who won in the mission.
+     * This function retrieves the playersWon array from the mission data.
+     */ 
+    function getWinners()                   external view returns (PlayersWon[] memory) {
+        require(getRealtimeStatus() == Status.Success || getRealtimeStatus() == Status.PartlySuccess, 
+                "Mission is not in Success or PartlySuccess status");                   // Ensure mission is in Success or PartlySuccess status
+        return _missionData.playersWon;                                                 // Return the array of players who won in the mission
     }
 
     // ──────────────── Internal Helpers ────────────────

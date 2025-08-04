@@ -118,11 +118,21 @@ document.getElementById("latestMissionsLink")?.addEventListener("click", async e
 });
 
 /* ---------- helpers ---------- */
-async function openMissionModal(item, btnRef = null){
+
+function flashCard(el, delay = 0) {
+  setTimeout(() => {
+    el.classList.add("flash");
+    setTimeout(() => el.classList.remove("flash"), 300);
+  }, delay);
+}
+
+async function openMissionModal(item, btnRef = null, factoryStatus = null){
   try{
     const p  = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
     const mc = new ethers.Contract(item.addr, MISSION_ABI, p);
-    if (btnRef) setBtnLoading(btnRef, true, "Reloading");
+    if (btnRef instanceof HTMLButtonElement) { // If a button reference is provided, show loading state
+      setBtnLoading(btnRef, true, "Reloading");
+    }
   const [
     players,              // address[]
     missionType,          // uint8
@@ -138,7 +148,7 @@ async function openMissionModal(item, btnRef = null){
     ethStart,             // uint256
     ethCurrent,           // uint256
     playersWon,           // array with { player, amountWon }
-    pauseTimestamp,       // uint256
+    pauseTimestamp,       // uint256 - Do not remove this, despite not being used here
     refundedPlayers       // address[]
   ] = await mc.getMissionData();
 
@@ -157,25 +167,26 @@ async function openMissionModal(item, btnRef = null){
     });
 
     /* build rows */
-    const rows = `
-      <tr><th>Status</th>             <td>${statusText(status)}</td></tr>
-      <tr><th>Players</th>            <td${players.length < enrollmentMinPlayers ? ' class="text-warning fw-bold"' : ''}>${players.length}</td></tr>
-      <tr><th>Mission Type</th>       <td>${missionTypeName[missionType]}</td></tr>
-      <tr><th>Enrollment Start</th>   <td>${ts(enrollmentStart)}</td></tr>
-      <tr><th>Enrollment End</th>     <td>${ts(enrollmentEnd)}</td></tr>
-      <tr><th>Mission Start</th>      <td>${ts(missionStart)}</td></tr>
-      <tr><th>Mission End</th>        <td>${ts(missionEnd)}</td></tr>
-      <tr><th>Min Players</th>        <td>${enrollmentMinPlayers}</td></tr>
-      <tr><th>Max Players</th>        <td>${enrollmentMaxPlayers}</td></tr>
-      <tr><th>Round Count</th>        <td>${roundCount}</td></tr>
-      <tr><th>Enrollment Amount</th>  <td>${ethers.utils.formatEther(enrollmentAmount)} CRO</td></tr>
-      <tr><th>CRO Start</th>          <td>${ethers.utils.formatEther(ethStart)} CRO</td></tr>
-      <tr><th>CRO Current</th>        <td>${ethers.utils.formatEther(ethCurrent)} CRO</td></tr>
-      <tr><th>Rounds</th>             <td>${missionRounds}</td></tr>
-      <tr><th>Players Won</th>        <td>${playersWon.length}</td></tr>
-      <tr><th>Refunded Players</th>   <td>${refundedPlayers.length}</td></tr>
-    `;
-    
+    const rowTemplates = [
+      `<tr><th>Factory Status</th>     <td>${statusText(factoryStatus)}</td></tr>`,
+      `<tr><th>Realtime Status</th>    <td>${statusText(status)}</td></tr>`,
+      `<tr><th>Players</th>            <td${players.length < enrollmentMinPlayers ? ' class="text-warning fw-bold"' : ''}>${players.length}</td></tr>`,
+      `<tr><th>Mission Type</th>       <td>${missionTypeName[missionType]}</td></tr>`,
+      `<tr><th>Enrollment Start</th>   <td>${ts(enrollmentStart)}</td></tr>`,
+      `<tr><th>Enrollment End</th>     <td>${ts(enrollmentEnd)}</td></tr>`,
+      `<tr><th>Mission Start</th>      <td>${ts(missionStart)}</td></tr>`,
+      `<tr><th>Mission End</th>        <td>${ts(missionEnd)}</td></tr>`,
+      `<tr><th>Min Players</th>        <td>${enrollmentMinPlayers}</td></tr>`,
+      `<tr><th>Max Players</th>        <td>${enrollmentMaxPlayers}</td></tr>`,
+      `<tr><th>Round Count</th>        <td>${roundCount}</td></tr>`,
+      `<tr><th>Enrollment Amount</th>  <td>${ethers.utils.formatEther(enrollmentAmount)} CRO</td></tr>`,
+      `<tr><th>CRO Start</th>          <td>${ethers.utils.formatEther(ethStart)} CRO</td></tr>`,
+      `<tr><th>CRO Current</th>        <td>${ethers.utils.formatEther(ethCurrent)} CRO</td></tr>`,
+      `<tr><th>Rounds</th>             <td>${missionRounds}</td></tr>`,
+      `<tr><th>Players Won</th>        <td>${playersWon.length}</td></tr>`,
+      `<tr><th>Refunded Players</th>   <td>${refundedPlayers.length}</td></tr>`
+    ];
+
     const shouldRefund = (
       status === 7 && // Status.Failed
       players.length > 0 &&
@@ -214,21 +225,34 @@ async function openMissionModal(item, btnRef = null){
     `;
 
     modalBody.innerHTML = `
-      <table class="mission-table w-100">${rows}</table>
+      <table class="mission-table w-100"><tbody id="missionDataBody"></tbody></table>
       <div class="text-center mt-4">${buttons}</div>
     `;
 
-    document.getElementById("missionModalCloseBtn")?.addEventListener("click", closeMissionModal);
+    const tbody = document.getElementById("missionDataBody");
+      tbody.innerHTML = ""; // clear old rows if any
 
+    rowTemplates.forEach((rowHTML, i) => {
+      const row = document.createElement("tr");
+      row.innerHTML = rowHTML.replace(/^<tr>|<\/tr>$/g, ""); // strip <tr> wrapper
+      row.style.opacity = 0;
+      row.style.transition = "opacity 0.3s ease";
+      setTimeout(() => {
+        tbody.appendChild(row);
+        requestAnimationFrame(() => row.style.opacity = 1);
+      }, i * 30); // 0.03s per row
+    });
+
+    document.getElementById("missionModalCloseBtn")?.addEventListener("click", closeMissionModal);
 
     const reloadBtn = modalBody.querySelector('.reload-btn');
     if (reloadBtn) {
-      reloadBtn.addEventListener('click', () => openMissionModal(item, reloadBtn));
+      reloadBtn.addEventListener('click', () => openMissionModal(item, reloadBtn, factoryStatus));
     }
 
     const refundBtn = modalBody.querySelector('.refund-btn');
     if (refundBtn) {
-      refundBtn.addEventListener('click', () => triggerRefundModal(item.addr, refundBtn));
+      refundBtn.addEventListener('click', () => triggerRefundModal(item.addr, refundBtn, factoryStatus));
     }
 
     missionModal.classList.remove("hidden");
@@ -239,35 +263,45 @@ async function openMissionModal(item, btnRef = null){
   } 
 }
 
-async function triggerRefundModal(address, btnRef){
+async function triggerRefundModal(address, btnRef, factoryStatus = null) {
   try {
-
     const provider = new ethers.providers.Web3Provider(window.ethereum);
     const signer   = provider.getSigner();
     const mc       = new ethers.Contract(address, MISSION_ABI, signer); 
 
-    showConfirm("This mission has <b>Failed</b>, but no players were refunded yet.<br>Do you want to call <code>refundPlayers()</code> now?", async () => {
-      const btnRef = document.querySelector('button[onclick*="triggerRefundModal"]');
-      try {
+    showConfirm(
+      "This mission has <b>Failed</b>, but no players were refunded yet.<br>Do you want to call <code>refundPlayers()</code> now?",
+      async () => {
+        let success = false;
+
         setBtnLoading(btnRef, true, "Refunding");
 
-        const tx = await mc.refundPlayers();
-        await tx.wait();
+        try {
+          const tx = await mc.refundPlayers();
+          await tx.wait();
+          success = true;
+        } catch (e) {
+          showAlert(`Refund failed: ${e.message}`, "error");
+        }
 
         await new Promise(res => {
           setBtnLoading(btnRef, false);
-          btnRef.addEventListener("transitionend", res, { once: true });
-          setTimeout(res, 600);    
+          btnRef?.addEventListener("transitionend", res, { once: true });
+          setTimeout(res, 600);
         });
 
-        showAlert("Refund completed.", "success");
-        openMissionModal({ addr: address });
-      } catch (e) {
-        showAlert(`Refund failed: ${e.message}`, "error");
-      } 
-    });
+        if (success) {
+          showAlert("Refund completed.", "success");
+        }
+
+        openMissionModal({ addr: address }, null, factoryStatus);  // ✅ always reload modal
+      }
+    );
   } catch (e) {
+    // This only triggers if signer setup fails, etc.
+    setBtnLoading(btnRef, false);
     showAlert("Unable to refund: " + e.message, "error");
+    openMissionModal({ addr: address }, null, factoryStatus);  // ✅ show modal even on setup fail
   }
 }
 
@@ -344,8 +378,12 @@ async function refreshGlobalView(){
   const fmt = v => ethers.utils.formatEther(v);
   const g = document.getElementById("globalView");
   g.innerHTML = "";
-  const add = (label,val)=>g.insertAdjacentHTML("beforeend",
-    `<div class="view-card"><h4>${label}</h4><p>${val}</p></div>`);
+  let rowIndex = 0;
+  const add = (label, val) => {
+    g.insertAdjacentHTML("beforeend",
+      `<div class="view-card"><h4>${label}</h4><p>${val}</p></div>`);
+    flashCard(g.lastElementChild, rowIndex++ * 100);
+  };
 
   add("Factory&nbsp;Address", copyableAddr(FACTORY_ADDRESS));
   add("Mission&nbsp;Impl.",   copyableAddr(impl));
@@ -362,10 +400,6 @@ async function refreshGlobalView(){
 
 async function lookupPlayer(addr){
   const wrap = document.getElementById("playerView");
-  wrap.innerHTML = `
-    <div class="text-info small">Looking up address…</div>
-  `;
-
   const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
@@ -376,23 +410,24 @@ async function lookupPlayer(addr){
     factory.secondsTillMonthlySlot(addr),
   ]);
 
-  wrap.innerHTML="";
-  const add=(l,v)=>wrap.insertAdjacentHTML("beforeend",
-    `<div class="view-card"><h4>${l}</h4><p>${v}</p></div>`);
+  wrap.innerHTML = "";
+  const labels = [
+    ["Weekly&nbsp;Limit&nbsp;Used", limits[0]],
+    ["Monthly&nbsp;Limit&nbsp;Used", limits[2]],
+    ["Can&nbsp;Enroll?", ok ? "Yes" : "No"],
+    ["Next Weekly Slot", formatSecondsToDHMS(wSec)],
+    ["Next Monthly Slot", formatSecondsToDHMS(mSec)]
+  ];
 
-  add("Weekly&nbsp;Limit&nbsp;Used", limits[0]);
-  add("Monthly&nbsp;Limit&nbsp;Used",limits[2]);
-  add("Can&nbsp;Enroll?", ok?"Yes":"No");
-  add("Next Weekly Slot",  formatSecondsToDHMS(wSec));
-  add("Next Monthly Slot", formatSecondsToDHMS(mSec));
+  labels.forEach(([label, value], i) => {
+    wrap.insertAdjacentHTML("beforeend", 
+      `<div class="view-card"><h4>${label}</h4><p>${value}</p></div>`);
+    flashCard(wrap.lastElementChild, i * 100);  // 0.03s between flashes
+  });
 }
 
 async function lookupAddr(addr){
   const wrap = document.getElementById("addrView");
-  wrap.innerHTML = `
-    <div class="text-info small">Looking up address…</div>
-  `;
-
   const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
@@ -412,8 +447,12 @@ async function lookupAddr(addr){
 
   wrap.innerHTML = "";
   wrap.insertAdjacentHTML("beforeend",
-    `<div class="view-card"><h4>Authorized&nbsp;or&nbsp;Mission?</h4><p>${authLabel}</p></div>
-     <div class="view-card"><h4>Is&nbsp;Mission?</h4><p>${isM ? "Yes" : "No"}</p></div>`);
+    `<div class="view-card"><h4>Authorized&nbsp;or&nbsp;Mission?</h4><p>${authLabel}</p></div>`);
+  flashCard(wrap.lastElementChild, 0);
+
+  wrap.insertAdjacentHTML("beforeend",
+    `<div class="view-card"><h4>Is&nbsp;Mission?</h4><p>${isM ? "Yes" : "No"}</p></div>`);
+  flashCard(wrap.lastElementChild, 100);
 }
 
 /* ---------- bind forms once DOM ready ---------- */
@@ -689,9 +728,9 @@ async function buildMissionGrid(addrs, stats){
     li.className="mission-item"+(m.status===3?" partly-success":"");
     li.innerHTML=`<span>${shorten(m.addr)}</span><span>${statusText(m.status)}</span><span class="mission-spinner fade-spinner hidden"></span>`;
     li.addEventListener("click",()=>{
-      const sp=li.querySelector(".mission-spinner");
-      fadeSpinner(sp,true);
-      openMissionModal(m).finally(()=>fadeSpinner(sp,false));
+      const sp = li.querySelector(".mission-spinner");
+      fadeSpinner(sp, true);
+      openMissionModal(m, sp, m.status).finally(() => fadeSpinner(sp, false));
     });
     missionsList.appendChild(li);
   });
@@ -785,6 +824,7 @@ form?.addEventListener("submit", async e => {
 // Navigation icon handlers
 document.querySelectorAll(".icon-nav").forEach(btn => {
   btn.addEventListener("click", () => {
+    closeMissionModal();
     const targetId = btn.getAttribute("data-target");
     adminSections.forEach(sec => {
       if (sec.id === targetId) {
