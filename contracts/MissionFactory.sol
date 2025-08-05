@@ -28,7 +28,7 @@
  *    • Consists of `missionRounds` payout rounds.  
  *    • A cooldown: 5 min after normal rounds, 1 min before the final round.  
  *    • A player can win **once per mission**.  
- *    • Each round’s payout = time-progress since last claim × `ethStart` / 100.
+ *    • Each round’s payout = time-progress since last claim × `croStart` / 100.
  *
  * 3. **End / Settle**  
  *    • Ends when all rounds are claimed **or** `missionEnd` passes.  
@@ -418,7 +418,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         require(nowTs <= proposal.timestamp + OWNERSHIP_PROPOSAL_WINDOW, "Proposal expired");   // Ensure the proposal is still valid within the proposal window
 
         // Transfer ownership
-        super.transferOwnership(newOwner);                                                      // Call the parent contract's transferOwnership function to change ownership    
+        _transferOwnership(newOwner);                                                           // Transfer ownership to the new owner   
 
         // Cleanup
         delete ownershipProposals[newOwner];                                                    // Delete the ownership proposal for the new owner
@@ -439,7 +439,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param _missionEnd           The end time for the mission.
      * @param _missionRounds        The number of rounds in the mission.
      */
-    function createMission(
+    function createMission (
         MissionType     _missionType,           // Type of the mission
         uint256         _enrollmentStart,       // Start time for enrollment
         uint256         _enrollmentEnd,         // End time for enrollment
@@ -449,13 +449,14 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         uint256         _missionStart,          // Start time for the mission
         uint256         _missionEnd,            // End time for the mission
         uint8           _missionRounds          // Number of rounds in the mission
-        ) external payable onlyOwnerOrAuthorized returns (address) {
-            require(_missionRounds          >= 5,               "Mission rounds must be greater than or equal to 5");               // Ensure mission rounds is greater than or equal to 5
-            require(_enrollmentMinPlayers   >= _missionRounds,  "Minimum players must be greater than or equal to mission rounds"); // Ensure minimum players is at least equal to mission rounds
-            require(_enrollmentStart        <  _enrollmentEnd,  "Enrollment start must be before end");                             // Ensure enrollment start is before end
-            require(_missionStart           >= _enrollmentEnd,  "Mission start must be on or after enrollment end");                // Ensure mission start is on or after enrollment end
-            require(_missionEnd             >  _missionStart,   "Mission start must be before end");                                // Ensure mission start is before end
-            require(_enrollmentAmount       >  0,               "Enrollment amount must be greater than zero");                     // Ensure enrollment amount is greater than zero
+        ) external payable onlyOwnerOrAuthorized nonReentrant returns (address) {
+            require(_missionRounds          >= 5,                       "Mission rounds must be greater than or equal to 5");               // Ensure mission rounds is greater than or equal to 5
+            require(_enrollmentMinPlayers   >= _missionRounds,          "Minimum players must be greater than or equal to mission rounds"); // Ensure minimum players is at least equal to mission rounds
+            require(_enrollmentMaxPlayers   >= _enrollmentMinPlayers,   "Maximum players must be greater than or equal to minimum players");// Ensure maximum players is at least equal to minimum players
+            require(_enrollmentStart        <  _enrollmentEnd,          "Enrollment start must be before end");                             // Ensure enrollment start is before end
+            require(_missionStart           >= _enrollmentEnd,          "Mission start must be on or after enrollment end");                // Ensure mission start is on or after enrollment end
+            require(_missionEnd             >  _missionStart,           "Mission start must be before end");                                // Ensure mission start is before end
+            require(_enrollmentAmount       >  0,                       "Enrollment amount must be greater than zero");                     // Ensure enrollment amount is greater than zero
 
 			address clone = missionImplementation.clone(); 	    // EIP-1167 minimal proxy
 
@@ -548,10 +549,11 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     /**
      * @dev Withdraws funds from the MissionFactory contract.
      * This function allows the owner or an authorized address to withdraw funds from the contract.
-     * If no amount is specified, it withdraws all available funds.
+     * This function shall only be called if the contract is not in use anymore and all missions have ended.
+     * It transfers the specified amount of funds to the owner of the MissionFactory contract.
      * @param amount The amount of funds to withdraw. If 0, withdraws all available funds.
      */
-    function withdrawFunds(uint256 amount)                                  external onlyOwnerOrAuthorized nonReentrant {
+    function withdrawFunds(uint256 amount)                                  external onlyOwner nonReentrant {
         address mgrOwner = owner();                                                             // Get the owner of the MissionFactory contract
         require(mgrOwner != address(0), "Invalid manager owner");                               // Ensure the manager owner is valid
         if (amount == 0) {
@@ -578,7 +580,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return ownerFunds The total funds earned by the owner from missions.
      * @return successes The total number of successful missions.
      * @return failures The total number of failed missions.
-     * @return fundsPerType An array containing the reserved funds for each mission type (1–6).
+     * @return fundsPerTypeArray An array containing the reserved funds for each mission type (1–6).
      */
     function getFactorySummary()                                            public view
         returns (
@@ -592,25 +594,24 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             uint256 ownerFunds,
             uint256 successes,
             uint256 failures,
-            uint256[6] memory fundsPerTypeArray
-        )
-    {
-        for (uint8 i = 1; i <= 6; i++) {
-            fundsPerType[i - 1] = fundsByType[i]; // Mission types 1–6
+            uint256[7] memory fundsPerTypeArray
+        ) {
+        uint256[7] memory breakdown;                        // Array to hold the breakdown of reserved funds for each mission type
+        for (uint256 i = 0; i < 7; i++) {
+            breakdown[i] = reservedFunds[MissionType(i)];   // Fill the array with the reserved funds for each mission type
         }
-
         return (
-            owner(),
-            address(this),
-            missionImplementation,
-            missions.length,
-            weeklyLimit,
-            monthlyLimit,
-            totalMissionFunds,
-            totalOwnerEarnedFunds,
-            totalMissionSuccesses,
-            totalMissionFailures,
-            fundsPerType
+            owner(),                // Return the address of the owner of the factory contract
+            address(this),          // Return the address of the factory contract
+            missionImplementation,  // Return the address of the mission implementation contract
+            missions.length,        // Return the total number of missions
+            weeklyLimit,            // Return the weekly limit
+            monthlyLimit,           // Return the weekly and monthly limits
+            totalMissionFunds,      // Return the total funds registered by missions
+            totalOwnerEarnedFunds,  // Return the total funds registered by missions and earned by the owner
+            totalMissionSuccesses,  // Return the total number of successful missions
+            totalMissionFailures,   // Return the total number of successful and failed missions
+            breakdown               // Return the reserved funds for each mission type
         );
     }
 
@@ -869,13 +870,13 @@ contract Mission        is Ownable, ReentrancyGuard {
     // ───────────────────── Events ─────────────────────
     event MissionStatusChanged  (Status     indexed previousStatus, Status      indexed newStatus,      uint256 timestamp                   );
     event PlayerEnrolled        (address    indexed player,         uint256             amount,         uint256 totalPlayers                );
-    event RoundCalled           (address    indexed player,         uint8       indexed roundNumber,    uint256 payout, uint256 ethRemaining);
+    event RoundCalled           (address    indexed player,         uint8       indexed roundNumber,    uint256 payout, uint256 croRemaining);
     event PlayerRefunded        (address    indexed player,         uint256             amount                                              );
     event FundsWithdrawn        (uint256            ownerAmount,    uint256             factoryAmount                                       );
     event RefundFailed          (address    indexed player,         uint256             amount                                              ); 
     event MissionRefunded       (uint256    indexed nrOfPlayers,    uint256     indexed amount,         address[] indexed player,  uint256 timestamp); // Event emitted when a player is refunded
     event MissionInitialized    (address    indexed owner,          MissionType indexed missionType,    uint256 timestamp                   );
-	event PotIncreased			(uint256			value,			uint256				ethCurrent											);
+	event PotIncreased			(uint256			value,			uint256				croCurrent											);
 
     // ────────── Player-facing custom errors ───────────
     error EnrollmentNotStarted(uint256 nowTs, uint256 startTs);     // Enrollment has not started yet.
@@ -887,10 +888,12 @@ contract Mission        is Ownable, ReentrancyGuard {
     error MonthlyLimit(uint256 secondsLeft);                        // Monthly limit for mission enrollments has been reached.
     error Cooldown(uint256 secondsLeft);                            // Cooldown period is still active, cannot join a new mission.
     error NotActive(uint256 nowTs, uint256 missionStart);           // Mission is not active yet.
+    error MissionEnded();                                           // Mission has already ended.
     error AlreadyWon();                                             // Player has already won in a previous round.
     error NotJoined();                                              // Player has not joined the mission.
     error AllRoundsDone();                                          // All rounds of the mission have been completed.
     error PayoutFailed(address winner, uint256 amount, bytes data); // Payout to a winner failed.
+    error ContractsNotAllowed();                                    // Contracts are not allowed to join the mission.   
 
     // ──────────────────── Modifiers ───────────────────
     /**
@@ -931,8 +934,8 @@ contract Mission        is Ownable, ReentrancyGuard {
         uint256         missionEnd;                     // End time for the mission
         uint8           missionRounds;                  // Total number of rounds in the mission
         uint8           roundCount;                     // Current round count  
-        uint256         ethStart;                       // Initial CRO amount at the start of the mission
-        uint256         ethCurrent;                     // Current CRO amount in the mission
+        uint256         croStart;                       // Initial CRO amount at the start of the mission
+        uint256         croCurrent;                     // Current CRO amount in the mission
         PlayersWon[]    playersWon;                     // Array to hold players who won in the mission     
         uint256         pauseTimestamp;                 // Time when the mission was paused
         address[]       refundedPlayers;                // Track players who have been refunded
@@ -1011,8 +1014,8 @@ contract Mission        is Ownable, ReentrancyGuard {
         _missionData.missionEnd              = _missionEnd;
         _missionData.missionRounds           = _missionRounds;
         _missionData.roundCount              = 0;
-        _missionData.ethStart                = msg.value;                       // Set initial CRO amount to the value sent during initialization
-        _missionData.ethCurrent              = msg.value;                       // Set current CRO amount to the value sent during initialization
+        _missionData.croStart                = msg.value;                       // Set initial CRO amount to the value sent during initialization
+        _missionData.croCurrent              = msg.value;                       // Set current CRO amount to the value sent during initialization
         _missionData.pauseTimestamp          = 0;                               // Initialize pause time to 0
         _missionData.players                 = new address[](0);                // Initialize players array
         _missionData.playersWon              = new PlayersWon[](0);             // Initialize playersWon array
@@ -1024,14 +1027,20 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @notice Allows a player to enroll by paying the enrollment fee.
      * @dev Player can enroll only during the enrollment window and only once.
      * @dev Reverts if:
+     *      - Player is a contract
      *      - Enrollment period not open
      *      - Max players reached
      *      - Insufficient CRO sent
+     *      - Player has already enrolled
+     *      - Player has reached their weekly/monthly limit
      */
     function enrollPlayer()                 external payable nonReentrant {
         uint256 nowTs = block.timestamp;                                                    // Get the current timestamp
         address player = msg.sender;                                                        // Get the address of the player enrolling  
 
+        if (player.code.length > 0) {
+            revert ContractsNotAllowed();                                                   // Ensure that contracts cannot enroll in the mission
+        }
         if (nowTs < _missionData.enrollmentStart) {
             revert EnrollmentNotStarted(nowTs, _missionData.enrollmentStart);               // Check if enrollment has started
         }
@@ -1062,8 +1071,8 @@ contract Mission        is Ownable, ReentrancyGuard {
 
         _missionData.players.push(player);                                                  // Add the player to the players array
         enrolled[player] = true;                                                            // Mark the player as enrolled
-        _missionData.ethStart += msg.value;                                                 // Increase the initial CRO amount by the enrollment fee
-        _missionData.ethCurrent += msg.value;                                               // Increase the current CRO amount by the enrollment fee
+        _missionData.croStart += msg.value;                                                 // Increase the initial CRO amount by the enrollment fee
+        _missionData.croCurrent += msg.value;                                               // Increase the current CRO amount by the enrollment fee
 
         _setStatus(Status.Enrolling);                                                       // Set the mission status to Enrolling
         missionFactory.recordEnrollment(player);                                            // Record the player's enrollment in the MissionFactory contract
@@ -1084,6 +1093,11 @@ contract Mission        is Ownable, ReentrancyGuard {
                  "Mission not in arming window. Call refundPlayers instead");               // Ensure mission is in the correct time window to check start conditions
         require(missionStartConditionChecked == false, "Already checked start condition");  // Ensure the start condition has not been checked yet
         missionStartConditionChecked = true;                                                // Set the flag to indicate that the mission start condition has been checked
+        if (_missionData.players.length == 0) {                                             // If no players enrolled, set status to Failed and withdraw funds
+            _setStatus(Status.Failed);                                                      // Set the mission status to Failed 
+            _withdrawFunds(true);                                                           // Withdraw funds and refund players
+            return;
+        }
         if (_missionData.players.length < _missionData.enrollmentMinPlayers) {
             _setStatus(Status.Failed);                                                      // If not enough players, refund and set status to Failed
             _refundPlayers();
@@ -1097,6 +1111,14 @@ contract Mission        is Ownable, ReentrancyGuard {
      *      - 5 minutes for normal rounds
      *      - 1 minute before the final round
      * @dev Emits {RoundClaimed}.
+     * @dev Reverts if:
+     *      - Mission is in Paused status
+     *      - Mission is not Active
+     *      - Player has already won a round
+     *      - Player is not enrolled in the mission
+     *      - All rounds have been claimed
+     *      - Payout transfer fails
+     * @dev If it is the last round, sets status to Success and withdraws funds
      */
     function callRound()                    external nonReentrant {
         Status s = _getRealtimeStatus();                                                                                // Get the current real-time status of the mission
@@ -1108,31 +1130,29 @@ contract Mission        is Ownable, ReentrancyGuard {
             uint256 secsLeft = _missionData.pauseTimestamp + cd - nowTs;                                                // Calculate seconds left in the cooldown period
                                                                     revert Cooldown(secsLeft);                          // Ensure the mission is not in a cooldown period
         }
-        if (s != Status.Active) {
-                                                                    revert NotActive(nowTs, _missionData.missionStart); // Ensure the mission is in Active status
-        }
-
+        if (s < Status.Active)                                      revert NotActive(nowTs, _missionData.missionStart); // Ensure the mission is in Active status
+        if (s > Status.Active)                                      revert MissionEnded();                              // Ensure the mission has not ended
         if (hasWon[msg.sender])                                     revert AlreadyWon();                                // Ensure the player has not already won a round
         if (!enrolled[msg.sender])                                  revert NotJoined();                                 // Ensure the player is enrolled in the mission
-        if (_missionData.roundCount >= _missionData.missionRounds)    revert AllRoundsDone();                           // Ensure all rounds have not been claimed yet
+        if (_missionData.roundCount >= _missionData.missionRounds)  revert AllRoundsDone();                             // Ensure all rounds have not been claimed yet
 
         uint256 progress = (nowTs - _missionData.missionStart) * 100                                                    // Calculate the progress percentage of the mission
                         / (_missionData.missionEnd - _missionData.missionStart);
         uint256 lastAmt = _missionData.playersWon.length > 0                                                            // Get the last payout amount, or 0 if no payouts have been made
             ? _missionData.playersWon[_missionData.playersWon.length-1].amountWon
             : 0;                                                                                                        
-        uint256 lastProg = (lastAmt * 100) / _missionData.ethStart;                                                     // Calculate the last progress percentage based on the last payout amount
-        uint256 payout   = (progress - lastProg) * _missionData.ethStart / 100;                                         // Calculate the payout amount based on the progress and last payout
+        uint256 lastProg = (lastAmt * 100) / _missionData.croStart;                                                     // Calculate the last progress percentage based on the last payout amount
+        uint256 payout   = (progress - lastProg) * _missionData.croStart / 100;                                         // Calculate the payout amount based on the progress and last payout
 
-        _missionData.ethCurrent -= payout;                                                                              // Deduct the payout from the current CRO amount
+        _missionData.croCurrent -= payout;                                                                              // Deduct the payout from the current CRO amount
         _missionData.roundCount++;                                                                                      // Increment the round count
         hasWon[msg.sender] = true;                                                                                      // Mark the player as having won a round
         _missionData.playersWon.push(PlayersWon(msg.sender, payout));                                                   // Add the player and their payout to the playersWon array
 
         (bool ok, bytes memory data) = msg.sender.call{ value: payout }("");                                            // Attempt to transfer the payout to the player
-        if (!ok) revert PayoutFailed(msg.sender, payout, data);                                                         // If the transfer fails, revert with an error
+        if (!ok)                                                    revert PayoutFailed(msg.sender, payout, data);      // If the transfer fails, revert with an error
 
-        emit RoundCalled(msg.sender, _missionData.roundCount, payout, _missionData.ethCurrent);                         // Emit event for round claim
+        emit RoundCalled(msg.sender, _missionData.roundCount, payout, _missionData.croCurrent);                         // Emit event for round claim
 
         if (_missionData.roundCount == _missionData.missionRounds) {                                                    // If this is the last round, set status to Success
             _setStatus(Status.Success);
@@ -1153,9 +1173,9 @@ contract Mission        is Ownable, ReentrancyGuard {
             "Only factory or authorized can fund"
         );                                                                                  // Ensure the sender is the MissionFactory or an authorized address
         require(_getRealtimeStatus() < Status.Active, "Mission passed activation");         // Ensure the mission is not already active
-		_missionData.ethStart 	    += msg.value;                                           // Increase the initial CRO amount by the value sent
-		_missionData.ethCurrent 	+= msg.value;                                           // Increase the current CRO amount by the value sent
-		emit PotIncreased(msg.value, _missionData.ethCurrent);                              // Emit event for pot increase
+		_missionData.croStart 	    += msg.value;                                           // Increase the initial CRO amount by the value sent
+		_missionData.croCurrent 	+= msg.value;                                           // Increase the current CRO amount by the value sent
+		emit PotIncreased(msg.value, _missionData.croCurrent);                              // Emit event for pot increase
 	}
 
     /**
@@ -1205,10 +1225,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      */
     function isPlayer(address addr)         public view returns (bool) {
         require(addr != address(0), "Invalid address");                 // Ensure the address is not zero
-        for (uint256 i = 0; i < _missionData.players.length; i++) {     // Loop through the players array
-            if (_missionData.players[i] == addr) return true;           // If the address matches a player, return true
-        }
-        return false;                                                   // If no match found, return false                                   
+        return enrolled[addr];                                          // Check if the address is enrolled in the mission                                                                        
     }
 
     /**
@@ -1283,9 +1300,9 @@ contract Mission        is Ownable, ReentrancyGuard {
         uint256 lastAmt = _missionData.playersWon.length > 0                    // Get the last payout amount, or 0 if no payouts have been made
             ? _missionData.playersWon[_missionData.playersWon.length-1].amountWon
             : 0;
-        uint256 lastProg = (lastAmt * 100) / _missionData.ethStart;             // Calculate the last progress percentage based on the last payout amount
+        uint256 lastProg = (lastAmt * 100) / _missionData.croStart;             // Calculate the last progress percentage based on the last payout amount
 
-        return (progress - lastProg) * _missionData.ethStart / 100;             // Calculate pending payout based on progress and last payout
+        return (progress - lastProg) * _missionData.croStart / 100;             // Calculate pending payout based on progress and last payout
     }
 
     /**
@@ -1383,7 +1400,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function retrieves the playersWon array from the mission data.
      */ 
     function getWinners()                   external view returns (PlayersWon[] memory) {
-        require(getRealtimeStatus() == Status.Success || getRealtimeStatus() == Status.PartlySuccess, 
+        require(_getRealtimeStatus() == Status.Success || _getRealtimeStatus() == Status.PartlySuccess, 
                 "Mission is not in Success or PartlySuccess status");                   // Ensure mission is in Success or PartlySuccess status
         return _missionData.playersWon;                                                 // Return the array of players who won in the mission
     }
