@@ -21,6 +21,7 @@ import {
     missionTypeName,
     copyableAddr,
     shorten,
+    decodeError,
 } from "./core.js";
 
 /* ---------- DOM ---------- */
@@ -363,18 +364,9 @@ async function refreshGlobalView(){
   const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
-  const [wk, mo, funds, ownerFunds, succ, fail, impl, totM] = await Promise.all([
-    factory.weeklyLimit(),
-    factory.monthlyLimit(),
-    factory.totalMissionFunds(),
-    factory.totalOwnerEarnedFunds(),
-    factory.totalMissionSuccesses(),
-    factory.totalMissionFailures(),
-    factory.missionImplementation(),
-    factory.getTotalMissions(),
-  ]);
+  const summary = await factory.getFactorySummary();
+  const [owner, _factory, impl, totM, wk, mo, funds, ownerFunds, succ, fail, fundsByType] = summary;
 
-  const fundsByType = await Promise.all([1,2,3,4,5,6].map(t=>factory.getFundsByType(t)));
   const fmt = v => ethers.utils.formatEther(v);
   const g = document.getElementById("globalView");
   g.innerHTML = "";
@@ -385,17 +377,156 @@ async function refreshGlobalView(){
     flashCard(g.lastElementChild, rowIndex++ * 100);
   };
 
-  add("Factory&nbsp;Address", copyableAddr(FACTORY_ADDRESS));
+  add("Factory&nbsp;Owner",   copyableAddr(owner));
+  add("Factory&nbsp;Address", copyableAddr(_factory));
   add("Mission&nbsp;Impl.",   copyableAddr(impl));
   add("Total&nbsp;Missions",  totM);
-  add("Weekly&nbsp;Limit",    wk);
-  add("Monthly&nbsp;Limit",   mo);
-  add("Total&nbsp;Funds",     fmt(funds)+" CRO");
-  add("Owner&nbsp;Earnings",  fmt(ownerFunds)+" CRO");
   add("Successes",            succ);
   add("Failures",             fail);
+  add("Weekly&nbsp;Limit",    wk);
+  add("Monthly&nbsp;Limit",   mo);
+  add("Owner&nbsp;Earnings",  fmt(ownerFunds)+" CRO");
+  add("Total&nbsp;Funds",     fmt(funds)+" CRO");
   fundsByType.forEach((f,i)=>
     add(`${missionTypeName[i + 1]}&nbsp;Funds`, fmt(f)+" CRO"));
+}
+
+async function loadFactoryWriteData() {
+  const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
+
+  try {
+    const [owner, weekly, monthly, funds] = await Promise.all([
+      factory.owner(),
+      factory.weeklyLimit(),
+      factory.monthlyLimit(),
+      factory.totalMissionFunds()
+    ]);
+
+    const isOwner = walletAddress && walletAddress.toLowerCase() === owner.toLowerCase();
+
+    document.getElementById("weeklyLimit").placeholder = `Weekly limit (current: ${weekly})`;
+    document.getElementById("monthlyLimit").placeholder = `Monthly limit (current: ${monthly})`;
+    document.getElementById("fundsAvailable").textContent = `${ethers.utils.formatEther(funds)} CRO available`;
+
+    document.getElementById("withdrawBtn").disabled = !isOwner;
+  } catch (err) {
+    console.error("loadFactoryWriteData() failed:", err);
+    showAlert("Could not load factory write info", "error");
+  }
+}
+
+async function setEnrollmentLimits() {
+  const w = document.getElementById("weeklyLimit")?.value.trim();
+  const m = document.getElementById("monthlyLimit")?.value.trim();
+  if (!w || !m) return showAlert("Please fill both limits", "warning");
+
+  try {
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const signer   = provider.getSigner();
+    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+    const tx = await factory.setEnrollmentLimits(w, m);
+    showAlert("Sending transaction…", "info");
+    await tx.wait();
+    showAlert("Enrollment limits updated", "success");
+    await loadFactoryWriteData();
+  } catch (err) {
+    showAlert(decodeError(err), "error");
+  }
+}
+
+async function addAuthorizedAddress() {
+  const addr = document.getElementById("authAdd")?.value.trim();
+  if (!ethers.utils.isAddress(addr)) return showAlert("Invalid address", "warning");
+
+  try {
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const signer   = provider.getSigner();
+    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+    const tx = await factory.addAuthorizedAddress(addr);
+    showAlert("Adding authorized address…", "info");
+    await tx.wait();
+    showAlert("Address authorized", "success");
+  } catch (err) {
+    showAlert(decodeError(err), "error");
+  }
+}
+
+async function removeAuthorizedAddress() {
+  const addr = document.getElementById("authRemove")?.value.trim();
+  if (!ethers.utils.isAddress(addr)) return showAlert("Invalid address", "warning");
+
+  try {
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const signer   = provider.getSigner();
+    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+    const tx = await factory.removeAuthorizedAddress(addr);
+    showAlert("Removing authorized address…", "info");
+    await tx.wait();
+    showAlert("Address removed", "success");
+  } catch (err) {
+    showAlert(decodeError(err), "error");
+  }
+}
+
+async function proposeOwnershipTransfer() {
+  const newOwner = document.getElementById("proposeOwner")?.value.trim();
+  if (!ethers.utils.isAddress(newOwner)) return showAlert("Invalid address", "warning");
+
+  try {
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const signer   = provider.getSigner();
+    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+    const tx = await factory.proposeOwnershipTransfer(newOwner);
+    showAlert("Ownership transfer proposed", "info");
+    await tx.wait();
+    showAlert("Proposal submitted", "success");
+  } catch (err) {
+    showAlert(decodeError(err), "error");
+  }
+}
+
+async function confirmOwnershipTransfer() {
+  const newOwner = document.getElementById("confirmOwner")?.value.trim();
+  if (!ethers.utils.isAddress(newOwner)) return showAlert("Please enter the new owner's address to confirm", "warning");
+  try {
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const signer   = provider.getSigner();
+    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+    const tx = await factory.confirmOwnershipTransfer();
+    showAlert("Confirming transfer…", "info");
+    await tx.wait();
+    showAlert("Ownership transferred", "success");
+  } catch (err) {
+    showAlert(decodeError(err), "error");
+  }
+}
+
+async function withDrawFunds() {
+  const val = document.getElementById("withdrawAmount")?.value.trim();
+  if (!val || isNaN(val)) return showAlert("Invalid amount", "warning");
+
+  try {
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const signer   = provider.getSigner();
+    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+    const amount   = ethers.utils.parseEther(val);
+    const tx = await factory.withDrawFunds(amount);
+    showAlert("Withdrawing funds…", "info");
+    await tx.wait();
+    showAlert("Funds withdrawn", "success");
+    await loadFactoryWriteData();
+  } catch (err) {
+    showAlert(decodeError(err), "error");
+  }
+}
+
+function setMaxWithdraw() {
+  const p = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
+  factory.totalMissionFunds().then(f => {
+    document.getElementById("withdrawAmount").value = ethers.utils.formatEther(f);
+  });
 }
 
 async function lookupPlayer(addr){
@@ -403,11 +534,12 @@ async function lookupPlayer(addr){
   const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
-  const [limits, ok, wSec, mSec] = await Promise.all([
+  const [limits, ok, wSec, mSec, [joined]] = await Promise.all([
     factory.getPlayerLimits(addr),
     factory.canEnroll(addr),
     factory.secondsTillWeeklySlot(addr),
     factory.secondsTillMonthlySlot(addr),
+    factory.getPlayerParticipation(addr),
   ]);
 
   wrap.innerHTML = "";
@@ -416,10 +548,12 @@ async function lookupPlayer(addr){
     ["Monthly&nbsp;Limit&nbsp;Used", limits[2]],
     ["Can&nbsp;Enroll?", ok ? "Yes" : "No"],
     ["Next Weekly Slot", formatSecondsToDHMS(wSec)],
-    ["Next Monthly Slot", formatSecondsToDHMS(mSec)]
+    ["Next Monthly Slot", formatSecondsToDHMS(mSec)],
+    ["Total&nbsp;Missions&nbsp;Joined", joined.length],
   ];
 
   labels.forEach(([label, value], i) => {
+    if (ok && (label.includes("Weekly Slot") || label.includes("Monthly Slot"))) return;
     wrap.insertAdjacentHTML("beforeend", 
       `<div class="view-card"><h4>${label}</h4><p>${value}</p></div>`);
     flashCard(wrap.lastElementChild, i * 100);  // 0.03s between flashes
@@ -477,9 +611,13 @@ document.getElementById("addrForm")?.addEventListener("submit",e=>{
   }
 });
 
-/* refresh global view whenever the section is shown */
-document.querySelector('[data-target="readViewSection"]')
+/* refresh Factory Read Functions section whenever the section is shown */
+document.querySelector('[data-target="factory-read"]')
   ?.addEventListener("click", ()=>refreshGlobalView());
+
+/* refresh Factory Write Functions section whenever the section is shown */
+document.querySelector('[data-target="factory-write"]')
+  ?.addEventListener("click", ()=>loadFactoryWriteData());
 
 /* ---------- auto-populate logic ---------- */
 function applyDateDefaults(){
@@ -791,27 +929,7 @@ form?.addEventListener("submit", async e => {
     }catch (err){
 
         /* ---------- extract a meaningful revert reason ---------- */
-        let msg =
-                /* 1 ▸ common MetaMask shape                                 */
-                err?.data?.message
-            || err?.error?.data?.message
-            || err?.reason
-            /* 2 ▸ ethers.js ProviderError                                 */
-            || err?.error?.message
-            || null;
-
-        /* 3 ▸ last-resort: decode raw `Error(string)` ABI data (0x08c379a0…) */
-        if (!msg){
-            const hexData = err?.data?.originalError?.data
-                        || err?.data
-                        || err?.error?.data;
-            if (hexData && hexData.startsWith("0x08c379a0")){
-            try{
-                const iface = new ethers.utils.Interface(["function Error(string)"]);
-                msg = iface.decodeFunctionData("Error", hexData)[0];
-            }catch{/* ignore – fall through */}
-            }
-        }
+        let msg = decodeError(err);
 
         if (!msg) msg = err.message || "Transaction failed";
         showAlert(msg, "error");
@@ -846,13 +964,13 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
-document.getElementById("reloadViewsBtn")?.addEventListener("click", async ()=>{
-  const spinner = document.getElementById("viewsSpinner");
+document.getElementById("reloadRead")?.addEventListener("click", async ()=>{
+  const spinner = document.getElementById("readSpinner");
   if (!spinner) return;
 
   spinner.classList.add("show");
 
-  // Ensure at least 1s spinner display
+  // Ensure at least 2s spinner display
   const delay = ms => new Promise(res => setTimeout(res, ms));
   await Promise.all([
     refreshGlobalView(),
@@ -862,7 +980,30 @@ document.getElementById("reloadViewsBtn")?.addEventListener("click", async ()=>{
   spinner.classList.remove("show");
 });
 
+document.getElementById("reloadWrite")?.addEventListener("click", async ()=>{
+  const spinner = document.querySelector("#reloadWrite .fade-spinner");
+  if (!spinner) return;
+
+  spinner.classList.add("show");
+
+  // Ensure at least 2s spinner display
+  const delay = ms => new Promise(res => setTimeout(res, ms));
+  await Promise.all([
+    loadFactoryWriteData(),
+    delay(2000)
+  ]);
+
+  spinner.classList.remove("show");
+});
+
 /* ---------- export public functions for admin.html ---------- */
 window.triggerRefundModal = triggerRefundModal;
 window.openMissionModal   = openMissionModal;
+window.setEnrollmentLimits        = setEnrollmentLimits;
+window.addAuthorizedAddress       = addAuthorizedAddress;
+window.removeAuthorizedAddress    = removeAuthorizedAddress;
+window.proposeOwnershipTransfer   = proposeOwnershipTransfer;
+window.confirmOwnershipTransfer   = confirmOwnershipTransfer;
+window.withDrawFunds              = withDrawFunds;
+window.setMaxWithdraw             = setMaxWithdraw;
 

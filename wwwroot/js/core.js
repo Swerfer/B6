@@ -14,6 +14,7 @@ export const FACTORY_ABI = [
   "function getMissionsNotEnded() view returns(address[] missions, uint8[] statuses)",
   "function getLatestMissions(uint256) view returns(address[] missions, uint8[] statuses)",
   // ------------ global views ------------
+  "function getFactorySummary() view returns (address,address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[6])",
   "function owner() view returns(address)",
   "function weeklyLimit() view returns(uint256)",
   "function monthlyLimit() view returns(uint256)",
@@ -24,6 +25,14 @@ export const FACTORY_ABI = [
   "function missionImplementation() view returns(address)",
   "function getTotalMissions() view returns(uint256)",
   "function getFundsByType(uint8) view returns(uint256)",
+  "function getPlayerParticipation(address) view returns(address[] joined, uint8[] statuses)",
+  // ------------ global writes -----------
+  "function setEnrollmentLimits(uint256 newWeeklyLimit, uint256 newMonthlyLimit)",
+  "function addAuthorizedAddress(address addr)",
+  "function removeAuthorizedAddress(address addr)",
+  "function proposeOwnershipTransfer(address newOwner)",
+  "function confirmOwnershipTransfer()",
+  "function withDrawFunds(uint256 amount)",
   // ---------- address-specific ----------
   "function authorized(address) view returns(bool)",
   "function getPlayerLimits(address) view returns(uint8, uint8, uint8, uint8, uint256, uint256)",
@@ -248,6 +257,30 @@ export function fadeSpinner(el, show) {
     el.style.opacity = "0";
     setTimeout(() => el.classList.add("hidden"), 500);
   }
+}
+
+export function decodeError(err) {
+  // 1 ▸ Try common paths
+  let msg =
+         err?.data?.message
+      || err?.error?.data?.message
+      || err?.reason
+      || err?.error?.message;
+
+  // 2 ▸ Fallback: decode Error(string)
+  if (!msg) {
+    const hexData = err?.data?.originalError?.data
+                 || err?.data
+                 || err?.error?.data;
+    if (hexData && hexData.startsWith("0x08c379a0")) {
+      try {
+        const iface = new ethers.utils.Interface(["function Error(string)"]);
+        msg = iface.decodeFunctionData("Error", hexData)[0];
+      } catch {/* ignore */}
+    }
+  }
+
+  return msg || err?.message || "Transaction failed";
 }
 
 

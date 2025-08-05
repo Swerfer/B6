@@ -185,18 +185,18 @@
                     </form>
                 </section>
 
-                <!-- 2 ▸ view functions -->
-                <section id="readViewSection" class="col-12 section-box hidden">
+                <!-- 2 ▸ Factory Read functions -->
+                <section id="factory-read" class="col-12 section-box hidden">
                     <div class="section-header position-relative mb-3">
                         <!-- Title centered between left and right -->
                         <h2 class="section-title text-center mb-0 w-100">
-                            <i class="fa-solid fa-eye me-2"></i>Factory View Functions
+                            <i class="fa-solid fa-eye me-2"></i>Factory Read Functions
                         </h2>
 
                         <!-- Reload button in top-right, with spinner overlaid -->
-                        <button id="reloadViewsBtn" class="btn btn-sm btn-outline-info position-absolute top-50 end-0 translate-middle-y me-2">
+                        <button id="reloadRead" class="btn btn-sm btn-outline-info position-absolute top-50 end-0 translate-middle-y me-2">
                             <i class="fa-solid fa-rotate"></i>
-                            <span id="viewsSpinner" class="fade-spinner position-absolute top-50 start-50 translate-middle">
+                            <span id="readSpinner" class="fade-spinner position-absolute top-50 start-50 translate-middle">
                                 <span class="spinner"></span>
                             </span>
                         </button>
@@ -230,12 +230,81 @@
                     </div>
                 </section>
 
-                <!-- 3 ▸ onlyOwner / authorized calls -->
-                <section id="ownerWriteSection" class="col-12 section-box hidden">
-                    <h2 class="section-title">
-                        <i class="fa-solid fa-user-shield me-2"></i>Owner / Authorized Functions
-                    </h2>
-                    <p class="placeholder-text">Buttons & inputs will appear here.</p>
+                <!-- 3 ▸ Factory Write Functions -->
+                <section id="factory-write" class="col-12 section-box hidden">
+                    <div class="section-header">
+                        <h2>Factory Write Functions</h2>
+                        <button id="reloadWrite" class="btn btn-sm btn-icon float-end">
+                        <span class="spinner fade-spinner" style="opacity: 0;"></span>
+                        <span class="label-loading">Reload</span>
+                        </button>
+                    </div>
+
+                    <div class="view-card">
+                        <h4>Set Enrollment Limits</h4>
+                        <div class="form-pair">
+                            <div class="flex-grow-1">
+                                <input id="weeklyLimit" class="form-control form-control-sm" placeholder="Weekly limit (current: ...)" />
+                            </div>
+                            <div class="flex-grow-1">
+                                <input id="monthlyLimit" class="form-control form-control-sm" placeholder="Monthly limit (current: ...)" />
+                            </div>
+                            <button onclick="setEnrollmentLimits()" class="btn btn-sm btn-primary">Submit</button>
+                        </div>
+                    </div>
+
+                    <div class="view-card">
+                        <h4>Add Authorized Address</h4>
+                        <div class="form-pair">
+                            <div class="flex-grow-1">
+                                <input id="authAdd" class="form-control form-control-sm" placeholder="Address to add" />
+                            </div>
+                            <button onclick="addAuthorizedAddress()" class="btn btn-sm btn-primary">Add</button>
+                        </div>
+                    </div>
+
+                    <div class="view-card">
+                        <h4>Remove Authorized Address</h4>
+                        <div class="form-pair">
+                            <div class="flex-grow-1">
+                                <input id="authRemove" class="form-control form-control-sm" placeholder="Address to remove" />
+                            </div>
+                            <button onclick="removeAuthorizedAddress()" class="btn btn-sm btn-primary">Remove</button>
+                        </div>
+                    </div>
+
+                    <div class="view-card">
+                        <h4>Propose Ownership Transfer</h4>
+                        <div class="form-pair">
+                            <div class="flex-grow-1">
+                                <input id="proposeOwner" class="form-control form-control-sm" placeholder="New owner address" />
+                            </div>
+                            <button onclick="proposeOwnershipTransfer()" class="btn btn-sm btn-warning">Propose</button>
+                        </div>
+                    </div>
+
+                    <div class="view-card">
+                        <h4>Confirm Ownership Transfer</h4>
+                        <div class="form-pair">
+                            <div class="flex-grow-1">
+                                <input id="confirmOwner" class="form-control form-control-sm" placeholder="New owner address to confirm" />
+                            </div>
+                            <button onclick="confirmOwnershipTransfer()" class="btn btn-sm btn-warning">Confirm</button>
+                        </div>
+                    </div>
+
+                    <div class="view-card">
+                        <h4>Withdraw Funds <span id="fundsAvailable" class="ms-2 text-muted">(…)</span></h4>
+                        <div class="form-pair">
+                            <div class="flex-grow-1">
+                                <input id="withdrawAmount" class="form-control form-control-sm" placeholder="Amount in CRO" />
+                            </div>
+                            <div class="button-pair">
+                                <button onclick="setMaxWithdraw()" class="btn btn-sm btn-secondary">Max</button>
+                                <button id="withdrawBtn" onclick="withDrawFunds()" class="btn btn-sm btn-danger">Withdraw</button>
+                            </div>
+                        </div>
+                    </div>
                 </section>
 
             </div>
@@ -255,10 +324,11 @@
                 <span id="connectBtnText">Connect Wallet</span>
             </button>
 
-            <button class="btn btn-sm btn-outline-info icon-nav admin-only-btn" data-target="ownerWriteSection" title="Factory Write Functions">
-                <i class="fa-solid fa-user-shield"></i>
+            <button class="btn btn-sm btn-outline-info icon-nav admin-only-btn" data-target="factory-write" title="Factory Write Functions">
+            <i class="fa-solid fa-user-shield"></i>
             </button>
-            <button class="btn btn-sm btn-outline-info icon-nav admin-only-btn" data-target="readViewSection" title="Factory View Functions">
+
+            <button class="btn btn-sm btn-outline-info icon-nav admin-only-btn" data-target="factory-read" title="Factory Read Functions">
                 <i class="fa-solid fa-eye"></i>
             </button>
         </div>

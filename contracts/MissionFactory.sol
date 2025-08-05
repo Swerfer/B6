@@ -413,6 +413,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     function confirmOwnershipTransfer(address newOwner)                     external onlyOwnerOrAuthorized {
         uint256 nowTs = block.timestamp;                                                        // Get the current timestamp
         OwnershipProposal memory proposal = ownershipProposals[newOwner];                       // Retrieve the ownership proposal for the new owner
+        require(newOwner != address(0), "Invalid address");                                     // Ensure the account is valid
         require(proposal.proposer != address(0), "No proposal for this owner");                 // Ensure there is a valid proposal for the new owner 
         require(proposal.proposer != msg.sender, "Cannot confirm your own proposal");           // Ensure the confirmer is not the proposer
         require(nowTs <= proposal.timestamp + OWNERSHIP_PROPOSAL_WINDOW, "Proposal expired");   // Ensure the proposal is still valid within the proposal window
@@ -568,54 +569,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     // ──────────────── View Functions ────────────────
 
     /**
-     * @dev Returns a summary of the factory's state.
-     * This function returns various details about the factory, including owner address, implementation address, total missions, limits, funds, and mission success/failure counts.
-     * @return ownerAddress The address of the owner of the factory.
-     * @return factoryAddress The address of the factory contract.
-     * @return implementation The address of the mission implementation contract.
-     * @return totalMissions The total number of missions created.
-     * @return weekly The weekly enrollment limit.
-     * @return monthly The monthly enrollment limit.
-     * @return missionFunds The total funds registered by missions.
-     * @return ownerFunds The total funds earned by the owner from missions.
-     * @return successes The total number of successful missions.
-     * @return failures The total number of failed missions.
-     * @return fundsPerTypeArray An array containing the reserved funds for each mission type (1–6).
-     */
-    function getFactorySummary()                                            public view
-        returns (
-            address ownerAddress,
-            address factoryAddress,
-            address implementation,
-            uint256 totalMissions,
-            uint256 weekly,
-            uint256 monthly,
-            uint256 missionFunds,
-            uint256 ownerFunds,
-            uint256 successes,
-            uint256 failures,
-            uint256[7] memory fundsPerTypeArray
-        ) {
-        uint256[7] memory breakdown;                        // Array to hold the breakdown of reserved funds for each mission type
-        for (uint256 i = 0; i < 7; i++) {
-            breakdown[i] = reservedFunds[MissionType(i)];   // Fill the array with the reserved funds for each mission type
-        }
-        return (
-            owner(),                // Return the address of the owner of the factory contract
-            address(this),          // Return the address of the factory contract
-            missionImplementation,  // Return the address of the mission implementation contract
-            missions.length,        // Return the total number of missions
-            weeklyLimit,            // Return the weekly limit
-            monthlyLimit,           // Return the weekly and monthly limits
-            totalMissionFunds,      // Return the total funds registered by missions
-            totalOwnerEarnedFunds,  // Return the total funds registered by missions and earned by the owner
-            totalMissionSuccesses,  // Return the total number of successful missions
-            totalMissionFailures,   // Return the total number of successful and failed missions
-            breakdown               // Return the reserved funds for each mission type
-        );
-    }
-
-    /**
      * @dev Returns the missions a player is participating in and their statuses.
      * This function retrieves all missions the player is enrolled in and their current statuses.
      * @param player The address of the player to check.
@@ -647,6 +600,54 @@ contract MissionFactory is Ownable, ReentrancyGuard {
                 idx++;                                                      // Increment the index for the return arrays
             }
         }
+    }
+
+    /**
+     * @dev Returns a summary of the factory's state.
+     * This function returns various details about the factory, including owner address, implementation address, total missions, limits, funds, and mission success/failure counts.
+     * @return ownerAddress The address of the owner of the factory.
+     * @return factoryAddress The address of the factory contract.
+     * @return implementation The address of the mission implementation contract.
+     * @return totalMissions The total number of missions created.
+     * @return weekly The weekly enrollment limit.
+     * @return monthly The monthly enrollment limit.
+     * @return missionFunds The total funds registered by missions.
+     * @return ownerFunds The total funds earned by the owner from missions.
+     * @return successes The total number of successful missions.
+     * @return failures The total number of failed missions.
+     * @return fundsPerTypeArray An array containing the reserved funds for each mission type (1–6).
+     */
+    function getFactorySummary()                                            public view
+        returns (
+            address ownerAddress,
+            address factoryAddress,
+            address implementation,
+            uint256 totalMissions,
+            uint256 weekly,
+            uint256 monthly,
+            uint256 missionFunds,
+            uint256 ownerFunds,
+            uint256 successes,
+            uint256 failures,
+            uint256[6] memory fundsPerTypeArray
+        ) {
+        uint256[6] memory breakdown;                        // Array to hold the breakdown of reserved funds for each mission type
+        for (uint256 i = 0; i < 7; i++) {                
+            breakdown[i] = reservedFunds[MissionType(i)];   // Fill the array with the reserved funds for each mission type
+        }
+        return (
+            owner(),                // Return the address of the owner of the factory contract
+            address(this),          // Return the address of the factory contract
+            missionImplementation,  // Return the address of the mission implementation contract
+            missions.length,        // Return the total number of missions
+            weeklyLimit,            // Return the weekly limit
+            monthlyLimit,           // Return the weekly and monthly limits
+            totalMissionFunds,      // Return the total funds registered by missions
+            totalOwnerEarnedFunds,  // Return the total funds registered by missions and earned by the owner
+            totalMissionSuccesses,  // Return the total number of successful missions
+            totalMissionFailures,   // Return the total number of successful and failed missions
+            breakdown               // Return the reserved funds for each mission type
+        );
     }
 
     /**
