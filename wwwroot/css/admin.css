@@ -291,6 +291,37 @@
   white-space: nowrap;
 }
 
+.confirm-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr); /* 4 columns */
+  gap: 0.25rem;
+  align-items: start;
+}
+
+.confirm-grid .btn-cell {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.confirm-grid .btn-cell button {
+  width: 6.5rem;
+}
+
+@media (max-width: 720px) {
+  .confirm-grid {
+    grid-template-columns: 1fr; /* stack everything */
+  }
+
+  .confirm-grid .btn-cell {
+    justify-content: center;
+  }
+
+  .confirm-grid .btn-cell button {
+    width: 6.5rem; /* keep fixed width */
+  }
+}
+
 @media (max-width: 600px) {
   .form-pair {
     flex-direction: column;

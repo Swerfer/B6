@@ -32,7 +32,7 @@ export const FACTORY_ABI = [
   "function removeAuthorizedAddress(address addr)",
   "function proposeOwnershipTransfer(address newOwner)",
   "function confirmOwnershipTransfer()",
-  "function withDrawFunds(uint256 amount)",
+  "function withdrawFunds(uint256 amount)",
   // ---------- address-specific ----------
   "function authorized(address) view returns(bool)",
   "function getPlayerLimits(address) view returns(uint8, uint8, uint8, uint8, uint256, uint256)",

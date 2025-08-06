@@ -80,6 +80,8 @@ pragma solidity ^0.8.30;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/proxy/Clones.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
+using Strings for uint256;
 
 // ─────────────────── Global Enums ─────────────────────
 /**
@@ -166,16 +168,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         _;
     }
 
-    // ─────────────────── Structs ──────────────────────
-    /**
-     * @dev Struct to hold information about ownership proposals.
-     * Contains the address of the proposer and the timestamp of the proposal.
-     */
-    struct OwnershipProposal {
-        address proposer;
-        uint256 timestamp;
-    }
-
     // ────────────── State Variables ───────────────────
     /**
      * @dev State variables for the MissionFactory contract.
@@ -190,12 +182,16 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     uint256                                 public  totalMissionFailures;                       // Total number of failed missions
     address                                 public immutable missionImplementation;             // Address of the Mission implementation contract for creating new missions
     uint256                                 public constant OWNERSHIP_PROPOSAL_WINDOW = 1 days; // Duration for ownership proposal validity
+    uint256                                 public proposalTimestamp;                           // The timestamp the proposal was made
+    address                                 public proposedNewOwner;                            // The proposed new owner's address     
+    address                                 public proposalProposer;                            // The proposer's address
     mapping(address => bool)                public  authorized;                                 // Mapping to track authorized addresses
     mapping(address => bool)                public  isMission;                                  // ↪ quick “is this address a mission?” lookup
     mapping(address => Status)              public  missionStatus;                              // Mapping to hold the status of each mission
-    mapping(address => OwnershipProposal)   public  ownershipProposals;                         // Mapping to hold ownership proposals
     mapping(MissionType => uint256)         public  reservedFunds;                              // Track funds by type
-    mapping(address => uint256[])           private _enrollmentHistory;                         // store timestamps
+    mapping(address => uint256[])           private _enrollmentHistory;                         // Store timestamps
+    mapping(address => string)              public missionNames;                                // Store mission names
+    mapping(MissionType => uint256)         public missionTypeCounts;                           // Store per mission type the mission type count
 
     // ──────────────── Constructor ─────────────────────
     /**
@@ -208,6 +204,19 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     }
 
     // ────────────────── Helper functions ──────────────
+    /**
+     * @dev Function to convert mission types to human readable names 
+     */  
+    function _toHumanReadableName(MissionType t) internal pure returns (string memory) {
+        if (t == MissionType.Hourly)         return "Hourly";
+        if (t == MissionType.QuarterDaily)   return "QuarterDaily";
+        if (t == MissionType.BiDaily)        return "BiDaily";
+        if (t == MissionType.Daily)          return "Daily";
+        if (t == MissionType.Weekly)         return "Weekly";
+        if (t == MissionType.Monthly)        return "Monthly";
+        return "Custom";                      
+    }
+
     /**
      * @dev Returns the time until the next weekly slot for a user.
      * This function calculates the time remaining until the next weekly slot based on the user's enrollment history.
@@ -398,33 +407,30 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     function proposeOwnershipTransfer(address newOwner)                     external onlyOwnerOrAuthorized {
         uint256 nowTs = block.timestamp;                                // Get the current timestamp
         require(newOwner != address(0), "Invalid new owner");           // Ensure the new owner is a valid address
-        ownershipProposals[newOwner] = OwnershipProposal({              // Create a new ownership proposal
-            proposer: msg.sender,
-            timestamp: nowTs
-        });
+        proposedNewOwner = newOwner;
+        proposalProposer = msg.sender;
+        proposalTimestamp = block.timestamp;
         emit OwnershipTransferProposed(msg.sender, newOwner, nowTs);    // Emit event for ownership transfer proposal
     }
 
     /**
      * @dev Confirms the ownership transfer to a new address.
-     * @param newOwner The address of the new owner.
      * This function allows a 2nd authorized address to confirm the ownership transfer.
      */
-    function confirmOwnershipTransfer(address newOwner)                     external onlyOwnerOrAuthorized {
-        uint256 nowTs = block.timestamp;                                                        // Get the current timestamp
-        OwnershipProposal memory proposal = ownershipProposals[newOwner];                       // Retrieve the ownership proposal for the new owner
-        require(newOwner != address(0), "Invalid address");                                     // Ensure the account is valid
-        require(proposal.proposer != address(0), "No proposal for this owner");                 // Ensure there is a valid proposal for the new owner 
-        require(proposal.proposer != msg.sender, "Cannot confirm your own proposal");           // Ensure the confirmer is not the proposer
-        require(nowTs <= proposal.timestamp + OWNERSHIP_PROPOSAL_WINDOW, "Proposal expired");   // Ensure the proposal is still valid within the proposal window
+    function confirmOwnershipTransfer()                                     external onlyOwnerOrAuthorized {
+        uint256 nowTs = block.timestamp;                                                                // Get the current timestamp
+        require(proposalProposer != msg.sender, "Cannot confirm your own proposal");                    // Ensure the confirmer is not the proposer
+        require(block.timestamp <= proposalTimestamp + OWNERSHIP_PROPOSAL_WINDOW, "Proposal expired");  // Ensure the proposal is still valid within the proposal window
 
         // Transfer ownership
-        _transferOwnership(newOwner);                                                           // Transfer ownership to the new owner   
+        _transferOwnership(proposedNewOwner);                                                           // Transfer ownership to the new owner   
 
+        emit OwnershipTransferConfirmed(msg.sender, proposedNewOwner, nowTs);                           // Emit event for ownership transfer confirmation
         // Cleanup
-        delete ownershipProposals[newOwner];                                                    // Delete the ownership proposal for the new owner
+        delete proposedNewOwner;                                                                        // Delete the new owner
+        delete proposalProposer;                                                                        // Delete the proposal proposer
+        delete proposalTimestamp;                                                                       // Delete the proposal timestamp
 
-        emit OwnershipTransferConfirmed(msg.sender, newOwner, nowTs);                           // Emit event for ownership transfer confirmation
     }
 
     // ───────────── Core Factory Functions ─────────────
@@ -449,8 +455,9 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         uint8           _enrollmentMaxPlayers,  // Maximum number of players required to start the mission
         uint256         _missionStart,          // Start time for the mission
         uint256         _missionEnd,            // End time for the mission
-        uint8           _missionRounds          // Number of rounds in the mission
-        ) external payable onlyOwnerOrAuthorized nonReentrant returns (address) {
+        uint8           _missionRounds,         // Number of rounds in the mission
+        string calldata _missionName            // The mission name (optional)
+        ) external payable onlyOwnerOrAuthorized nonReentrant returns (address, string memory) {
             require(_missionRounds          >= 5,                       "Mission rounds must be greater than or equal to 5");               // Ensure mission rounds is greater than or equal to 5
             require(_enrollmentMinPlayers   >= _missionRounds,          "Minimum players must be greater than or equal to mission rounds"); // Ensure minimum players is at least equal to mission rounds
             require(_enrollmentMaxPlayers   >= _enrollmentMinPlayers,   "Maximum players must be greater than or equal to minimum players");// Ensure maximum players is at least equal to minimum players
@@ -461,8 +468,19 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 
 			address clone = missionImplementation.clone(); 	    // EIP-1167 minimal proxy
 
+            // Increment mission type counter
+            missionTypeCounts[_missionType]++;                          // Increase mission counts by 1 and store for the mission type
+            string memory _finalName = bytes(_missionName).length > 0   // Check if mission name is not ""
+                ? _missionName                                          // Not empty --> the supplied name
+                : string(abi.encodePacked(
+                    _toHumanReadableName(_missionType),
+                    " - ",
+                    missionTypeCounts[_missionType].toString()  // "" --> calculated mission name
+                ));
+
             isMission[clone]     = true;                        // mark as a valid mission
             missionStatus[clone] = Status.Pending;              // placeholder so first callback passes onlyMission
+            missionNames[clone] = _finalName;                   // Store the supplied name or calculated name if nothing supplied
 
             Mission(payable(clone)).initialize{value: msg.value} (
 				owner(),									    // Set the owner of the mission to the owner of MissionFactory
@@ -475,7 +493,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
                 _enrollmentMaxPlayers,                          // Set the maximum players allowed
                 _missionStart,                                  // Set the mission start time
                 _missionEnd,                                    // Set the mission end time
-                _missionRounds                                  // Set the number of rounds in the mission
+                _missionRounds,                                 // Set the number of rounds in the mission
+                _finalName                                      // The supplied name or calculated name if nothing supplied
             );
 
         missions.push(clone);                                   // Add the new mission to the list of missions
@@ -489,7 +508,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             Mission(payable(clone)).increasePot{value: allocation}();   // Sends CRO and updates mission accounting
         }
 
-        return clone;						                            // Return the address of the newly created mission
+        return (clone, _finalName);						                            // Return the address of the newly created mission
     }
 
     /**
@@ -575,7 +594,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return joined An array of addresses of the missions the player is enrolled in.
      * @return statuses An array of statuses corresponding to each mission.
      */
-    function getPlayerParticipation(address player)                         public view returns (address[] memory joined, Status[] memory statuses) {
+    function getPlayerParticipation(address player)                         public view returns (address[] memory, Status[] memory, string[] memory) {
         uint256 len = missions.length;                                      // Get the total number of missions
         uint256 count;                                                      // Variable to count how many missions the player is in
 
@@ -587,8 +606,9 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         }
 
         // Allocate return arrays
-        joined   = new address[](count);                                    // Create an array to hold the addresses of the missions the player is in
-        statuses = new Status[](count);                                     // Create an array to hold the statuses of the missions the player is in    
+        address[] memory joined     = new address[](count);                 // Create an array to hold the addresses of the missions the player is in
+        Status[]  memory statuses   = new Status[](count);                  // Create an array to hold the statuses of the missions the player is in    
+        string[]  memory names      = new string[](count);                  // Create an array to hold the mission names
         uint256 idx;                                                        // Index for the return arrays
 
         // Second pass: fill both arrays
@@ -597,9 +617,11 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             if (Mission(payable(m)).isPlayer(player)) {                     // Check if the player is enrolled in the mission
                 joined[idx]   = m;                                          // Add the mission address to the joined array                          
                 statuses[idx] = Mission(payable(m)).getRealtimeStatus();    // Get the realtime status of the mission and add it to the statuses array
+                names[idx] = missionNames[m];                               // Add the mission name to the output array
                 idx++;                                                      // Increment the index for the return arrays
             }
         }
+        return (joined, statuses, names);                                   // Return arrays: addresses of missions not ended, their statuses and names 
     }
 
     /**
@@ -674,11 +696,11 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This function retrieves all missions and their statuses, filtering out old missions.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getAllMissions()                                               external view returns (address[] memory, Status[] memory) {
+    function getAllMissions()                                               external view returns (address[] memory, Status[] memory, string[] memory) {
         uint256 nowTs = block.timestamp;                                            // Get the current timestamp
         uint256 len = missions.length;
         if (len == 0) {                                                             // If there are no missions, return empty arrays
-            return (new address[](0), new Status[](0));
+            return (new address[](0), new Status[](0), new string[](0));
         }
 
         uint256 startCutoff = nowTs - 60 days;                                      // skip if missionStart < startCutoff
@@ -706,7 +728,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 
         // SECOND PASS ── copy the selected missions into fixed-size arrays
         address[] memory outAddrs  = new address[](count);                          // Create an array to hold the addresses of the missions
-        Status[]  memory outStatus = new Status[](count);                           // Create an array to hold the statuses of the missions 
+        Status[]  memory outStatus = new Status[](count);                           // Create an array to hold the statuses of the missions
+        string[]  memory names     = new string[](count);                           // Create an array to hold the mission names
         uint256 j;
 
         for (uint256 i = len; i > 0 && j < count;) {                                // Loop through the missions from newest to oldest
@@ -726,10 +749,11 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             }
             outAddrs[j]  = m;                                                       // Add the mission address to the output array  
             outStatus[j] = s;                                                       // Add the mission status to the output array
+            names[j] = missionNames[m];                                             // Add the mission name to the output array
             unchecked { ++j; }                                                      // Increment the index for the output arrays
         }
 
-        return (outAddrs, outStatus);                                               // Return the arrays of mission addresses and their statuses
+        return (outAddrs, outStatus, names);                                        // Return arrays: addresses of missions not ended, their statuses and names 
     }
 
     /**
@@ -738,7 +762,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param s The status to filter missions by.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsByStatus(Status s)                                  external view returns (address[] memory, uint8[] memory) {
+    function getMissionsByStatus(Status s)                                  external view returns (address[] memory, uint8[] memory, string[] memory) {
         uint256 len = missions.length;                              // Get the total number of missions
         uint256 count;
 
@@ -751,25 +775,28 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 
         // Second pass: populate result arrays
         address[] memory filteredMissions = new address[](count);   // Create an array to hold the addresses of matching missions
-        uint8[] memory statuses = new uint8[](count);               // Create a parallel array for statuses
+        uint8[]   memory statuses         = new uint8[](count);     // Create a parallel array for statuses
+        string[]  memory names            = new string[](count);    // Create an array to hold the mission names
         uint256 index;
         for (uint256 i = 0; i < len; i++) {                         // Loop through all missions again
             if (missionStatus[missions[i]] == s) {                  // If the mission status matches the specified status
                 filteredMissions[index] = missions[i];              // Add the mission address to the result array
                 statuses[index] = uint8(s);                         // Add the known status
+                names[index] = missionNames[missions[i]];           // Add the mission name to the output array
                 index++;
             }
         }
 
-        return (filteredMissions, statuses);                        // Return both arrays
+        return (filteredMissions, statuses, names);                 // Return arrays: addresses of missions not ended, their statuses and names 
     }
-
+    
     /**
      * @dev Returns the addresses of missions that have not ended.
      * This function filters out missions that are in the Ended or Failed status.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsNotEnded()                                          external view returns (address[] memory, uint8[] memory) {
+    
+    function getMissionsNotEnded()                                          external view returns (address[] memory, uint8[] memory, string[] memory) {
         uint256 len = missions.length;                          // Get the total number of missions 
         uint256 count;                                          // Variable to count how many missions are not ended    
 
@@ -782,8 +809,9 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         }
 
         // Second pass: populate arrays
-        address[] memory result = new address[](count);         // Create an array to hold the addresses of missions that are not ended
-        uint8[] memory statuses = new uint8[](count);           // Create a parallel array for statuses
+        address[] memory result   = new address[](count);       // Create an array to hold the addresses of missions that are not ended
+        uint8[]   memory statuses = new uint8[](count);         // Create a parallel array for statuses
+        string[]  memory names    = new string[](count);        // Create an array to hold the mission names
         uint256 index;
 
         for (uint256 i = 0; i < len; i++) {                     // Loop through all missions again
@@ -791,11 +819,12 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             if (s != Status.Success && s != Status.Failed) {    // If the mission is not in Success or Failed status
                 result[index] = missions[i];                    // Add the mission address to the result array
                 statuses[index] = uint8(s);                     // Add the status to the statuses array
+                names[index] = missionNames[missions[i]];       // Add the mission name to the output array
                 index++;
             }
         }
 
-        return (result, statuses);                              // Return both arrays: addresses of missions not ended and their statuses   
+        return (result, statuses, names);                       // Return arrays: addresses of missions not ended, their statuses and names  
     }
 
     /**
@@ -803,7 +832,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This function filters out missions that are in the Ended or Failed status.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsEnded()                                             external view returns (address[] memory, uint8[] memory) {
+    function getMissionsEnded()                                             external view returns (address[] memory, uint8[] memory, string[] memory) {
         uint256 len = missions.length;                          // Get the total number of missions
         uint256 count;                                          // Variable to count how many missions have ended
 
@@ -816,8 +845,9 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         }
 
         // Second pass: populate arrays
-        address[] memory result = new address[](count);         // Create an array to hold the addresses of missions that have ended
-        uint8[] memory statuses = new uint8[](count);           // Create a parallel array for statuses
+        address[] memory result   = new address[](count);       // Create an array to hold the addresses of missions that have ended
+        uint8[]   memory statuses = new uint8[](count);         // Create a parallel array for statuses
+        string[]  memory names    = new string[](count);        // Create an array to hold the mission names
         uint256 index;
 
         for (uint256 i = 0; i < len; i++) {                     // Loop through all missions again
@@ -825,11 +855,12 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             if (s == Status.Success || s == Status.Failed) {    // If the mission is in Success or Failed status
                 result[index] = missions[i];                    // Add the mission address to the result array  
                 statuses[index] = uint8(s);                     // Add the status to the statuses array
+                names[index] = missionNames[missions[i]];       // Add the mission name to the output array
                 index++;
             }
         }
 
-        return (result, statuses);                              // Return both arrays: addresses of missions ended and their statuses
+        return (result, statuses, names);                       // Return arrays: addresses of missions not ended, their statuses and names  
     }
 
     /**
@@ -838,20 +869,22 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param n The number of latest missions to return.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getLatestMissions(uint256 n)                                   external view returns (address[] memory, uint8[] memory) {
-        uint256 total = missions.length;            // Get the total number of missions
-        if (n > total) n = total;                   // If n is greater than the total number of missions, adjust n to total
+    function getLatestMissions(uint256 n)                                   external view returns (address[] memory, uint8[] memory, string[] memory) {
+        uint256 total = missions.length;                    // Get the total number of missions
+        if (n > total) n = total;                           // If n is greater than the total number of missions, adjust n to total
 
-        address[] memory result = new address[](n); // Create an array to hold the addresses of the latest missions
-        uint8[] memory statuses = new uint8[](n);   // Create a parallel array for statuses
+        address[] memory result   = new address[](n);       // Create an array to hold the addresses of the latest missions
+        uint8[]   memory statuses = new uint8[](n);         // Create a parallel array for statuses
+        string[]  memory names    = new string[](n);        // Create an array to hold the mission names
 
-        for (uint256 i = 0; i < n; i++) {           // Loop through the last n missions
-            address m = missions[total - 1 - i];    // Get the address of the mission
-            result[i] = m;                          // Add the mission address to the result array  
-            statuses[i] = uint8(missionStatus[m]);  // Add the status of the mission to the statuses array
-        }
+        for (uint256 i = 0; i < n; i++) {                   // Loop through the last n missions
+            address m = missions[total - 1 - i];            // Get the address of the mission
+            result[i] = m;                                  // Add the mission address to the result array  
+            statuses[i] = uint8(missionStatus[m]);          // Add the status of the mission to the statuses array
+            names[i] = missionNames[missions[i]];           // Add the mission name to the output array
+       }
 
-        return (result, statuses);                  // Return both arrays: addresses of the latest missions and their statuses
+        return (result, statuses, names);                   // Return arrays: addresses of missions not ended, their statuses and names  
     }
 
     /**
@@ -861,6 +894,33 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
     function getFundsByType(MissionType _type)                              external view returns (uint256) {
         return reservedFunds[_type];                                                // Return the reserved funds for the specified mission type
+    }
+
+    /**
+     * @dev Returns the proposal data
+     * @return newOwner the stored newOwner proposal
+     * @return proposer the proposer
+     * @return timestamp the time of the proposal
+     * @return timeLeft the time left
+     */   
+    function getOwnershipProposal()                                         external view returns (address newOwner, address proposer, uint256 timestamp, uint256 timeLeft) {
+        if (proposalTimestamp == 0) {
+            return (address(0), address(0), 0, 0);                              // No active proposal
+        }
+
+        uint256 expiry = proposalTimestamp + OWNERSHIP_PROPOSAL_WINDOW;
+        uint256 nowTs = block.timestamp;
+
+        if (nowTs >= expiry) {
+            return (proposedNewOwner, proposalProposer, proposalTimestamp, 0);  // Expired
+        }
+
+        return (
+            proposedNewOwner,
+            proposalProposer,
+            proposalTimestamp,
+            expiry - nowTs                                                      // Seconds remaining until expiry
+        );
     }
 
 }
@@ -940,6 +1000,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         PlayersWon[]    playersWon;                     // Array to hold players who won in the mission     
         uint256         pauseTimestamp;                 // Time when the mission was paused
         address[]       refundedPlayers;                // Track players who have been refunded
+        string          name;                           // Name of the mission
     }
 
     // ──────────────── State Variables ─────────────────
@@ -995,7 +1056,8 @@ contract Mission        is Ownable, ReentrancyGuard {
         uint8           _enrollmentMaxPlayers,
         uint256         _missionStart,
         uint256         _missionEnd,
-        uint8           _missionRounds
+        uint8           _missionRounds,
+        string calldata _name
     )                                       external payable nonReentrant {
         require(!_initialized, "Already initialized");                          // Ensure the contract is not already initialized
 
@@ -1020,6 +1082,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         _missionData.pauseTimestamp          = 0;                               // Initialize pause time to 0
         _missionData.players                 = new address[](0);                // Initialize players array
         _missionData.playersWon              = new PlayersWon[](0);             // Initialize playersWon array
+        _missionData.name = _name;
         emit MissionInitialized(_owner, _missionType, block.timestamp);         // Emit event for mission initialization
     }
 

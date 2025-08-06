@@ -396,18 +396,23 @@ async function loadFactoryWriteData() {
   const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 
   try {
-    const [owner, weekly, monthly, funds] = await Promise.all([
+    const [owner, weekly, monthly, funds, realbalance] = await Promise.all([
       factory.owner(),
       factory.weeklyLimit(),
       factory.monthlyLimit(),
-      factory.totalMissionFunds()
+      factory.totalMissionFunds(),
+      provider.getBalance(FACTORY_ADDRESS)
     ]);
 
     const isOwner = walletAddress && walletAddress.toLowerCase() === owner.toLowerCase();
 
     document.getElementById("weeklyLimit").placeholder = `Weekly limit (current: ${weekly})`;
     document.getElementById("monthlyLimit").placeholder = `Monthly limit (current: ${monthly})`;
-    document.getElementById("fundsAvailable").textContent = `${ethers.utils.formatEther(funds)} CRO available`;
+    document.getElementById("fundsAvailable").textContent = `${ethers.utils.formatEther(realbalance)} CRO available`;
+
+    // Optional: If you also want to show the mission-locked funds elsewhere:
+    // document.getElementById("lockedFunds").textContent =
+    //   `${ethers.utils.formatEther(missionFunds)} CRO locked`;
 
     document.getElementById("withdrawBtn").disabled = !isOwner;
   } catch (err) {
@@ -487,13 +492,12 @@ async function proposeOwnershipTransfer() {
 }
 
 async function confirmOwnershipTransfer() {
-  const newOwner = document.getElementById("confirmOwner")?.value.trim();
-  if (!ethers.utils.isAddress(newOwner)) return showAlert("Please enter the new owner's address to confirm", "warning");
   try {
     const provider = new ethers.providers.Web3Provider(window.ethereum);
     const signer   = provider.getSigner();
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
-    const tx = await factory.confirmOwnershipTransfer();
+
+    const tx = await factory.confirmOwnershipTransfer(); 
     showAlert("Confirming transfer…", "info");
     await tx.wait();
     showAlert("Ownership transferred", "success");
@@ -502,8 +506,55 @@ async function confirmOwnershipTransfer() {
   }
 }
 
-async function withDrawFunds() {
+let proposalCountdownInterval = null;
+
+async function updateConfirmCard() {
+  const card = document.getElementById("confirmCard");
+  if (!card) return;
+
+  clearInterval(proposalCountdownInterval); // clear old timer
+  card.style.display = "none";
+
+  try {
+    const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
+    //const [newOwner, proposer, timestamp, timeLeft] = await factory.getOwnershipProposal();
+
+    //if (!newOwner || newOwner === ethers.constants.AddressZero || timeLeft === 0) return;
+
+  // TEMPORARY SIMULATION — REMOVE IN PRODUCTION
+  const newOwner     = "0x1234567890abcdef1234567890abcdef12345678";
+  const proposer     = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+  const timestamp    = Math.floor(Date.now() / 1000); 
+
+    document.getElementById("proposedOwnerShort").textContent = shorten(newOwner);
+    document.getElementById("proposerShort").textContent = shorten(proposer);
+    const countdownEl = document.getElementById("proposalCountdown");
+
+    const targetTs = timestamp + 3600;
+    const updateTimer = () => {
+      const now = Math.floor(Date.now() / 1000);
+      const left = targetTs - now;
+      if (left <= 0) {
+        clearInterval(proposalCountdownInterval);
+        card.style.display = "none";
+        return;
+      }
+      countdownEl.textContent = formatSecondsToDHMS(left).replace(/^0d\s/, "");
+    };
+
+    updateTimer();
+    proposalCountdownInterval = setInterval(updateTimer, 1000);
+    card.style.display = "block";
+
+  } catch (err) {
+    console.warn("Proposal check failed:", err.message);
+  }
+}
+
+async function withdrawFunds() {
   const val = document.getElementById("withdrawAmount")?.value.trim();
+  console.log("Input:", val);
   if (!val || isNaN(val)) return showAlert("Invalid amount", "warning");
 
   try {
@@ -511,7 +562,8 @@ async function withDrawFunds() {
     const signer   = provider.getSigner();
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
     const amount   = ethers.utils.parseEther(val);
-    const tx = await factory.withDrawFunds(amount);
+    console.log("Parsed amount in wei:", amount.toString());
+    const tx = await factory.withdrawFunds(amount);
     showAlert("Withdrawing funds…", "info");
     await tx.wait();
     showAlert("Funds withdrawn", "success");
@@ -617,7 +669,10 @@ document.querySelector('[data-target="factory-read"]')
 
 /* refresh Factory Write Functions section whenever the section is shown */
 document.querySelector('[data-target="factory-write"]')
-  ?.addEventListener("click", ()=>loadFactoryWriteData());
+  ?.addEventListener("click", () => {
+    loadFactoryWriteData();
+    updateConfirmCard(); // ← added to dynamically show/hide confirm card
+  });
 
 /* ---------- auto-populate logic ---------- */
 function applyDateDefaults(){
@@ -1004,6 +1059,6 @@ window.addAuthorizedAddress       = addAuthorizedAddress;
 window.removeAuthorizedAddress    = removeAuthorizedAddress;
 window.proposeOwnershipTransfer   = proposeOwnershipTransfer;
 window.confirmOwnershipTransfer   = confirmOwnershipTransfer;
-window.withDrawFunds              = withDrawFunds;
+window.withdrawFunds              = withdrawFunds;
 window.setMaxWithdraw             = setMaxWithdraw;
 

@@ -212,7 +212,7 @@
                         <div class="flex-grow-1">
                             <input id="playerAddr" class="form-control form-control-sm" placeholder="0x…" />
                         </div>
-                        <button class="btn btn-sm btn-cyan px-4" type="submit">Lookup</button>
+                        <button class="btn btn-sm btn-outline-primary px-4" type="submit">Lookup</button>
                         </form>
                         <div id="playerView" class="row g-3 mt-3"></div>
                     </div>
@@ -224,7 +224,7 @@
                         <div class="flex-grow-1">
                             <input id="addrCheck" class="form-control form-control-sm" placeholder="0x…" />
                         </div>
-                        <button class="btn btn-sm btn-cyan px-4" type="submit">Check</button>
+                        <button class="btn btn-sm btn-outline-primary px-4" type="submit">Check</button>
                         </form>
                         <div id="addrView" class="row g-3 mt-3"></div>
                     </div>
@@ -249,7 +249,7 @@
                             <div class="flex-grow-1">
                                 <input id="monthlyLimit" class="form-control form-control-sm" placeholder="Monthly limit (current: ...)" />
                             </div>
-                            <button onclick="setEnrollmentLimits()" class="btn btn-sm btn-primary">Submit</button>
+                            <button onclick="setEnrollmentLimits()" class="btn btn-sm btn-outline-primary">Submit</button>
                         </div>
                     </div>
 
@@ -259,7 +259,7 @@
                             <div class="flex-grow-1">
                                 <input id="authAdd" class="form-control form-control-sm" placeholder="Address to add" />
                             </div>
-                            <button onclick="addAuthorizedAddress()" class="btn btn-sm btn-primary">Add</button>
+                            <button onclick="addAuthorizedAddress()" class="btn btn-sm btn-outline-primary">Add</button>
                         </div>
                     </div>
 
@@ -269,7 +269,7 @@
                             <div class="flex-grow-1">
                                 <input id="authRemove" class="form-control form-control-sm" placeholder="Address to remove" />
                             </div>
-                            <button onclick="removeAuthorizedAddress()" class="btn btn-sm btn-primary">Remove</button>
+                            <button onclick="removeAuthorizedAddress()" class="btn btn-sm btn-outline-primary">Remove</button>
                         </div>
                     </div>
 
@@ -279,17 +279,30 @@
                             <div class="flex-grow-1">
                                 <input id="proposeOwner" class="form-control form-control-sm" placeholder="New owner address" />
                             </div>
-                            <button onclick="proposeOwnershipTransfer()" class="btn btn-sm btn-warning">Propose</button>
+                            <button onclick="proposeOwnershipTransfer()" class="btn btn-sm btn-outline-warning">Propose</button>
                         </div>
                     </div>
 
-                    <div class="view-card">
+                    <div class="view-card" id="confirmCard" style="display:none;">
                         <h4>Confirm Ownership Transfer</h4>
-                        <div class="form-pair">
-                            <div class="flex-grow-1">
-                                <input id="confirmOwner" class="form-control form-control-sm" placeholder="New owner address to confirm" />
+                        <div class="confirm-grid">
+                            <div>
+                                <small class="d-block text-muted">Proposed Owner:</small>
+                                <span id="proposedOwnerShort" class="text-white fw-bold"></span>
                             </div>
-                            <button onclick="confirmOwnershipTransfer()" class="btn btn-sm btn-warning">Confirm</button>
+                            <div>
+                                <small class="d-block text-muted">Proposed By:</small>
+                                <span id="proposerShort" class="text-white fw-bold"></span>
+                            </div>
+                            <div>
+                                <small class="d-block text-muted">Time Left:</small>
+                                <span id="proposalCountdown" class="text-warning fw-bold">—</span>
+                            </div>
+                            <div class="btn-cell">
+                            <button id="confirmBtn" onclick="confirmOwnershipTransfer()" class="btn btn-sm btn-outline-warning">
+                                Confirm
+                            </button>
+                            </div>
                         </div>
                     </div>
 
@@ -300,8 +313,8 @@
                                 <input id="withdrawAmount" class="form-control form-control-sm" placeholder="Amount in CRO" />
                             </div>
                             <div class="button-pair">
-                                <button onclick="setMaxWithdraw()" class="btn btn-sm btn-secondary">Max</button>
-                                <button id="withdrawBtn" onclick="withDrawFunds()" class="btn btn-sm btn-danger">Withdraw</button>
+                                <button onclick="setMaxWithdraw()" class="btn btn-sm btn-outline-secondary">Max</button>
+                                <button id="withdrawBtn" onclick="withdrawFunds()" class="btn btn-sm btn-outline-danger">Withdraw</button>
                             </div>
                         </div>
                     </div>
