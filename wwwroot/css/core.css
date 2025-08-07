@@ -2,7 +2,7 @@
 :root{
   --header-h: 3.5rem;   /* header height – adjust if you resize the header */
   --footer-h: 3.5rem;   /* footer height – adjust if you resize the footer */
-  --navy:       #000818;
+  --navy:       #000818; /* Background */
   --blueish:    #1dbdf5;
   --cyan:       #00C0F0;
   --white:      #FFFFFF;
@@ -20,15 +20,7 @@
 
 html,body { 
   height:100%; 
-  min-width:360px; 
-}
-
-body, .app-main{                     
-  background:var(--navy);            
-  color:var(--white);
-  font-family:"Arial Black", Impact, sans-serif;
-  display:flex; 
-  flex-direction:column;
+  min-width:360px;
 }
 
 .inner{
@@ -55,26 +47,76 @@ body, .app-main{
   align-items: center;            /* vertically center text */
 }
 
+.app-header .inner {
+  flex-direction: column;
+}
+
 .brand-line{
   font-size:clamp(22px,4vw,42px);    /* larger ceiling */
   font-weight:700; 
   color:var(--white); 
   white-space:nowrap; 
   line-height:1;
+  margin-top: 4px;
+  margin-bottom: 0;
 }
 
 /* ---------- MAIN ---------- */
-.app-main{
+.subtitle{
+  margin-top: -2px;
+  color:var(--blueish);
+  font-size:smaller;
+}
+
+.app-main{                     
   flex:1 1 auto; width:100%;
   padding-top:44px;          /* same number as .inner height */
   padding-bottom:44px;
   overflow-y:auto;
   display:flex; align-items:center; justify-content:center;
   text-align:center;
+  background:var(--navy);            
+  color:var(--white);
+  font-family:"Arial Black", Impact, sans-serif;
+  flex-direction:column;
+  max-width: 1200px; 
+  margin: 0 auto;  
 }
-.subtitle{
-  color:var(--blueish);
-  font-size:smaller;
+
+.core-main {
+  padding: 1rem;
+  justify-content: flex-start;
+  overflow-y: auto;
+  position: fixed;
+  top: var(--header-h);
+  bottom: var(--footer-h);
+  left: 0;
+  right: 0;
+}
+
+.core-main .section-box {
+  min-height: calc(100vh - var(--header-h) - var(--footer-h) - 2rem); /* adjust padding if needed */
+  display: flex;
+  flex-direction: column;
+}
+
+.section-box{
+  background:#0d1a28;            /* same as modal card */
+  border:1px solid rgba(255,255,255,.25);
+  border-radius:12px;
+  box-shadow:0 0 12px rgba(0,0,0,.45);
+  padding:24px 28px;
+  display:flex; flex-direction:column; gap:1rem;
+}
+
+.section-title{
+  font-size:1.25rem;
+  color:var(--cyan);
+  margin:0;
+}
+
+.section-header {
+  position: relative;
 }
 
 /* ---------- FOOTER ---------- */
@@ -318,3 +360,13 @@ button:disabled{
   transition:opacity .15s;
 }
 .copy-wrap:hover .copy-icon{ opacity:1; }
+
+/* leaf at end */
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: var(--navy);
+  z-index: -1;
+}

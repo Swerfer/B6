@@ -1,23 +1,7 @@
  /* --------------------------------------------------
    Admin-only tweaks – complements global core.css
 -------------------------------------------------- */
-.admin-main {
-  padding: 1rem;
-  justify-content: flex-start;
-  overflow-y: auto;
-  position: fixed;
-  top: var(--header-h);
-  bottom: var(--footer-h);
-  left: 0;
-  right: 0;
-}
-
-.admin-main .section-box {
-  min-height: calc(100vh - var(--header-h) - var(--footer-h) - 2rem); /* adjust padding if needed */
-  display: flex;
-  flex-direction: column;
-}
-
+ 
 /* centred notice shown to non-authorised wallets */
 .unauth-notice{
   display:flex;
@@ -26,21 +10,6 @@
   justify-content:center;
   min-height:60vh;
   text-align:center;
-}
-
-.section-box{
-  background:#0d1a28;            /* same as modal card */
-  border:1px solid rgba(255,255,255,.25);
-  border-radius:12px;
-  box-shadow:0 0 12px rgba(0,0,0,.45);
-  padding:24px 28px;
-  display:flex; flex-direction:column; gap:1rem;
-}
-
-.section-title{
-  font-size:1.25rem;
-  color:var(--cyan);
-  margin:0;
 }
 
 .placeholder-text{
@@ -263,6 +232,11 @@
   }
 }
 
+.missionTitle {
+  font-size: 1.2rem;
+  color:#9fd0ff;
+}
+
 .missing-players {
   color: #ffc107;      /* Bootstrap warning yellow */
   font-weight: bold;
@@ -435,19 +409,7 @@ body.modal-open::before {
   animation: pulse-highlight 0.3s ease;
 }
 
-.section-header {
-  position: relative;
-}
-
-.section-title {
-  margin: 0 auto;
-  text-align: center;
-}
-
 #readSpinner .spinner {
   border-color: rgba(255, 255, 255, 0.3);     /* base ring */
   border-top-color: #77ffff !important;       /* spinner arc — match theme */
 }
-
-
-

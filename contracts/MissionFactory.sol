@@ -651,12 +651,13 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             uint256 ownerFunds,
             uint256 successes,
             uint256 failures,
-            uint256[6] memory fundsPerTypeArray
+            uint256[] memory fundsPerTypeArray
         ) {
-        uint256[6] memory breakdown;                        // Array to hold the breakdown of reserved funds for each mission type
-        for (uint256 i = 0; i < 7; i++) {                
-            breakdown[i] = reservedFunds[MissionType(i)];   // Fill the array with the reserved funds for each mission type
-        }
+        uint256 enumLength = uint256(type(MissionType).max) + 1;
+		uint256[] memory breakdown = new uint256[](enumLength);
+		for (uint256 i = 0; i < enumLength; i++) {
+			breakdown[i] = reservedFunds[MissionType(i)];
+		}
         return (
             owner(),                // Return the address of the owner of the factory contract
             address(this),          // Return the address of the factory contract

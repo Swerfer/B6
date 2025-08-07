@@ -35,6 +35,7 @@ const enrollmentStartIn = document.getElementById   ("enrollmentStart");
 const enrollmentEndIn   = document.getElementById   ("enrollmentEnd");
 const missionStartIn    = document.getElementById   ("missionStart");
 const missionEndIn      = document.getElementById   ("missionEnd");
+const missionNameIn     = document.getElementById   ("missionName");
 const missionTypeSel    = document.getElementById   ("missionType");
 const roundsIn          = document.getElementById   ("rounds");
 const missionsList      = document.getElementById   ("missionsList");
@@ -53,8 +54,17 @@ const highlight = els => {
 const validate = () => {
   if(!form) return {ok:false, bad:[]};
 
-  const f      = form.elements;
+  const f       = form.elements;
+  const name    = f.missionName.value.trim();
+  const type    = parseInt(f.missionType.value);
   const bad    = [];
+
+  if (type === 0 && !name) {
+    bad.push(f.missionName);  // Custom missions require a name
+  }
+  if (name.length > 24) {
+    bad.push(f.missionName);  // Should never happen with maxlength, but safe
+  }
 
   /* numeric helpers */
   const valNum = el => el.value.trim() === "" ? NaN : +el.value;
@@ -198,7 +208,7 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       triggerRefundModal(item.addr);
     }
 
-    modalTitle.innerHTML = `Mission ${copyableAddr(item.addr)}`;
+    modalTitle.innerHTML = `Mission ${copyableAddr(item.addr)}</br><span class="missionTitle">Mission name: ${item.name}</span>`;
 
     let buttons = `
       <button class="btn btn-sm btn-outline-info me-2 reload-btn" data-addr="${item.addr}">
@@ -366,6 +376,7 @@ async function refreshGlobalView(){
 
   const summary = await factory.getFactorySummary();
   const [owner, _factory, impl, totM, wk, mo, funds, ownerFunds, succ, fail, fundsByType] = summary;
+console.log("fundsByType (raw)", fundsByType.map(f => f.toString()));
 
   const fmt = v => ethers.utils.formatEther(v);
   const g = document.getElementById("globalView");
@@ -421,74 +432,94 @@ async function loadFactoryWriteData() {
   }
 }
 
-async function setEnrollmentLimits() {
+async function setEnrollmentLimits(btn) {
   const w = document.getElementById("weeklyLimit")?.value.trim();
   const m = document.getElementById("monthlyLimit")?.value.trim();
   if (!w || !m) return showAlert("Please fill both limits", "warning");
 
-  try {
-    const provider = new ethers.providers.Web3Provider(window.ethereum);
-    const signer   = provider.getSigner();
-    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
-    const tx = await factory.setEnrollmentLimits(w, m);
-    showAlert("Sending transaction…", "info");
-    await tx.wait();
-    showAlert("Enrollment limits updated", "success");
-    await loadFactoryWriteData();
-  } catch (err) {
-    showAlert(decodeError(err), "error");
-  }
+  showConfirm("Update enrollment limits?", async () => {
+    setBtnLoading(btn, true, "Submitting");
+
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const signer   = provider.getSigner();
+      const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+      const tx = await factory.setEnrollmentLimits(w, m);
+      await tx.wait();
+      showAlert("Enrollment limits updated", "success");
+      await loadFactoryWriteData();
+    } catch (err) {
+      showAlert(decodeError(err), "error");
+    }
+
+    setBtnLoading(btn, false, "Submit", false);
+  });
 }
 
-async function addAuthorizedAddress() {
+async function addAuthorizedAddress(btn) {
   const addr = document.getElementById("authAdd")?.value.trim();
   if (!ethers.utils.isAddress(addr)) return showAlert("Invalid address", "warning");
 
-  try {
-    const provider = new ethers.providers.Web3Provider(window.ethereum);
-    const signer   = provider.getSigner();
-    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
-    const tx = await factory.addAuthorizedAddress(addr);
-    showAlert("Adding authorized address…", "info");
-    await tx.wait();
-    showAlert("Address authorized", "success");
-  } catch (err) {
-    showAlert(decodeError(err), "error");
-  }
+  showConfirm(`Authorize address ${addr}?`, async () => {
+    setBtnLoading(btn, true, "Adding");
+
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const signer   = provider.getSigner();
+      const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+      const tx = await factory.addAuthorizedAddress(addr);
+      await tx.wait();
+      showAlert("Address authorized", "success");
+    } catch (err) {
+      showAlert(decodeError(err), "error");
+    }
+
+    setBtnLoading(btn, false, "Add", false);
+  });
 }
 
-async function removeAuthorizedAddress() {
+async function removeAuthorizedAddress(btn) {
   const addr = document.getElementById("authRemove")?.value.trim();
   if (!ethers.utils.isAddress(addr)) return showAlert("Invalid address", "warning");
 
-  try {
-    const provider = new ethers.providers.Web3Provider(window.ethereum);
-    const signer   = provider.getSigner();
-    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
-    const tx = await factory.removeAuthorizedAddress(addr);
-    showAlert("Removing authorized address…", "info");
-    await tx.wait();
-    showAlert("Address removed", "success");
-  } catch (err) {
-    showAlert(decodeError(err), "error");
-  }
+  showConfirm(`Remove address ${addr}?`, async () => {
+    setBtnLoading(btn, true, "Removing");
+
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const signer   = provider.getSigner();
+      const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+      const tx = await factory.removeAuthorizedAddress(addr);
+      await tx.wait();
+      showAlert("Address removed", "success");
+    } catch (err) {
+      showAlert(decodeError(err), "error");
+    }
+
+    setBtnLoading(btn, false, "Remove", false);
+  });
 }
 
-async function proposeOwnershipTransfer() {
+async function proposeOwnershipTransfer(btn) {
   const newOwner = document.getElementById("proposeOwner")?.value.trim();
   if (!ethers.utils.isAddress(newOwner)) return showAlert("Invalid address", "warning");
 
-  try {
-    const provider = new ethers.providers.Web3Provider(window.ethereum);
-    const signer   = provider.getSigner();
-    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
-    const tx = await factory.proposeOwnershipTransfer(newOwner);
-    showAlert("Ownership transfer proposed", "info");
-    await tx.wait();
-    showAlert("Proposal submitted", "success");
-  } catch (err) {
-    showAlert(decodeError(err), "error");
-  }
+  showConfirm(`Propose ownership transfer to ${newOwner}?`, async () => {
+    setBtnLoading(btn, true, "Proposing");
+
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const signer   = provider.getSigner();
+      const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+      const tx = await factory.proposeOwnershipTransfer(newOwner);
+      await tx.wait();
+      showAlert("Proposal submitted", "success");
+    } catch (err) {
+      showAlert(decodeError(err), "error");
+    }
+
+    setBtnLoading(btn, false, "Propose", false);
+  });
 }
 
 async function confirmOwnershipTransfer() {
@@ -518,20 +549,15 @@ async function updateConfirmCard() {
   try {
     const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
-    //const [newOwner, proposer, timestamp, timeLeft] = await factory.getOwnershipProposal();
+    const [newOwner, proposer, timestamp, timeLeft] = await factory.getOwnershipProposal();
 
-    //if (!newOwner || newOwner === ethers.constants.AddressZero || timeLeft === 0) return;
-
-  // TEMPORARY SIMULATION — REMOVE IN PRODUCTION
-  const newOwner     = "0x1234567890abcdef1234567890abcdef12345678";
-  const proposer     = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
-  const timestamp    = Math.floor(Date.now() / 1000); 
+    if (!newOwner || newOwner === ethers.constants.AddressZero || timeLeft === 0) return;
 
     document.getElementById("proposedOwnerShort").textContent = shorten(newOwner);
     document.getElementById("proposerShort").textContent = shorten(proposer);
     const countdownEl = document.getElementById("proposalCountdown");
 
-    const targetTs = timestamp + 3600;
+    const targetTs = parseInt(timestamp) + 24 * 3600;
     const updateTimer = () => {
       const now = Math.floor(Date.now() / 1000);
       const left = targetTs - now;
@@ -540,7 +566,7 @@ async function updateConfirmCard() {
         card.style.display = "none";
         return;
       }
-      countdownEl.textContent = formatSecondsToDHMS(left).replace(/^0d\s/, "");
+      countdownEl.textContent = formatSecondsToDHMS(left).replace(/^\d+d\s*/, '');
     };
 
     updateTimer();
@@ -552,31 +578,36 @@ async function updateConfirmCard() {
   }
 }
 
-async function withdrawFunds() {
+async function withdrawFunds(btn) {
   const val = document.getElementById("withdrawAmount")?.value.trim();
-  console.log("Input:", val);
-  if (!val || isNaN(val)) return showAlert("Invalid amount", "warning");
-
-  try {
-    const provider = new ethers.providers.Web3Provider(window.ethereum);
-    const signer   = provider.getSigner();
-    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
-    const amount   = ethers.utils.parseEther(val);
-    console.log("Parsed amount in wei:", amount.toString());
-    const tx = await factory.withdrawFunds(amount);
-    showAlert("Withdrawing funds…", "info");
-    await tx.wait();
-    showAlert("Funds withdrawn", "success");
-    await loadFactoryWriteData();
-  } catch (err) {
-    showAlert(decodeError(err), "error");
+  if (!val || isNaN(val) || Number(val) <= 0) {
+    return showAlert("Invalid amount", "warning");
   }
+
+  showConfirm(`Withdraw <strong>${val} CRO</strong> from the factory?`, async () => {
+    setBtnLoading(btn, true, "Withdrawing");
+
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const signer   = provider.getSigner();
+      const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
+      const amount   = ethers.utils.parseEther(val);
+      const tx       = await factory.withdrawFunds(amount);
+      await tx.wait();
+      showAlert("Funds withdrawn", "success");
+      await loadFactoryWriteData();
+      document.getElementById("withdrawAmount").value = "";
+    } catch (err) {
+      showAlert(decodeError(err), "error");
+    }
+
+    setBtnLoading(btn, false, "Withdraw", false);
+  });
 }
 
 function setMaxWithdraw() {
   const p = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
-  const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
-  factory.totalMissionFunds().then(f => {
+  p.getBalance(FACTORY_ADDRESS).then(f => {
     document.getElementById("withdrawAmount").value = ethers.utils.formatEther(f);
   });
 }
@@ -595,13 +626,16 @@ async function lookupPlayer(addr){
   ]);
 
   wrap.innerHTML = "";
+  const active = joined.filter(s => [1, 2, 3, 4].includes(s)).length;
   const labels = [
     ["Weekly&nbsp;Limit&nbsp;Used", limits[0]],
     ["Monthly&nbsp;Limit&nbsp;Used", limits[2]],
     ["Can&nbsp;Enroll?", ok ? "Yes" : "No"],
     ["Next Weekly Slot", formatSecondsToDHMS(wSec)],
     ["Next Monthly Slot", formatSecondsToDHMS(mSec)],
-    ["Total&nbsp;Missions&nbsp;Joined", joined.length],
+    ["Total Missions Joined", joined.length],
+    ["Active Missions", active],
+    ["Ended Missions", joined.length - active],
   ];
 
   labels.forEach(([label, value], i) => {
@@ -698,7 +732,16 @@ function applyDateDefaults(){
 /* ---------- ask to apply defaults ---------- */
 const askDefaults = () => {
   // only offer when a base date exists and type isn't "Custom"
+  if (missionNameIn) {
+    if (Number(missionTypeSel.value) === 0) {
+      missionNameIn.placeholder = "";
+    } else {
+      missionNameIn.placeholder = "Optional";
+    }
+  }
+
   if (!enrollmentStartIn.value || Number(missionTypeSel.value) === 0) return;
+
   clearSelection();
   const typeName = missionTypeSel.options[missionTypeSel.selectedIndex].textContent;
   showConfirm(
@@ -823,32 +866,32 @@ async function loadMissions(filter = "all") {
     const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 
-    let addrs = [], stats = [];
+    let addrs = [], stats = [], names = [];
 
     switch (filter) {
       case "active":
-        [addrs, stats] = await factory.getMissionsNotEnded();
+        [addrs, stats, names] = await factory.getMissionsNotEnded();
         setTitle("Active Missions");
         break;
       case "partial":
-        [addrs, stats] = await factory.getMissionsByStatus(5);
+        [addrs, stats, names] = await factory.getMissionsByStatus(5);
         setTitle("Partly Ended Missions");
         break;
       case "failed":
-        [addrs, stats] = await factory.getMissionsByStatus(7);
+        [addrs, stats, names] = await factory.getMissionsByStatus(7);
         setTitle("Failed Missions");
         break;
       case "ended":
-        [addrs, stats] = await factory.getMissionsEnded();
+        [addrs, stats, names] = await factory.getMissionsEnded();
         setTitle("Ended Missions");
         break;
       default:
-        [addrs, stats] = await factory.getAllMissions();
+        [addrs, stats, names] = await factory.getAllMissions();
         setTitle("All Missions");
     }
-
     const items = addrs.map((addr, i) => ({
       addr,
+      name: names[i],
       status: Number(stats[i]),
       idx: addrs.length - i
     }));
@@ -868,7 +911,7 @@ async function loadMissions(filter = "all") {
       li.textContent = "No missions found for this filter.";
       missionsList.appendChild(li);
     } else {
-        await buildMissionGrid(addrs, stats);
+        await buildMissionGrid(addrs, stats, names);
     }
 
     missionsSection.classList.remove("hidden");
@@ -887,13 +930,13 @@ async function loadLatestMissions(n = 10){
     const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
     const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
-    const [addrs, stats] = await factory.getLatestMissions(n);
+    const [addrs, stats, names] = await factory.getLatestMissions(n);
     addrs.length == 1 
       ? setTitle(`Latest ${addrs.length} Mission`)
       : setTitle(`Latest ${addrs.length} Missions`);
 
     /* reuse existing grid builder */
-    await buildMissionGrid(addrs, stats);
+    await buildMissionGrid(addrs, stats, names);
   }catch(err){
     console.warn("loadLatestMissions()", err);
   }finally{
@@ -901,26 +944,35 @@ async function loadLatestMissions(n = 10){
   }
 }
 
-async function buildMissionGrid(addrs, stats){
-  const items = addrs.map((addr,i)=>({ addr, status:Number(stats[i]), idx:addrs.length-i }));
-  items.sort((a,b)=> (a.status===5&&b.status!==5? -1 : b.status===5&&a.status!==5? 1 : b.idx-a.idx));
+async function buildMissionGrid(addrs, stats, names){
+  const items = addrs.map((addr, i) => ({
+    addr,
+    name: names[i],
+    status: Number(stats[i]),
+    idx: addrs.length - i
+  }));
+  items.sort((a, b) => (a.status === 5 && b.status !== 5 ? -1 : b.status === 5 && a.status !== 5 ? 1 : b.idx - a.idx));
 
   missionsList.innerHTML = "";
-  missionsList.classList.toggle("empty", items.length===0);
+  missionsList.classList.toggle("empty", items.length === 0);
 
-  if(items.length===0){
+  if (items.length === 0) {
     const li = document.createElement("li");
-    li.className="mission-empty text-muted";
-    li.textContent="No missions found for this filter.";
+    li.className = "mission-empty text-muted";
+    li.textContent = "No missions found for this filter.";
     missionsList.appendChild(li);
     return;
   }
 
-  items.forEach(m=>{
-    const li=document.createElement("li");
-    li.className="mission-item"+(m.status===3?" partly-success":"");
-    li.innerHTML=`<span>${shorten(m.addr)}</span><span>${statusText(m.status)}</span><span class="mission-spinner fade-spinner hidden"></span>`;
-    li.addEventListener("click",()=>{
+  items.forEach(m => {
+    const li = document.createElement("li");
+    li.className = "mission-item" + (m.status === 3 ? " partly-success" : "");
+    li.innerHTML = `
+      <span>${m.name}</span>
+      <span>${statusText(m.status)}</span>
+      <span class="mission-spinner fade-spinner hidden"></span>
+    `;
+    li.addEventListener("click", () => {
       const sp = li.querySelector(".mission-spinner");
       fadeSpinner(sp, true);
       openMissionModal(m, sp, m.status).finally(() => fadeSpinner(sp, false));
@@ -970,7 +1022,8 @@ form?.addEventListener("submit", async e => {
       parseInt(f.maxPlayers.value),            // max players
       toUnix(f.missionStart.value),            // missionStart
       toUnix(f.missionEnd.value),              // missionEnd
-      parseInt(f.rounds.value)                 // missionRounds
+      parseInt(f.rounds.value),                // missionRounds
+      f.missionName.value.trim()
     ];
     const tx = await factory.createMission(
       ...args,
@@ -989,7 +1042,7 @@ form?.addEventListener("submit", async e => {
         if (!msg) msg = err.message || "Transaction failed";
         showAlert(msg, "error");
     } finally {
-      setBtnLoading(createBtn,false);                  // always stop
+      setBtnLoading(createBtn,false,"Create Mission",false);                  // always stop
       updateBtn();                                     // re-validate after reset
     }
 });

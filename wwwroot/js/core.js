@@ -1,20 +1,20 @@
 /**********************************************************************
  core.js  – shared UI utilities (modals, shortener, global caches)
 **********************************************************************/
-export const FACTORY_ADDRESS = "0x9dce394DCcB87C0196edB9089Efb1afC08556d58";
+export const FACTORY_ADDRESS = "0xb148389C2c554398d5D96B4E795945F85cf80801";
 export const READ_ONLY_RPC   = "https://evm.cronos.org";
 
 export const FACTORY_ABI = [
   // --------- Factory methods ----------
-  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8) payable returns(address)",
+  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8,string) payable returns(address)",
   // --------- Get missions views ----------
-  "function getAllMissions() view returns(address[] missions, uint8[] statuses)",
-  "function getMissionsByStatus(uint8 status) view returns(address[] missions, uint8[] statuses)",
-  "function getMissionsEnded() view returns(address[] missions, uint8[] statuses)",
-  "function getMissionsNotEnded() view returns(address[] missions, uint8[] statuses)",
-  "function getLatestMissions(uint256) view returns(address[] missions, uint8[] statuses)",
+  "function getAllMissions() view returns(address[] missions, uint8[] statuses, string[] names)",
+  "function getMissionsByStatus(uint8 status) view returns(address[] missions, uint8[] statuses, string[] names)",
+  "function getMissionsEnded() view returns(address[] missions, uint8[] statuses, string[] names)",
+  "function getMissionsNotEnded() view returns(address[] missions, uint8[] statuses, string[] names)",
+  "function getLatestMissions(uint256) view returns(address[] missions, uint8[] statuses, string[] names)",
   // ------------ global views ------------
-  "function getFactorySummary() view returns (address,address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[6])",
+  "function getFactorySummary() view returns (address,address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[])",
   "function owner() view returns(address)",
   "function weeklyLimit() view returns(uint256)",
   "function monthlyLimit() view returns(uint256)",
@@ -25,7 +25,7 @@ export const FACTORY_ABI = [
   "function missionImplementation() view returns(address)",
   "function getTotalMissions() view returns(uint256)",
   "function getFundsByType(uint8) view returns(uint256)",
-  "function getPlayerParticipation(address) view returns(address[] joined, uint8[] statuses)",
+  "function getOwnershipProposal() view returns(address newOwner, address proposer, uint256 timestamp, uint256 timeLeft)",
   // ------------ global writes -----------
   "function setEnrollmentLimits(uint256 newWeeklyLimit, uint256 newMonthlyLimit)",
   "function addAuthorizedAddress(address addr)",
@@ -40,6 +40,7 @@ export const FACTORY_ABI = [
   "function secondsTillWeeklySlot(address) view returns(uint256)",
   "function secondsTillMonthlySlot(address) view returns(uint256)",
   "function isMission(address) view returns(bool)",
+  "function getPlayerParticipation(address) view returns(address[] joined, uint8[] statuses, string[] names)",
 ];
 
 
@@ -137,7 +138,6 @@ export function setBtnLoading(btn, state = true, label = "", restore = true) {
     const labelSpan =
       restore ? `<span class="label-loading">${label}</span>`
               : `<span id="connectBtnText" class="label-loading">${label}</span>`;
-
     btn.innerHTML = `
       <span class="spinner fade-spinner"></span>
       ${labelSpan}`;

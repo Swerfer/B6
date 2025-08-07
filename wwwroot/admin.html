@@ -6,8 +6,8 @@
     <title>Mission Admin</title>
 
     <!-- GLOBAL & ADMIN STYLES -->
-    <link rel="stylesheet" href="css/core.css?v450">      <!-- existing base -->
-    <link rel="stylesheet" href="css/admin.css?v450">      <!-- new overrides -->
+    <link rel="stylesheet" href="css/core.css?v452">      <!-- existing base -->
+    <link rel="stylesheet" href="css/admin.css?v452">      <!-- new overrides -->
 
     <!-- Font Awesome & Bootstrap (same as index.html) -->
     <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"
@@ -22,8 +22,8 @@
     <script src="js/web3modal.js"></script>
 
     <!-- Wallet module & this page’s logic -->
-    <script type="module" src="js/core.js?v448"></script>
-    <script type="module" src="js/admin.js?v448"></script>
+    <script type="module" src="js/core.js?v452"></script>
+    <script type="module" src="js/admin.js?v452"></script>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/js/bootstrap.bundle.min.js"
         integrity="sha512-pax4MlgXjHEPfCwcJLQhigY7+N8rt6bVvWLFyUMuxShv170X53TRzGPmPkZmGBhk+jikR8WBM4yl7A9WMHHqvg=="
@@ -37,11 +37,12 @@
     <header class="app-header">
             <div class="inner">
                 <h1 class="brand-line">BE BRAVE&nbsp;&nbsp;BE BOLD&nbsp;&nbsp;BE BANKED</h1>
+                <span class="subtitle">THE ULTIMATE COMPETITIVE BLOCKCHAIN GAME</span>
             </div>
     </header>
 
     <!-- MAIN: three placeholder panels -->
-    <main id="adminMain" class="app-main admin-main container-xl">
+    <main id="adminMain" class="app-main core-main">
             <div class="row g-4 w-100">
 
                 <!-- friendly notice for non-authorized visitors -->
@@ -97,6 +98,11 @@
 
                     <!-- ─────── form ─────── -->
                     <form id="createMissionForm" class="row g-3 text-start">
+
+                        <div class="col-12 col-md-6 offset-md-3">
+                            <label class="form-label" for="missionName">Mission Name</label>
+                            <input id="missionName" name="missionName" type="text" class="form-control" maxlength="24" placeholder="">
+                        </div>
 
                         <div class="col-md-6">
                         <label class="form-label" for="missionType">Mission Type</label>
@@ -176,8 +182,7 @@
                                 </small>
 
                                 <button id="createMissionBtn" type="submit" class="btn btn-sm btn-outline-info" disabled>
-                                    <i class="fa-solid fa-plus me-2"></i>
-                                    <span id="createBtnText">Create Mission</span>
+                                    Create Mission
                                 </button>
 
                             </div>
@@ -235,8 +240,8 @@
                     <div class="section-header">
                         <h2>Factory Write Functions</h2>
                         <button id="reloadWrite" class="btn btn-sm btn-icon float-end">
-                        <span class="spinner fade-spinner" style="opacity: 0;"></span>
-                        <span class="label-loading">Reload</span>
+                            <span class="spinner fade-spinner" style="opacity: 0;"></span>
+                            <span class="label-loading">Reload</span>
                         </button>
                     </div>
 
@@ -249,7 +254,10 @@
                             <div class="flex-grow-1">
                                 <input id="monthlyLimit" class="form-control form-control-sm" placeholder="Monthly limit (current: ...)" />
                             </div>
-                            <button onclick="setEnrollmentLimits()" class="btn btn-sm btn-outline-primary">Submit</button>
+                            <button onclick="setEnrollmentLimits(this)" class="btn btn-sm btn-outline-primary">
+                                <span class="spinner fade-spinner" style="opacity: 0;"></span>
+                                <span class="label-loading">Submit</span>
+                            </button>
                         </div>
                     </div>
 
@@ -259,7 +267,10 @@
                             <div class="flex-grow-1">
                                 <input id="authAdd" class="form-control form-control-sm" placeholder="Address to add" />
                             </div>
-                            <button onclick="addAuthorizedAddress()" class="btn btn-sm btn-outline-primary">Add</button>
+                            <button onclick="addAuthorizedAddress(this)" class="btn btn-sm btn-outline-primary">
+                                <span class="spinner fade-spinner" style="opacity: 0;"></span>
+                                <span class="label-loading">Add</span>
+                            </button>
                         </div>
                     </div>
 
@@ -269,7 +280,10 @@
                             <div class="flex-grow-1">
                                 <input id="authRemove" class="form-control form-control-sm" placeholder="Address to remove" />
                             </div>
-                            <button onclick="removeAuthorizedAddress()" class="btn btn-sm btn-outline-primary">Remove</button>
+                            <button onclick="removeAuthorizedAddress(this)" class="btn btn-sm btn-outline-primary">
+                                <span class="spinner fade-spinner" style="opacity: 0;"></span>
+                                <span class="label-loading">Remove</span>
+                            </button>
                         </div>
                     </div>
 
@@ -279,7 +293,10 @@
                             <div class="flex-grow-1">
                                 <input id="proposeOwner" class="form-control form-control-sm" placeholder="New owner address" />
                             </div>
-                            <button onclick="proposeOwnershipTransfer()" class="btn btn-sm btn-outline-warning">Propose</button>
+                            <button onclick="proposeOwnershipTransfer(this)" class="btn btn-sm btn-outline-warning">
+                                <span class="spinner fade-spinner" style="opacity: 0;"></span>
+                                <span class="label-loading">Propose</span>
+                            </button>
                         </div>
                     </div>
 
@@ -314,7 +331,10 @@
                             </div>
                             <div class="button-pair">
                                 <button onclick="setMaxWithdraw()" class="btn btn-sm btn-outline-secondary">Max</button>
-                                <button id="withdrawBtn" onclick="withdrawFunds()" class="btn btn-sm btn-outline-danger">Withdraw</button>
+                                <button id="withdrawBtn" onclick="withdrawFunds(this)" class="btn btn-sm btn-outline-danger">
+                                    <span class="spinner fade-spinner" style="opacity: 0;"></span>
+                                    <span class="label-loading">Withdraw</span>
+                                </button>
                             </div>
                         </div>
                     </div>

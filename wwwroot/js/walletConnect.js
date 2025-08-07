@@ -90,7 +90,7 @@ export function disconnectWallet(){
 }
 
 function resetBtn(){
-  if (connectBtn) setBtnLoading(connectBtn, false, "Connect Wallet");
+  if (connectBtn) setBtnLoading(connectBtn, false, "Connect Wallet", false);
   setConnectText("Connect Wallet");
 }
 

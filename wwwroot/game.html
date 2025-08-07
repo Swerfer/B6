@@ -7,6 +7,7 @@
 
   <!-- CSS -->
   <link rel="stylesheet" href="css/core.css?">
+  <link rel="stylesheet" href="css/game.css?v452">      
 
   <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet';">
   <noscript>
@@ -23,17 +24,23 @@
   <script type="module" src="js/game.js?"></script>
 </head>
   <body>
-    <!-- HEADER — fixed to top -->
+
     <header class="app-header">
       <div class="inner">
-        <h1 class="brand-line">BE BRAVE&nbsp;&nbsp;BE BOLD&nbsp;&nbsp;BE BANKED</h1>
+          <h1 class="brand-line">BE BRAVE&nbsp;&nbsp;BE BOLD&nbsp;&nbsp;BE BANKED</h1>
+          <span class="subtitle">THE ULTIMATE COMPETITIVE BLOCKCHAIN GAME</span>
       </div>
     </header>
 
     <!-- MAIN — future DApp content goes here -->
-    <main id="app" class="app-main">
-      <!-- placeholder so you can see the scroll-area working -->
-      <p class="subtitle">THE ULTIMATE COMPETITIVE BLOCKCHAIN GAME</p>
+    <main id="gameMain" class="app-main core-main">
+      <div class="row g-4 w-100">
+
+        <section id="placeholder" class="col-12 section-box">
+          <p class="subtitle">Placeholder</p>
+        </section>
+        
+      </div>
     </main>
 
     <footer class="app-footer">
@@ -64,6 +71,5 @@
 
     </div>
 
-    <!-- scripts (already in the <head>) -->
   </body>
 </html>
