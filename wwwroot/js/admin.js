@@ -266,8 +266,8 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       refundBtn.addEventListener('click', () => triggerRefundModal(item.addr, refundBtn, factoryStatus));
     }
 
+    adminSections.forEach(sec => sec.classList.add("hidden"));
     missionModal.classList.remove("hidden");
-    document.body.classList.add("modal-open");
 
   }catch(e){
     showAlert(`getMissionData failed:<br>${e.message}`,"error");
@@ -338,12 +338,14 @@ function updateConnectButton(state = "idle", address = ""){
 }
 
 /* close: add/remove modal-open class */
-function closeMissionModal(){
+function closeMissionModal(showList = false){
   missionModal.classList.add("hidden");
-  document.body.classList.remove("modal-open");
+  if (showList) {
+    document.getElementById("missionsSection")?.classList.remove("hidden");
+  }
 }
 
-modalCloseX?.addEventListener("click", closeMissionModal);
+modalCloseX?.addEventListener("click", () => closeMissionModal(true));
 
 const toUnix = iso => Math.floor(new Date(iso).getTime() / 1000);
 const eth    = ethers.utils;                       // alias
@@ -354,7 +356,7 @@ function toggleSections(show){
     btn.style.display = show ? "inline-flex" : "none";
   });
   if (unauth) unauth.classList.toggle("hidden", show);
-  if (!show) closeMissionModal();
+  if (!show) closeMissionModal(false);
 }
 
 const MS = 1000, H = 3600*MS, D = 24*H, W = 7*D;
@@ -376,7 +378,6 @@ async function refreshGlobalView(){
 
   const summary = await factory.getFactorySummary();
   const [owner, _factory, impl, totM, wk, mo, funds, ownerFunds, succ, fail, fundsByType] = summary;
-console.log("fundsByType (raw)", fundsByType.map(f => f.toString()));
 
   const fmt = v => ethers.utils.formatEther(v);
   const g = document.getElementById("globalView");
@@ -1050,7 +1051,7 @@ form?.addEventListener("submit", async e => {
 // Navigation icon handlers
 document.querySelectorAll(".icon-nav").forEach(btn => {
   btn.addEventListener("click", () => {
-    closeMissionModal();
+    closeMissionModal(false);
     const targetId = btn.getAttribute("data-target");
     adminSections.forEach(sec => {
       if (sec.id === targetId) {

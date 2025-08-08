@@ -2,7 +2,22 @@
    Admin-only tweaks – complements global core.css
 -------------------------------------------------- */
  
-/* centred notice shown to non-authorised wallets */
+
+
+
+
+
+        /* MOVE COLORS TO CORE */
+
+
+
+
+
+
+
+
+
+
 .unauth-notice{
   display:flex;
   flex-direction:column;
@@ -20,15 +35,14 @@
 
 /* ─────────── Missions list ─────────── */
 
-/* the <ul> itself becomes a responsive grid */
 #missionsList{
   display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); /* 1-to-n cols */
+  grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
   gap:1rem;
-  margin:0 0 1rem;            /* a little bottom gap */
-  max-height:calc(2.8rem*10 + 1rem*9); /* ≈ 10 rows incl. gaps */
+  margin:0 0 1rem;            
+  max-height:calc(2.8rem*10 + 1rem*9); 
   overflow-y:auto;
-  place-content:stretch center;         /* centre the grid in the box */
+  place-content:stretch center;      
 }
 
 #missionsList .mission-item {
@@ -62,7 +76,7 @@
 }
 
 #missionsList .mission-item span:last-child{
-  margin-left:0.5rem;           /* small gap before status */
+  margin-left:0.5rem;          
 }
 
 @media (max-width: 600px) {
@@ -84,7 +98,6 @@
   }
 }
 
-/* When empty, override grid with flex centering */
 #missionsList.empty {
   display: flex;
   justify-content: center;
@@ -92,7 +105,6 @@
   min-height: 6rem;
 }
 
-/* Style the actual message row */
 .mission-empty {
   font-weight: 600;
   text-align: center;
@@ -100,7 +112,7 @@
 
 .missions-loading-spinner {
   position: absolute;
-  top: 3rem; /* below title */
+  top: 3rem; 
   left: 0;
   right: 0;
   display: flex;
@@ -111,59 +123,32 @@
 
 /* ─────────── Mission details modal ─────────── */
 
-.mission-modal {
-  position: fixed;
-  top: var(--header-h);
-  bottom: var(--footer-h);
-  left: 1rem;
-  right: 1rem;
-  background: #0d1a28;
-  border: 1px solid #1a3a56;
-  border-radius: .8rem;
-  overflow: auto;
-  z-index: 2050;
-  display: none;
-  box-shadow: 0 0 12px rgba(0,0,0,0.45);
-
-  /* Scrollbar styling merged in */
-  scrollbar-width: thin;
-  scrollbar-color: #0e93c7 #04243b;
+#missionModal { 
+  display: none;           
 }
 
-.mission-modal::-webkit-scrollbar {
-  width: .6rem;
+#missionModal:not(.hidden) {
+  display: block;   
 }
 
-.mission-modal::-webkit-scrollbar-track {
-  background: #04243b;
-  border-radius: 4px;
-  margin-block: 4px;
-}
-
-.mission-modal::-webkit-scrollbar-thumb {
-  background: #0e93c7;
-  border-radius: 4px;
-}
-
-.mission-modal:not(.hidden) {
-  display: block;
-}
-
-.mission-modal-inner{
-  min-height:100%;
-  padding:1.75rem 2rem;
-}
-
-.mission-modal pre{
+#mission-modal pre{
   background:transparent;
   color:#9fd0ff;
-  white-space:pre-wrap;        /* wrap long lines */
+  white-space:pre-wrap;      
   word-break:break-word;
   margin:0; padding:0;
 }
 
-.mission-modal h3{
+#missionModalTitle{
   color:#00c0f0!important;
+}
+
+#missionModal { 
+  text-align:left; 
+}
+
+#missionModal .section-title { 
+  text-align:left; 
 }
 
 .mission-table{
@@ -188,19 +173,16 @@
   width:14rem;
 }
 .mission-table td{
-  color:#ffffff;  /* pure white for better contrast */
+  color:#ffffff;
+  text-align: left;
 }
 
 @media (max-width:820px){
 
   #missionModalTitle {
-    font-size: 1.25rem; /* adjust to taste */
+    font-size: 1.25rem; 
   }
 
-  /* 1 ▸ let the dialog breathe on very small screens */
-  .mission-modal{ left:0.5rem; right:0.5rem; }
-
-  /* 2 ▸ turn each <tr> into its own stacked “card” */
   .mission-table tbody tr{
     display:block;
     margin-bottom:1rem;
@@ -213,7 +195,6 @@
     transition: opacity 0.3s ease;
   }
 
-  /* 3 ▸ label row */
   .mission-table th{
     display:block;
     width:auto;                     /* override fixed 14 rem */
@@ -222,23 +203,23 @@
     border:none;
   }
 
-  /* 4 ▸ value row */
   .mission-table td{
     display:block;
     padding:.6rem .75rem;
     border:none;
     background:#091a2a;
-    word-break:break-word;          /* wrap long numbers */
+    word-break:break-word; 
+    text-align: left;      
   }
 }
 
 .missionTitle {
-  font-size: 1.2rem;
+  font-size: 1rem;
   color:#9fd0ff;
 }
 
 .missing-players {
-  color: #ffc107;      /* Bootstrap warning yellow */
+  color: #ffc107;   
   font-weight: bold;
 }
 
@@ -267,7 +248,7 @@
 
 .confirm-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr); /* 4 columns */
+  grid-template-columns: repeat(4, 1fr); 
   gap: 0.25rem;
   align-items: start;
 }
@@ -284,7 +265,7 @@
 
 @media (max-width: 720px) {
   .confirm-grid {
-    grid-template-columns: 1fr; /* stack everything */
+    grid-template-columns: 1fr; 
   }
 
   .confirm-grid .btn-cell {
@@ -292,7 +273,7 @@
   }
 
   .confirm-grid .btn-cell button {
-    width: 6.5rem; /* keep fixed width */
+    width: 6.5rem; 
   }
 }
 
@@ -308,7 +289,7 @@
 
   .form-pair button {
     width: 6.5rem;
-    margin: 0.25rem auto 0; /* space above, center horizontally */
+    margin: 0.25rem auto 0; 
     display: block;
   }
 
@@ -324,7 +305,6 @@
 }
 
 @media (max-width: 600px) {
-  /* Mobile: stack under input, centered */
   .button-pair {
     justify-content: center;
   }
@@ -339,11 +319,11 @@
   font-size: 1rem;
 }
 
-body.modal-open .admin-main {
+body.modal-open .admin-main { /* Check if this is still correct admin-main is gone */
   pointer-events: none;
 }
 
-body.modal-open::before {
+body.modal-open::before { /* modal-open does not exist as far as I can tell */
   content: '';
   position: fixed;
   top: var(--header-h);
@@ -407,9 +387,4 @@ body.modal-open::before {
 
 .view-card.flash {
   animation: pulse-highlight 0.3s ease;
-}
-
-#readSpinner .spinner {
-  border-color: rgba(255, 255, 255, 0.3);     /* base ring */
-  border-top-color: #77ffff !important;       /* spinner arc — match theme */
 }

@@ -43,10 +43,6 @@ export const FACTORY_ABI = [
   "function getPlayerParticipation(address) view returns(address[] joined, uint8[] statuses, string[] names)",
 ];
 
-
-/* ABI for a single Mission contract */
-/* ABI for a single Mission contract – matches getMissionData() tuple (15 fields) */
-/* ABI that mirrors struct MissionData exactly */
 export const MISSION_ABI = [
   "function getMissionData() view returns (\
       tuple(\
@@ -122,7 +118,6 @@ export const limit = {
 
 export const statusText = code => Status[code] ?? `Unknown(${code})`;
 
-/* ---------- reusable spinner helpers ---------- */
 export function setBtnLoading(btn, state = true, label = "", restore = true) {
   if (!btn) return;
 
@@ -177,7 +172,7 @@ export function setBtnLoading(btn, state = true, label = "", restore = true) {
   }
 }
 
-/* ---------- DOM caches (present on both pages) ---------- */
+/* ---------- DOM caches ---------- */
 const modalOverlay = document.getElementById("modalOverlay");
 const confirmModal = document.getElementById("confirmModal");
 const modalMsg     = document.getElementById("modalMessage");
@@ -188,7 +183,6 @@ const alertTitle   = document.getElementById("alertModalTitle");
 const alertText    = document.getElementById("alertModalText");
 const alertClose   = document.getElementById("alertModalCloseBtn");
 
-/* ---------- Confirm dialog ---------- */
 export function showConfirm(message, onYes) {
   alertModal.classList.add("hidden");
   confirmModal.classList.remove("hidden");
@@ -221,7 +215,6 @@ export function showConfirm(message, onYes) {
   };
 }
 
-/* ---------- Alert dialog ---------- */
 export function showAlert(message, type = "info", onClose = null){
   confirmModal.classList.add("hidden");
   alertModal.className = `modal-box ${type}`;

@@ -119,23 +119,6 @@ html,body {
   position: relative;
 }
 
-/* ---------- FOOTER ---------- */
-.app-footer {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: var(--footer-h);
-  background: var(--navy);
-  z-index: 100;
-  display: flex;
-  align-items: center;
-}
-
-.app-footer .inner > * {
-  margin-inline: 0.1rem; /* Equal horizontal spacing */
-}
-
 .icon-nav {
   height: 32px;
   width: 32px;
@@ -360,6 +343,23 @@ button:disabled{
   transition:opacity .15s;
 }
 .copy-wrap:hover .copy-icon{ opacity:1; }
+
+/* ---------- FOOTER ---------- */
+.app-footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: var(--footer-h);
+  background: var(--navy);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+}
+
+.app-footer .inner > * {
+  margin-inline: 0.1rem; /* Equal horizontal spacing */
+}
 
 /* leaf at end */
 
