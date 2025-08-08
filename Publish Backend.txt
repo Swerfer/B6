@@ -1,0 +1,9 @@
+CD C:\Users\denni\OneDrive\B6\backend\b6.backend
+dotnet publish -c Release -o "C:\Users\denni\OneDrive\B6\backend\publish\B6.Backend"
+
+Copy all from "C:\Users\denni\OneDrive\B6\backend\publish\B6.Backend" to server c:\B6Missions\Backend
+
+Automated:
+
+Set-ExecutionPolicy -Scope Process RemoteSigned
+..\..\Scripts\PublishBackend.ps1

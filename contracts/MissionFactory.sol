@@ -680,7 +680,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
     function getMissionData(address missionAddress)                         external view returns (Mission.MissionData memory) {
         require(missionAddress != address(0), "Invalid mission address");          // Ensure mission address is valid
-        return Mission(payable(missionAddress)).getMissionData();                  // Return the mission data from the Mission contract
+        return Mission(payable(missionAddress)).getMissionData();                           // Return the mission data from the Mission contract
     }
 
     /**

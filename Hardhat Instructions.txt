@@ -1,0 +1,71 @@
+Initialize Project:
+
+    npm install --save-dev hardhat
+    npm install --save-dev @nomicfoundation/hardhat-toolbox
+    npm install --save-dev @nomicfoundation/hardhat-verify
+    npx hardhat
+        Choose: Create an empty hardhat.config.js
+
+        In hardhad.config.js:
+
+            require("@nomicfoundation/hardhat-toolbox");
+            require("@nomicfoundation/hardhat-verify");
+
+            /** @type import('hardhat/config').HardhatUserConfig */
+            module.exports = {
+            solidity: {
+                version: "0.8.30",
+                settings: {
+                optimizer: {
+                    enabled: true,
+                    runs: 200
+                },
+                viaIR: true
+                }
+            },
+                defaultNetwork: "cronos",
+                networks: {
+                    cronos: {
+                        url: "https://evm.cronos.org",
+                        chainId: 25,
+                        accounts: ["private key"] // Owner private key
+                    }
+                },
+                sourcify: {
+                    enabled: true
+                },
+                etherscan: {
+                apiKey: "etherscan v2 api key", // get from etherscan.com
+                customChains: [
+                {
+                    network: "cronos",
+                    chainId: 25,
+                    urls: {
+                    apiURL: "https://api.etherscan.io/v2/api",
+                    browserURL: "https://cronoscan.com"
+                    }
+                }
+                ]
+            }
+            };
+    
+    npm install @openzeppelin/contracts
+    npm audit fix --force
+
+    In PowerShell if node version is not 20 (Maybe first go to https://github.com/coreybutler/nvm-windows/releases for installer):
+    
+    nvm install 20
+    nvm use 20
+
+Test compile:
+
+    Compile with configured Remote version
+
+Publish contract(s):
+
+    npx hardhat run scripts/deployAll.js
+ 
+For Cronoscan verification:
+
+    npx hardhat verify --network cronos <factory address> <implementation address> 
+    npx hardhat verify --network cronos <mission address>
