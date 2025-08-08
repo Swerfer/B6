@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Wallet Connect Test</title>
+
+  <!-- CSS -->
+  <link rel="stylesheet" href="css/core.css?">
+  <link rel="stylesheet" href="css/game.css?v452">      
+
+  <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet';">
+  <noscript>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+  </noscript>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/css/bootstrap.min.css">
+
+  <!-- Ethers + Web3Modal (lokale kopieën) -->
+  <script src="js/ethers.umd.min.js"></script> 
+  <script src="js/web3modal.js"></script>
+
+  <!-- onze connect-logica -->
+  <script type="module" src="js/core.js"></script>
+  <script type="module" src="js/game.js?"></script>
+</head>
+  <body>
+
+    <header class="app-header">
+      <div class="inner">
+          <h1 class="brand-line">BE BRAVE&nbsp;&nbsp;BE BOLD&nbsp;&nbsp;BE BANKED</h1>
+          <span class="subtitle">THE ULTIMATE COMPETITIVE BLOCKCHAIN GAME</span>
+      </div>
+    </header>
+
+    <!-- MAIN — future DApp content goes here -->
+    <main id="gameMain" class="app-main core-main">
+      <div class="row g-4 w-100">
+
+        <section id="placeholder" class="col-12 section-box">
+          <p class="subtitle">Placeholder</p>
+        </section>
+        
+      </div>
+    </main>
+
+    <footer class="app-footer">
+        <div class="inner">
+            <button id="connectWalletBtn" class="btn btn-sm btn-outline-info me-2">
+                <i class="fa-solid fa-wallet me-2"></i>
+                <span id="connectBtnText">Connect Wallet</span>
+            </button>
+        </div>
+    </footer>
+
+    <!-- REUSABLE MODAL -->
+    <div id="modalOverlay" class="modal-overlay">
+
+        <div id="confirmModal" class="modal-box hidden">
+            <p id="modalMessage" class="mb-4"></p>
+            <div class="d-flex gap-3 justify-content-center">
+                <button id="modalConfirm" class="btn btn-cyan px-4">Yes</button>
+                <button id="modalCancel"  class="btn btn-outline-cyan px-4">Cancel</button>
+            </div>
+        </div>
+
+        <div id="alertModal" class="modal-box hidden">
+            <h3 id="alertModalTitle" class="modal-title mb-3"></h3>
+            <p  id="alertModalText"  class="mb-4"></p>
+            <button id="alertModalCloseBtn" class="btn btn-cyan px-4">Close</button>
+        </div>
+
+    </div>
+
+  </body>
+</html>
