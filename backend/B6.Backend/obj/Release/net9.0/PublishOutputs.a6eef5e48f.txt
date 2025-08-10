@@ -1,4 +1,5 @@
 C:\B6Missions\Backend\B6.Backend.exe
+C:\B6Missions\Backend\web.config
 C:\B6Missions\Backend\appsettings.Development.json
 C:\B6Missions\Backend\appsettings.json
 C:\B6Missions\Backend\B6.Backend.dll

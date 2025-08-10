@@ -1,8 +1,29 @@
 /**********************************************************************
  core.js  – shared UI utilities (modals, shortener, global caches)
 **********************************************************************/
-export const FACTORY_ADDRESS = "0xb148389C2c554398d5D96B4E795945F85cf80801";
-export const READ_ONLY_RPC   = "https://evm.cronos.org";
+
+// Defaults (fallbacks if /api/config is unavailable)
+export let READ_ONLY_RPC;
+export let FACTORY_ADDRESS;
+
+// Load runtime config once. Because this file is loaded as type="module",
+// top-level await is supported in modern browsers.
+try {
+  const res = await fetch('/api/config', { cache: 'no-store' });
+  if (res.ok) {
+    const cfg = await res.json();
+    const rpc     = cfg?.cronos?.rpc        || cfg?.rpc;
+    const factory = cfg?.contracts?.factory || cfg?.factory;
+    if (rpc)     READ_ONLY_RPC   = rpc;
+    if (factory) FACTORY_ADDRESS = factory;
+    console.log('[core] /api/config loaded');
+  } else {
+    console.warn('[core] /api/config failed', res.status);
+  }
+} catch (err) {
+  console.warn('[core] /api/config error', err);
+}
+
 
 export const FACTORY_ABI = [
   // --------- Factory methods ----------

@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "dgSpecHash": "IyhSTWsFAqk=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\denni\\OneDrive\\B6\\backend\\B6.Contracts\\B6.Contracts.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\denni\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\6.0.1\\microsoft.extensions.logging.abstractions.6.0.1.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\nethereum.abi\\4.14.0\\nethereum.abi.4.14.0.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\nethereum.contracts\\4.14.0\\nethereum.contracts.4.14.0.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\nethereum.hex\\4.14.0\\nethereum.hex.4.14.0.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\nethereum.jsonrpc.client\\4.14.0\\nethereum.jsonrpc.client.4.14.0.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\nethereum.merkle.patricia\\4.14.0\\nethereum.merkle.patricia.4.14.0.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\nethereum.model\\4.14.0\\nethereum.model.4.14.0.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\nethereum.rlp\\4.14.0\\nethereum.rlp.4.14.0.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\nethereum.rpc\\4.14.0\\nethereum.rpc.4.14.0.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\nethereum.util\\4.14.0\\nethereum.util.4.14.0.nupkg.sha512",
+    "C:\\Users\\denni\\.nuget\\packages\\newtonsoft.json\\11.0.2\\newtonsoft.json.11.0.2.nupkg.sha512"
+  ],
+  "logs": []
+}

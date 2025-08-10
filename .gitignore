@@ -1,2 +1,4 @@
+
 node_modules
 /hardhat.config.js
+**/appsettings.Production.json

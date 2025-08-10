@@ -1,0 +1,13 @@
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\bin\Release\net8.0\B6.Contracts.deps.json
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\bin\Release\net8.0\B6.Contracts.dll
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\bin\Release\net8.0\B6.Contracts.pdb
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\B6.Contracts.csproj.AssemblyReference.cache
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\B6.Contracts.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\B6.Contracts.AssemblyInfoInputs.cache
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\B6.Contracts.AssemblyInfo.cs
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\B6.Contracts.csproj.CoreCompileInputs.cache
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\B6.Contracts.sourcelink.json
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\B6.Contracts.dll
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\refint\B6.Contracts.dll
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\B6.Contracts.pdb
+C:\Users\denni\OneDrive\B6\backend\B6.Contracts\obj\Release\net8.0\ref\B6.Contracts.dll
