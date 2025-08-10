@@ -87,6 +87,7 @@ export const MISSION_ABI = [
   )",
   "function getRealtimeStatus() view returns (uint8)",
   "function refundPlayers()",
+  "function forceFinalizeMission()",
   "function owner() view returns (address)",
 ];
 

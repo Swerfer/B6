@@ -574,15 +574,15 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param amount The amount of funds to withdraw. If 0, withdraws all available funds.
      */
     function withdrawFunds(uint256 amount)                                  external onlyOwner nonReentrant {
-        address mgrOwner = owner();                                                             // Get the owner of the MissionFactory contract
-        require(mgrOwner != address(0), "Invalid manager owner");                               // Ensure the manager owner is valid
+        address mgrOwner = owner();                                         // Get the owner of the MissionFactory contract
+        require(mgrOwner != address(0), "Invalid manager owner");           // Ensure the manager owner is valid
         if (amount == 0) {
-            amount = address(this).balance;                                                     // If no amount specified, withdraw all funds
+            amount = address(this).balance;                                 // If no amount specified, withdraw all funds
         }
-        require(amount <= address(this).balance, "Insufficient balance");                       // Ensure the contract has enough balance to withdraw
-        (bool ok, ) = payable(mgrOwner).call{ value: amount }("");                              // Attempt to transfer the specified amount to the manager owner
-        require(ok, "Transfer failed");                                                         // Ensure the transfer was successful
-        emit FundsWithdrawn(mgrOwner, amount);                                                  // Emit event for funds withdrawal
+        require(amount <= address(this).balance, "Insufficient balance");   // Ensure the contract has enough balance to withdraw
+        (bool ok, ) = payable(mgrOwner).call{ value: amount }("");          // Attempt to transfer the specified amount to the manager owner
+        require(ok, "Transfer failed");                                     // Ensure the transfer was successful
+        emit FundsWithdrawn(mgrOwner, amount);                              // Emit event for funds withdrawal
     }
 
     // ──────────────── View Functions ────────────────
@@ -1267,11 +1267,10 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @dev Ends mission and withdraws remaining pot.
      */   
     function forceFinalizeMission()         external onlyOwnerOrAuthorized nonReentrant {
-        require(_getRealtimeStatus() == Status.PartlySuccess || 
-                _getRealtimeStatus() == Status.Success, "Mission not ended yet");   // Ensure mission is in PartlySuccess or Success status
+        require(_getRealtimeStatus() == Status.PartlySuccess);  // Ensure mission is in PartlySuccess status
 
-        _setStatus(Status.Success);
-        _withdrawFunds(false);                                                      // Withdraw funds to MissionFactory contract 
+        _setStatus(Status.Success);                             
+        _withdrawFunds(false);                                  // Withdraw funds to MissionFactory contract 
     }
 
     // ───────────────── View Functions ─────────────────
@@ -1600,6 +1599,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         emit FundsWithdrawn(_ownerShare, _factoryShare);                                            // Emit event for funds withdrawal
         ownerShare = _ownerShare;                                                                   // Update the owner's share
         factoryShare = _factoryShare;                                                               // Update the factory's share
+        _missionData.croCurrent = address(this).balance;
     }
 
     /**

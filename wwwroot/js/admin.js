@@ -141,35 +141,36 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
   try{
     const p  = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
     const mc = new ethers.Contract(item.addr, MISSION_ABI, p);
-    if (btnRef instanceof HTMLButtonElement) { // If a button reference is provided, show loading state
+    if (btnRef instanceof HTMLButtonElement) {
       setBtnLoading(btnRef, true, "Reloading");
     }
-  const [
-    players,              // address[]
-    missionType,          // uint8
-    enrollmentStart,      // uint256
-    enrollmentEnd,        // uint256
-    enrollmentAmount,     // uint256
-    enrollmentMinPlayers, // uint8
-    enrollmentMaxPlayers, // uint8
-    missionStart,         // uint256
-    missionEnd,           // uint256
-    missionRounds,        // uint8
-    roundCount,           // uint8
-    ethStart,             // uint256
-    ethCurrent,           // uint256
-    playersWon,           // array with { player, amountWon }
-    pauseTimestamp,       // uint256 - Do not remove this, despite not being used here
-    refundedPlayers       // address[]
-  ] = await mc.getMissionData();
+
+    const [
+      players,
+      missionType,
+      enrollmentStart,
+      enrollmentEnd,
+      enrollmentAmount,
+      enrollmentMinPlayers,
+      enrollmentMaxPlayers,
+      missionStart,
+      missionEnd,
+      missionRounds,
+      roundCount,
+      ethStart,
+      ethCurrent,
+      playersWon,
+      pauseTimestamp,
+      refundedPlayers
+    ] = await mc.getMissionData();
 
     const status = await mc.getRealtimeStatus();
 
     if (btnRef && btnRef.dataset.loading){
-     await new Promise(res => {
-       setBtnLoading(btnRef, false);
-       btnRef.addEventListener("transitionend", res, { once:true });
-     });
+      await new Promise(res => {
+        setBtnLoading(btnRef, false);
+        btnRef.addEventListener("transitionend", res, { once:true });
+      });
     }
 
     const ts = s => new Date(Number(s) * 1000).toLocaleString(navigator.language, {
@@ -199,71 +200,98 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
     ];
 
     const shouldRefund = (
-      status === 7 && // Status.Failed
+      status === 7 &&            // Failed
       players.length > 0 &&
       refundedPlayers.length === 0
     );
-
-    if (shouldRefund) {
-      triggerRefundModal(item.addr);
-    }
+    if (shouldRefund) triggerRefundModal(item.addr);
 
     modalTitle.innerHTML = `Mission ${copyableAddr(item.addr)}</br><span class="missionTitle">Mission name: ${item.name}</span>`;
 
+    // Build top button row (Reload / Refund / Close)
     let buttons = `
       <button class="btn btn-sm btn-outline-info me-2 reload-btn" data-addr="${item.addr}">
         <i class="fa-solid fa-rotate-right me-1"></i> Reload
       </button>
     `;
-
     const needsRefund = (
       status === 7 &&
       players.length > 0 &&
       refundedPlayers.length === 0
     );
-
     if (needsRefund) {
       buttons = `
         <button class="btn btn-sm btn-outline-warning me-2 refund-btn" data-addr="${item.addr}">
           <i class="fa-solid fa-coins me-1"></i> Refund
         </button>` + buttons;
     }
-
     buttons += `
       <button id="missionModalCloseBtn" class="btn btn-sm btn-outline-info me-2">
         <i class="fa-solid fa-xmark me-1"></i> Close
       </button>
     `;
 
+    // Compute finalize conditions (derived from fetched data; shown to user)
+    const stPartlySuccess        = status === 5;
+    const stSuccess              = status === 6;
+    const stFailed               = status === 7;
+
+    // Enable if mission has ended AND no refunds were issued AND it is in a terminal-ish state (5/6/7)
+
+    let finalizeBlock = "";
+    if (!(stSuccess || stFailed)) {
+      finalizeBlock = `
+        <hr class="my-3" />
+        <div class="mt-3">
+          <h4 class="mb-2" style="color:#9fd0ff;">Force Finalize</h4>
+          <ul class="list-unstyled mb-3">
+            <li class="d-flex align-items-center gap-2">
+              <i class="fa-solid ${stPartlySuccess || stSuccess ? 'fa-circle-check text-success' : 'fa-circle-xmark text-error'}"></i>
+              <span>Status is PartlySuccess / Success</span>
+            </li>
+          </ul>
+          <button class="btn btn-sm btn-outline-danger finalize-btn"
+                  data-addr="${item.addr}" ${stPartlySuccess ? "" : "disabled"}>
+            <i class="fa-solid fa-flag-checkered me-1"></i> Force Finalize Mission
+          </button>
+        </div>
+      `;
+    }
+
+    // Render table + buttons + finalize section (at bottom)
     modalBody.innerHTML = `
       <table class="mission-table w-100"><tbody id="missionDataBody"></tbody></table>
       <div class="text-center mt-4">${buttons}</div>
+      ${finalizeBlock}
     `;
 
     const tbody = document.getElementById("missionDataBody");
-      tbody.innerHTML = ""; // clear old rows if any
+    tbody.innerHTML = "";
 
     rowTemplates.forEach((rowHTML, i) => {
       const row = document.createElement("tr");
-      row.innerHTML = rowHTML.replace(/^<tr>|<\/tr>$/g, ""); // strip <tr> wrapper
+      row.innerHTML = rowHTML.replace(/^<tr>|<\/tr>$/g, "");
       row.style.opacity = 0;
       row.style.transition = "opacity 0.3s ease";
       setTimeout(() => {
         tbody.appendChild(row);
         requestAnimationFrame(() => row.style.opacity = 1);
-      }, i * 30); // 0.03s per row
+      }, i * 30);
     });
 
     document.getElementById("missionModalCloseBtn")?.addEventListener("click", closeMissionModal);
 
     const reloadBtn = modalBody.querySelector('.reload-btn');
-    if (reloadBtn) {
-      reloadBtn.addEventListener('click', () => openMissionModal(item, reloadBtn, factoryStatus));
-    }
+    if (reloadBtn) reloadBtn.addEventListener('click', () => openMissionModal(item, reloadBtn, factoryStatus));
 
     const refundBtn = modalBody.querySelector('.refund-btn');
-    if (refundBtn) {
-      refundBtn.addEventListener('click', () => triggerRefundModal(item.addr, refundBtn, factoryStatus));
+    if (refundBtn) refundBtn.addEventListener('click', () => triggerRefundModal(item.addr, refundBtn, factoryStatus));
+
+    const finalizeBtn = modalBody.querySelector('.finalize-btn');
+    if (finalizeBtn) {
+      finalizeBtn.addEventListener('click', () =>
+        forceFinalizeMission(item.addr, finalizeBtn, factoryStatus)
+      );
     }
 
     adminSections.forEach(sec => sec.classList.add("hidden"));
@@ -271,7 +299,7 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
 
   }catch(e){
     showAlert(`getMissionData failed:<br>${e.message}`,"error");
-  } 
+  }
 }
 
 async function triggerRefundModal(address, btnRef, factoryStatus = null) {
