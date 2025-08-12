@@ -133,9 +133,21 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Events emitted by the MissionFactory contract.
      * These events are used to log important actions and state changes within the contract.
      */
+    event MissionCreated(
+        address indexed mission,
+        string          name,
+        MissionType     missionType,
+        uint256         enrollmentStart,
+        uint256         enrollmentEnd,
+        uint8           minPlayers,
+        uint8           maxPlayers,
+        uint256         enrollmentAmount,
+        uint256         missionStart,
+        uint256         missionEnd,
+        uint8           missionRounds
+    );
     event AuthorizedAddressAdded                (address        indexed addr                                                                        );
     event AuthorizedAddressRemoved              (address        indexed addr                                                                        );
-    event MissionCreated                        (address        indexed missionAddress, MissionType indexed missionType                             );
     event FundsReceived                         (address        indexed sender,         uint256             amount                                  );
     event MissionFundsRegistered                (uint256                amount,         MissionType indexed missionType,    address indexed sender  );
     event FundsWithdrawn                        (address        indexed to,             uint256             amount                                  );    
@@ -143,6 +155,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     event OwnershipTransferConfirmed            (address        indexed confirmer,      address             newOwner,       uint256 timestamp       );
     event EnrollmentLimitUpdated                (uint8                  newWeekly,      uint8               newMonthly                              );
     event EnrollmentRecorded                    (address        indexed user,           uint256             timestamp                               );
+    event MissionStatusUpdated                  (address        indexed mission,        uint8       indexed fromStatus,     uint8   indexed toStatus, uint256        timestamp);
+    event MissionFinalized                      (address        indexed mission,        uint8       indexed finalStatus,    uint256 timestamp       );
 
     // ────────────────── Modifiers ─────────────────────
     /**
@@ -498,7 +512,19 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             );
 
         missions.push(clone);                                   // Add the new mission to the list of missions
-        emit MissionCreated(clone, _missionType);               // Emit event for mission creation
+        emit MissionCreated(
+            clone,
+            _finalName,
+            _missionType,
+            _enrollmentStart,
+            _enrollmentEnd,
+            _enrollmentMinPlayers,
+            _enrollmentMaxPlayers,
+            _enrollmentAmount,
+            _missionStart,
+            _missionEnd,
+            _missionRounds
+        );               // Emit event for mission creation
 
         // Calculate allocation based on mission type
         uint256 allocation = reservedFunds[_missionType] / 4;   // Missions get 1/4th of the reserved funds
@@ -515,14 +541,32 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Sets the status of a mission.
      * @param newStatus The new status to set for the mission.
      */
-    function setMissionStatus(Status newStatus)                             external onlyMission {
-		missionStatus[msg.sender] = newStatus;          // Update the mission status
+    function setMissionStatus(Status newStatus) external onlyMission {
+        Status fromStatus = missionStatus[msg.sender];
+        missionStatus[msg.sender] = newStatus;
+
         if (newStatus == Status.Success) {
-            totalMissionSuccesses++;                    // Increment the total number of successful missions
+            totalMissionSuccesses++;
         } else if (newStatus == Status.Failed) {
-            totalMissionFailures++;                     // Increment the total number of failed missions
+            totalMissionFailures++;
         }
-    } 
+
+        emit MissionStatusUpdated(
+            msg.sender,
+            uint8(fromStatus),
+            uint8(newStatus),
+            block.timestamp
+        );
+
+        // Ended statuses: PartlySuccess (=5), Success (=6), Failed (=7)
+        if (
+            newStatus == Status.PartlySuccess ||
+            newStatus == Status.Success ||
+            newStatus == Status.Failed
+        ) {
+            emit MissionFinalized(msg.sender, uint8(newStatus), block.timestamp);
+        }
+    }
 
     // ──────────────── Financial Functions ─────────────
     /**
@@ -864,6 +908,50 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         return (result, statuses, names);                       // Return arrays: addresses of missions not ended, their statuses and names  
     }
 
+    // NEW
+    function getMissionsEndedPaged(uint256 offset, uint256 limit)           external view returns (address[] memory addrs, uint8[] memory statuses, string[] memory names) {
+        uint256 len = missions.length;
+        if (offset >= len) {
+            // IMPORTANT: construct arrays with [] length, not bare types
+            addrs    = new address[](0);
+            statuses = new uint8[](0);
+            names    = new string[](0);
+            return (addrs, statuses, names);
+        }
+
+        uint256 to = offset + limit;
+        if (to > len) to = len;
+
+        // First pass: count ended in the window
+        uint256 count;
+        for (uint256 i = offset; i < to; i++) {
+            Status s = missionStatus[missions[i]];
+            if (s == Status.PartlySuccess || s == Status.Success || s == Status.Failed) {
+                unchecked { count++; }
+            }
+        }
+
+        // Allocate exact-size arrays
+        addrs    = new address[](count);
+        statuses = new uint8[](count);
+        names    = new string[](count);
+
+        // Second pass: fill results
+        uint256 k;
+        for (uint256 i = offset; i < to; i++) {
+            address m = missions[i];
+            Status  s = missionStatus[m];
+            if (s == Status.PartlySuccess || s == Status.Success || s == Status.Failed) {
+                addrs[k]    = m;
+                statuses[k] = uint8(s);
+                names[k]    = missionNames[m];
+                unchecked { k++; }
+            }
+        }
+
+        return (addrs, statuses, names);
+    }
+
     /**
      * @dev Returns the addresses of the latest n missions.
      * This function retrieves the last n missions from the list of all missions.
@@ -936,7 +1024,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     event PlayerRefunded        (address    indexed player,         uint256             amount                                              );
     event FundsWithdrawn        (uint256            ownerAmount,    uint256             factoryAmount                                       );
     event RefundFailed          (address    indexed player,         uint256             amount                                              ); 
-    event MissionRefunded       (uint256    indexed nrOfPlayers,    uint256     indexed amount,         address[] indexed player,  uint256 timestamp); // Event emitted when a player is refunded
+    event MissionRefunded       (uint256    indexed nrOfPlayers,    uint256     indexed amount,         address[] player,  uint256 timestamp); // Event emitted when a player is refunded
     event MissionInitialized    (address    indexed owner,          MissionType indexed missionType,    uint256 timestamp                   );
 	event PotIncreased			(uint256			value,			uint256				croCurrent											);
 
@@ -1467,6 +1555,35 @@ contract Mission        is Ownable, ReentrancyGuard {
         require(_getRealtimeStatus() == Status.Success || _getRealtimeStatus() == Status.PartlySuccess, 
                 "Mission is not in Success or PartlySuccess status");                   // Ensure mission is in Success or PartlySuccess status
         return _missionData.playersWon;                                                 // Return the array of players who won in the mission
+    }
+
+    /// @notice Lightweight roll-up for indexer reconciliation (rarely used)
+    function getIndexerSnapshot()           external view returns (uint8 status, uint8 roundCount, uint256 croCurrent, uint32 playersCount, uint32 winnersCount, uint32 refundedCount) {
+        Status s = _getRealtimeStatus(); // forward-only except Active<->Paused
+        return (
+            uint8(s),
+            _missionData.roundCount,
+            _missionData.croCurrent,
+            uint32(_missionData.players.length),
+            uint32(_missionData.playersWon.length),
+            uint32(_missionData.refundedPlayers.length)
+        );
+    }
+
+    /// @notice Return a window of refunded players to avoid huge arrays in one call
+    function getRefundedPlayersSlice(uint256 offset, uint256 limit) external view returns (address[] memory slice) {
+        address[] storage arr = _missionData.refundedPlayers;
+        uint256 len = arr.length;
+        if (offset >= len) {
+            return new address[](0);
+        }
+        uint256 to = offset + limit;
+        if (to > len) to = len;
+        uint256 n = to - offset;
+        slice = new address[](n);
+        for (uint256 i = 0; i < n; i++) {
+            slice[i] = arr[offset + i];
+        }
     }
 
     // ──────────────── Internal Helpers ────────────────

@@ -24,7 +24,6 @@ try {
   console.warn('[core] /api/config error', err);
 }
 
-
 export const FACTORY_ABI = [
   // --------- Factory methods ----------
   "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8,string) payable returns(address)",
@@ -91,6 +90,7 @@ export const MISSION_ABI = [
   "function owner() view returns (address)",
 ];
 
+/* --------------------- Helpers --------------------- */
 export const shorten = addr =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
 
@@ -102,6 +102,27 @@ export function copyableAddr(addr){
       <i class="fa-regular fa-copy ms-1 copy-icon"></i>
     </span>`;
 }
+
+export const unixToDate = (sec) => new Date((Number(sec) || 0) * 1000);
+
+export const formatLocalDateTime = (sec) => {
+  if (sec == null) return "";
+  return unixToDate(sec).toLocaleString();
+};
+
+export const formatCountdown = (targetSec) => {
+  if (!targetSec) return "";
+  const nowSec = Math.floor(Date.now() / 1000);
+  let left = Math.max(0, targetSec - nowSec);
+
+  const d = Math.floor(left / 86400); left -= d * 86400;
+  const h = Math.floor(left / 3600);  left -= h * 3600;
+  const m = Math.floor(left / 60);    left -= m * 60;
+  const s = left;
+
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d}d ${pad(h)}:${pad(m)}:${pad(s)}`;
+};
 
 document.addEventListener("click", e=>{
   const tgt = e.target.closest("[data-copy]");

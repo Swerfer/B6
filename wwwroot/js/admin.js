@@ -233,25 +233,23 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
 
     // Compute finalize conditions (derived from fetched data; shown to user)
     const stPartlySuccess        = status === 5;
-    const stSuccess              = status === 6;
-    const stFailed               = status === 7;
 
     // Enable if mission has ended AND no refunds were issued AND it is in a terminal-ish state (5/6/7)
 
     let finalizeBlock = "";
-    if (!(stSuccess || stFailed)) {
+    if (stPartlySuccess) {
       finalizeBlock = `
         <hr class="my-3" />
         <div class="mt-3">
           <h4 class="mb-2" style="color:#9fd0ff;">Force Finalize</h4>
           <ul class="list-unstyled mb-3">
             <li class="d-flex align-items-center gap-2">
-              <i class="fa-solid ${stPartlySuccess || stSuccess ? 'fa-circle-check text-success' : 'fa-circle-xmark text-error'}"></i>
-              <span>Status is PartlySuccess / Success</span>
+              <i class="fa-solid fa-circle-check text-success"></i>
+              <span>Status is PartlySuccess</span>
             </li>
           </ul>
           <button class="btn btn-sm btn-outline-danger finalize-btn"
-                  data-addr="${item.addr}" ${stPartlySuccess ? "" : "disabled"}>
+                  data-addr="${item.addr}""}>
             <i class="fa-solid fa-flag-checkered me-1"></i> Force Finalize Mission
           </button>
         </div>
