@@ -36,15 +36,13 @@ builder.Logging.AddConsole();
 var app = builder.Build();
 
 /* --------------------- Helpers ---------------------*/
-static long ToUnixSeconds(DateTime dtUtc)
-{
+static long     ToUnixSeconds(DateTime dtUtc){
     if (dtUtc.Kind != DateTimeKind.Utc)
         dtUtc = DateTime.SpecifyKind(dtUtc, DateTimeKind.Utc);
     return new DateTimeOffset(dtUtc).ToUnixTimeSeconds();
 }
 
-static string GetRequired(IConfiguration cfg, string key)
-{
+static string   GetRequired(IConfiguration cfg, string key){
     var v = cfg[key];
     if (string.IsNullOrWhiteSpace(v))
         throw new InvalidOperationException($"Missing configuration key: {key}");
@@ -58,8 +56,7 @@ app.MapGet("/",                               () =>
 );
 
 // /api/config -> shared runtime config for frontend
-app.MapGet("/config",                         (IConfiguration cfg) =>
-{
+app.MapGet("/config",                         (IConfiguration cfg) => {
     var rpc     = GetRequired(cfg, "Cronos:Rpc");
     var factory = GetRequired(cfg, "Contracts:Factory");
     return Results.Ok(new { rpc, factory });
@@ -68,8 +65,7 @@ app.MapGet("/config",                         (IConfiguration cfg) =>
 /***********************
  *  MISSIONS – READ API
  ***********************/
-app.MapGet("/missions/not-ended",       async (IConfiguration cfg) =>
-{
+app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new NpgsqlConnection(cs);
     await conn.OpenAsync();
@@ -130,8 +126,7 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) =>
     return Results.Ok(list);
 });
 
-app.MapGet("/missions/joinable",        async (IConfiguration cfg) =>
-{
+app.MapGet("/missions/joinable",        async (IConfiguration cfg) => {
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new NpgsqlConnection(cs);
     await conn.OpenAsync();
@@ -182,8 +177,7 @@ app.MapGet("/missions/joinable",        async (IConfiguration cfg) =>
     return Results.Ok(list);
 });
 
-app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) =>
-{
+app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) => {
     if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("Missing address");
     addr = addr.ToLowerInvariant();
 
@@ -236,8 +230,7 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
     return Results.Ok(list);
 });
 
-app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) =>
-{
+app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) => {
     if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("Missing address");
     addr = addr.ToLowerInvariant();
 
@@ -351,8 +344,7 @@ app.MapGet("/health",                         () =>
     Results.Ok("OK")
 );
 
-app.MapGet("/health/db",                async (IConfiguration cfg) =>
-{
+app.MapGet("/health/db",                async (IConfiguration cfg) => {
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new NpgsqlConnection(cs);
     await conn.OpenAsync();
@@ -362,8 +354,7 @@ app.MapGet("/health/db",                async (IConfiguration cfg) =>
 });
 
 /* ---------- DEBUG: CHAIN INFO ---------- */
-app.MapGet("/debug/chain",              async (IConfiguration cfg) =>
-{
+app.MapGet("/debug/chain",              async (IConfiguration cfg) => {
     var rpc = GetRequired(cfg, "Cronos:Rpc");
     var web3 = new Web3(rpc);
     var chainId = (long)(await web3.Eth.ChainId.SendRequestAsync()).Value;
@@ -372,8 +363,7 @@ app.MapGet("/debug/chain",              async (IConfiguration cfg) =>
 });
 
 /* ---------- DEBUG: FACTORY COUNTS ---------- */
-app.MapGet("/debug/factory",            async (IConfiguration cfg) =>
-{
+app.MapGet("/debug/factory",            async (IConfiguration cfg) => {
     var rpc     = GetRequired(cfg, "Cronos:Rpc");
     var factory = GetRequired(cfg, "Contracts:Factory");
 
@@ -399,8 +389,7 @@ app.MapGet("/debug/factory",            async (IConfiguration cfg) =>
 });
 
 /* ---------- DEBUG: SINGLE MISSION PROBE ---------- */
-app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg) =>
-{
+app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg) => {
     var rpc = cfg["Cronos:Rpc"] ?? "https://evm.cronos.org";
     var web3 = new Web3(rpc);
 
