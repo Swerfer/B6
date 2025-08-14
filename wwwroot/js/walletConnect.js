@@ -39,6 +39,7 @@ async function afterWalletConnect(instance){
   provider      = new ethers.providers.Web3Provider(instance);
   signer        = provider.getSigner();
   walletAddress = (await signer.getAddress()).toLowerCase();
+  window.dispatchEvent(new CustomEvent("wallet:connected", { detail:{ address: walletAddress }}));
   await new Promise(res => {
     connectBtn.addEventListener("transitionend", res, { once:true });
     setBtnLoading(connectBtn, false, shorten(walletAddress), false);       // fade spinner out
@@ -52,7 +53,8 @@ async function afterWalletConnect(instance){
       disconnectWallet();
     } else {
       walletAddress = accts[0].toLowerCase();
-      setConnectText(shorten(walletAddress)); 
+      setConnectText(shorten(walletAddress));
+      window.dispatchEvent(new CustomEvent("wallet:changed", { detail:{ address: walletAddress }}));
     }
   });
 }
@@ -87,7 +89,13 @@ export function disconnectWallet(){
   web3Modal.clearCachedProvider && web3Modal.clearCachedProvider();
   walletAddress = null;
   resetBtn();
+  walletAddress = null;
+  resetBtn();
+  window.dispatchEvent(new Event("wallet:disconnected"));
 }
+
+export function getSigner() { return signer; }
+export function getProvider() { return provider; }
 
 function resetBtn(){
   if (connectBtn) setBtnLoading(connectBtn, false, "Connect Wallet", false);

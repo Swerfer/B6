@@ -1,22 +1,6 @@
  /* --------------------------------------------------
    Admin-only tweaks – complements global core.css
 -------------------------------------------------- */
- 
-
-
-
-
-
-        /* MOVE COLORS TO CORE */
-
-
-
-
-
-
-
-
-
 
 .unauth-notice{
   display:flex;
@@ -50,7 +34,7 @@
   justify-content: center;
   align-items: center;
   gap: 1.5rem;
-  background-color: #0f2b45;
+  background-color: var(--deep-space-blue);
   padding: 0.5rem 1.25rem;
   border-radius: 1rem;
   font-size: 1rem;
@@ -61,13 +45,13 @@
 }
 
 #missionsList .mission-item:hover{
-  background:#145a83;
+  background: var(--blue-sapphire);
   cursor: pointer;
 }
 
 #missionsList .mission-item.partly-success{
-  background:#f9e79f!important;
-  color:#111;
+  background: var(--pale-maize)!important;
+  color: var(--eerie-black);
   font-weight:600;
 }
 
@@ -133,14 +117,14 @@
 
 #mission-modal pre{
   background:transparent;
-  color:#9fd0ff;
+  color: var(--light-maya-blue);
   white-space:pre-wrap;      
   word-break:break-word;
   margin:0; padding:0;
 }
 
 #missionModalTitle{
-  color:#00c0f0!important;
+  color: var(--cyan)!important;
 }
 
 #missionModal { 
@@ -163,17 +147,17 @@
 .mission-table th,
 .mission-table td{
   padding:.35rem .5rem;
-  border-bottom:1px solid #1a3a56;
+  border-bottom:1px solid var(--deep-slate-blue);
   font-family:Arial,Helvetica,sans-serif;
 }
 .mission-table th{
-  color:#9fd0ff;
+  color:var(--light-maya-blue);
   font-weight:600;
   text-align:left;
   width:14rem;
 }
 .mission-table td{
-  color:#ffffff;
+  color: var(--white);
   text-align: left;
 }
 
@@ -186,7 +170,7 @@
   .mission-table tbody tr{
     display:block;
     margin-bottom:1rem;
-    border:1px solid #0e304c;
+    border:1px solid var(--dark-cerulean);
     border-radius:8px;
     overflow:hidden;
   }
@@ -199,7 +183,7 @@
     display:block;
     width:auto;                     /* override fixed 14 rem */
     padding:.5rem .75rem;
-    background:#0e2235;
+    background: var(--indigo-dye);
     border:none;
   }
 
@@ -207,7 +191,7 @@
     display:block;
     padding:.6rem .75rem;
     border:none;
-    background:#091a2a;
+    background: var(--deep-slate-blue);
     word-break:break-word; 
     text-align: left;      
   }
@@ -215,11 +199,11 @@
 
 .missionTitle {
   font-size: 1rem;
-  color:#9fd0ff;
+  color: var(--deep-slate-blue);
 }
 
 .missing-players {
-  color: #ffc107;   
+  color: var(--amber);   
   font-weight: bold;
 }
 
@@ -354,7 +338,7 @@ body.modal-open::before { /* modal-open does not exist as far as I can tell */
 }
 
 #missionModalClose {
-  color:#145a83;
+  color:var(--blue-sapphire);
 }
 
 .mission-item {
@@ -362,8 +346,8 @@ body.modal-open::before { /* modal-open does not exist as far as I can tell */
 }
 
 .view-card{
-  background:#0f2b45;
-  border:1px solid #1a3a56;
+  background: var(--deep-space-blue);
+  border:1px solid var(--deep-slate-blue);
   border-radius:12px;
   padding:1rem 1.25rem;
   text-align:center;
@@ -380,9 +364,9 @@ body.modal-open::before { /* modal-open does not exist as far as I can tell */
 .view-card p {font-size:.95rem;margin:0}
 
 @keyframes pulse-highlight {
-  0% { background-color: #0f2b45; }
-  50%   { background-color: rgba(0, 255, 255, 0.25); }
-  100% { background-color: #0f2b45; }
+  0% { background-color: var(--deep-space-blue); }
+  50%   { background-color: var(--cyan-25-percent); }
+  100% { background-color: var(--deep-space-blue); }
 }
 
 .view-card.flash {

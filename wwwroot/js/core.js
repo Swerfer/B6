@@ -88,11 +88,27 @@ export const MISSION_ABI = [
   "function refundPlayers()",
   "function forceFinalizeMission()",
   "function owner() view returns (address)",
+  "function enrollPlayer() payable",
+  "function callRound()",
 ];
 
 /* --------------------- Helpers --------------------- */
 export const shorten = addr =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
+
+export function weiToCro(weiStr, decimals = 6) {
+  if (!weiStr) return "0";
+  try {
+    const wei  = BigInt(weiStr);
+    const base = 10n ** 18n;
+    const i    = wei / base;
+    const fraw = (wei % base).toString().padStart(18, "0");
+    const f    = fraw.slice(0, decimals).replace(/0+$/, "");
+    return f ? `${i}.${f}` : `${i}`;
+  } catch {
+    return String(weiStr);
+  }
+}
 
 export function copyableAddr(addr){
   if(!addr) return "";
@@ -107,7 +123,10 @@ export const unixToDate = (sec) => new Date((Number(sec) || 0) * 1000);
 
 export const formatLocalDateTime = (sec) => {
   if (sec == null) return "";
-  return unixToDate(sec).toLocaleString();
+  return unixToDate(sec).toLocaleString(navigator.language, {
+      dateStyle: 'short',
+      timeStyle: 'short'
+    });
 };
 
 export const formatCountdown = (targetSec) => {

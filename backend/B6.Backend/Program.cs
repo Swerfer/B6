@@ -1,7 +1,8 @@
 using Azure.Identity;
 using Azure.Extensions.AspNetCore.Configuration.Secrets;
 using B6.Backend.Hubs;
-using B6.Contracts;                        
+using B6.Contracts; 
+using Microsoft.AspNetCore.SignalR;                       
 using Microsoft.Extensions.Logging.EventLog;
 using Nethereum.Web3;
 using Nethereum.Contracts;
@@ -22,8 +23,7 @@ string[] requiredKeys = {
     "ConnectionStrings:Db"
 };
 
-foreach (var k in requiredKeys)
-{
+foreach (var k in requiredKeys) {
     if (string.IsNullOrWhiteSpace(builder.Configuration[k]))
         throw new InvalidOperationException($"Missing configuration key on startup: {k}");
 }
@@ -412,9 +412,16 @@ app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg) 
 /* ---------- HUB ---------- */
 app.MapHub<GameHub>("/hub/game");
 
+// Debug: ping a group to verify client subscription
+app.MapGet("/debug/push/{addr}", async (string addr, IHubContext<GameHub> hub) => {
+    if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("addr required");
+    var g = addr.ToLowerInvariant();
+    await hub.Clients.Group(g).SendAsync("ServerPing", $"Hello group: {g}");
+    return Results.Ok(new { pushed = g });
+});
+
 // Inspect environment paths and process identity
-app.MapGet("/debug/env", (IHostEnvironment env) =>
-{
+app.MapGet("/debug/env", (IHostEnvironment env) => {
     return Results.Ok(new {
         env.ApplicationName,
         env.EnvironmentName,
@@ -426,4 +433,5 @@ app.MapGet("/debug/env", (IHostEnvironment env) =>
 });
 
 app.Run();
+
 

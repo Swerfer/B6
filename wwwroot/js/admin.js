@@ -22,6 +22,7 @@ import {
     copyableAddr,
     shorten,
     decodeError,
+    formatLocalDateTime,
 } from "./core.js";
 
 /* ---------- DOM ---------- */
@@ -173,21 +174,16 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       });
     }
 
-    const ts = s => new Date(Number(s) * 1000).toLocaleString(navigator.language, {
-      dateStyle: 'short',
-      timeStyle: 'short'
-    });
-
     /* build rows */
     const rowTemplates = [
       `<tr><th>Factory Status</th>     <td>${statusText(factoryStatus)}</td></tr>`,
       `<tr><th>Realtime Status</th>    <td>${statusText(status)}</td></tr>`,
       `<tr><th>Players</th>            <td${players.length < enrollmentMinPlayers ? ' class="text-warning fw-bold"' : ''}>${players.length}</td></tr>`,
       `<tr><th>Mission Type</th>       <td>${missionTypeName[missionType]}</td></tr>`,
-      `<tr><th>Enrollment Start</th>   <td>${ts(enrollmentStart)}</td></tr>`,
-      `<tr><th>Enrollment End</th>     <td>${ts(enrollmentEnd)}</td></tr>`,
-      `<tr><th>Mission Start</th>      <td>${ts(missionStart)}</td></tr>`,
-      `<tr><th>Mission End</th>        <td>${ts(missionEnd)}</td></tr>`,
+      `<tr><th>Enrollment Start</th>   <td>${formatLocalDateTime(enrollmentStart)}</td></tr>`,
+      `<tr><th>Enrollment End</th>     <td>${formatLocalDateTime(enrollmentEnd)}</td></tr>`,
+      `<tr><th>Mission Start</th>      <td>${formatLocalDateTime(missionStart)}</td></tr>`,
+      `<tr><th>Mission End</th>        <td>${formatLocalDateTime(missionEnd)}</td></tr>`,
       `<tr><th>Min Players</th>        <td>${enrollmentMinPlayers}</td></tr>`,
       `<tr><th>Max Players</th>        <td>${enrollmentMaxPlayers}</td></tr>`,
       `<tr><th>Rounds</th>             <td>${missionRounds}</td></tr>`,

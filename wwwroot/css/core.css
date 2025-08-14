@@ -1,19 +1,32 @@
 /* ---------- BRAND COLOURS ---------- */
 :root{
-  --header-h: 3.5rem;   /* header height – adjust if you resize the header */
-  --footer-h: 3.5rem;   /* footer height – adjust if you resize the footer */
-  --navy:       #000818; /* Background */
-  --blueish:    #1dbdf5;
-  --cyan:       #00C0F0;
-  --white:      #FFFFFF;
-  --navy-text:  #001e38;
+  --header-h: 3.5rem;                           /* header height – adjust if you resize the header */
+  --footer-h: 3.5rem;                           /* footer height – adjust if you resize the footer */
+
+  --black:                        #000000;
+  --eerie-black:                  #111111;
+  --navy:                         #000818;
+  --oxford-deep-blue:             #001e38;
+  --indigo-dye:                   #0e2235;
+  --deep-space-blue:              #0f2b45;
+  --dark-cerulean:                #0e304c;
+  --deep-slate-blue:              #1a3a56;
+  --blue-sapphire:                #145a83;
+  --cyan:                         #00C0F0;
+  --blueish:                      #1dbdf5;
+  --light-maya-blue:              #9fd0ff;
+  --amber:                        #ffc107;
+  --pale-maize:                   #f9e79f;
+  --cyan-25-percent:              rgba(0,255,255,0.25);
+  --white:                        #ffffff;
 
   /* accent hues used by showAlert() */
-  --info:    #17a2b8;
-  --success: #28a745;
-  --warning: #ffc107;
-  --error:   #dc3545;
+  --info:                         #17a2b8;    /* Tiffany Blue / Verdigris */
+  --success:                      #28a745;    /* Jade / Emerald Green */
+  --warning:                      #ffc107;    /* Amber */
+  --error:                        #dc3545;    /* Crimson / Imperial Red */
 }
+
 
 /* ---------- GLOBAL RESET & LAYOUT ---------- */
 * { box-sizing:border-box; margin:0; padding:0; }
