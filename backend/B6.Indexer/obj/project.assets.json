@@ -3100,11 +3100,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\denni\\OneDrive\\B6\\backend\\b6.indexer\\B6.Indexer.csproj",
+      "projectUniqueName": "C:\\Users\\denni\\OneDrive\\B6\\backend\\B6.Indexer\\B6.Indexer.csproj",
       "projectName": "B6.Indexer",
-      "projectPath": "C:\\Users\\denni\\OneDrive\\B6\\backend\\b6.indexer\\B6.Indexer.csproj",
+      "projectPath": "C:\\Users\\denni\\OneDrive\\B6\\backend\\B6.Indexer\\B6.Indexer.csproj",
       "packagesPath": "C:\\Users\\denni\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\denni\\OneDrive\\B6\\backend\\b6.indexer\\obj\\",
+      "outputPath": "C:\\Users\\denni\\OneDrive\\B6\\backend\\B6.Indexer\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
@@ -3197,7 +3197,7 @@
             "privateAssets": "all"
           }
         },
-        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.302/PortableRuntimeIdentifierGraph.json"
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.304/PortableRuntimeIdentifierGraph.json"
       }
     }
   }

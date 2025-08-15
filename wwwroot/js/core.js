@@ -119,6 +119,34 @@ export function copyableAddr(addr){
     </span>`;
 }
 
+export function extLinkIcon(url, title = "Open in new tab"){
+  if (!url) return "";
+  return `
+    <a class="ms-2" href="${url}" target="_blank" rel="noopener" title="${title}">
+      <i class="fa-solid fa-arrow-up-right-from-square"></i>
+    </a>`;
+}
+
+export function txLinkIcon(txHash){
+  return txHash ? extLinkIcon(`https://cronoscan.com/tx/${txHash}`, "Open on Cronoscan") : "";
+}
+
+export function addrLinkIcon(addr){
+  return addr ? extLinkIcon(`https://cronoscan.com/address/${addr}`, "Open on Cronoscan") : "";
+}
+
+export function statusColorClass(s) {
+  // 0 Pending, 1 Enrolling, 2 Arming → info
+  // 3 Active → info (or success if you prefer)
+  // 4 Paused → warning
+  // 5 PartlySuccess, 6 Success → success
+  // 7 Failed → error
+  if (s === 7) return "text-error";
+  if (s === 6 || s === 5) return "text-success";
+  if (s === 4) return "text-warning";
+  return "text-info";
+}
+
 export const unixToDate = (sec) => new Date((Number(sec) || 0) * 1000);
 
 export const formatLocalDateTime = (sec) => {
@@ -141,6 +169,22 @@ export const formatCountdown = (targetSec) => {
 
   const pad = (n) => String(n).padStart(2, "0");
   return `${d}d ${pad(h)}:${pad(m)}:${pad(s)}`;
+};
+
+export const formatDurationShort = (seconds) => {
+  let s = Math.max(0, Number(seconds) || 0);
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const h = Math.floor(s / 3600);  s -= h * 3600;
+  const m = Math.floor(s / 60);
+
+  if (d >= 30) return "1 mo";        // coarse label for very long
+  if (d >= 7)  return `${Math.round(d/7)} w`;
+  if (d > 0 && h > 0) return `${d} d ${h} h`;
+  if (d > 0)  return `${d} d`;
+  if (h > 0 && m > 0) return `${h} h ${m} m`;
+  if (h > 0)  return `${h} h`;
+  if (m > 0)  return `${m} m`;
+  return "0 m";
 };
 
 document.addEventListener("click", e=>{

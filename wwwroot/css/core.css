@@ -1,7 +1,11 @@
 /* ---------- BRAND COLOURS ---------- */
 :root{
-  --header-h: 3.5rem;                           /* header height – adjust if you resize the header */
-  --footer-h: 3.5rem;                           /* footer height – adjust if you resize the footer */
+  --header-h:       3.5rem;                       /* header height – adjust if you resize the header */
+  --footer-h:       3.5rem;                       /* footer height – adjust if you resize the footer */
+  --mini-label-w:   5rem;                         /* mini label minimum width desktop */
+  --mini-label-w-m: 4rem;                         /* mini label minimum width mobile */
+  --kv-label-w:     8.5rem;                       /* label width for 2 columns at mission details */
+  --card-grid-gap:  1rem;                         /* gap between 2 cards in a mission list */
 
   --black:                        #000000;
   --eerie-black:                  #111111;
@@ -17,8 +21,8 @@
   --light-maya-blue:              #9fd0ff;
   --amber:                        #ffc107;
   --pale-maize:                   #f9e79f;
-  --cyan-25-percent:              rgba(0,255,255,0.25);
   --white:                        #ffffff;
+  --cyan-25-percent:              rgba(0,255,255,0.25);
 
   /* accent hues used by showAlert() */
   --info:                         #17a2b8;    /* Tiffany Blue / Verdigris */
@@ -26,7 +30,6 @@
   --warning:                      #ffc107;    /* Amber */
   --error:                        #dc3545;    /* Crimson / Imperial Red */
 }
-
 
 /* ---------- GLOBAL RESET & LAYOUT ---------- */
 * { box-sizing:border-box; margin:0; padding:0; }
@@ -96,6 +99,12 @@ html,body {
   margin: 0 auto;  
 }
 
+/* when .app-main and .core-main are combined, don’t add the extra paddings */
+.app-main.core-main {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .core-main {
   padding: 1rem;
   justify-content: flex-start;
@@ -105,12 +114,22 @@ html,body {
   bottom: var(--footer-h);
   left: 0;
   right: 0;
+  display: block;
+}
+
+/* Fill the fixed main area (subtract 1rem top + 1rem bottom padding) */
+.core-main > .row {
+  height: calc(100% );
+  margin-left: 0; 
+  margin-right: 0; /* keep the width stable */
 }
 
 .core-main .section-box {
-  min-height: calc(100vh - var(--header-h) - var(--footer-h) - 2rem); /* adjust padding if needed */
+  height: 100%;            /* fixed height inside the fixed main area */
+  min-height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: auto;          /* scroll the content if it gets tall */
 }
 
 .section-box{
@@ -120,6 +139,7 @@ html,body {
   box-shadow:0 0 12px rgba(0,0,0,.45);
   padding:24px 28px;
   display:flex; flex-direction:column; gap:1rem;
+  text-align: left;
 }
 
 .section-title{
@@ -382,4 +402,161 @@ body::before {
   inset: 0;
   background: var(--navy);
   z-index: -1;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   JOINABLE CARD – shared component (reusable across pages)
+   Put this near the bottom of core.css
+   ──────────────────────────────────────────────────────────── */
+
+/* variables for card + progress */
+:root{
+  --card-bg: #0d1a28;
+  --card-border: rgba(255,255,255,0.25);
+  --text-muted-2: rgba(255,255,255,0.7);
+  --progress-track: rgba(255,255,255,0.12);
+  --progress-fill: var(--cyan);
+}
+
+/* click-able card */
+.mission-card{
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: transform .06s ease, box-shadow .2s ease, border-color .2s ease;
+  text-align: left;
+}
+.mission-card:hover{ box-shadow: 0 0 0 1px var(--cyan), 0 0 18px rgba(0,0,0,.45); }
+.mission-card:active{ transform: scale(.996); }
+
+.mission-card .mini-row{
+  display: flex;
+  align-items: baseline;
+}
+
+.mission-card .mini-row .label{
+  flex: 0 0 var(--mini-label-w);  /* fixed label width desktop*/
+}
+
+@media (max-width:768px){
+  .mission-card .mini-row .label{
+   flex: 0 0 var(--mini-label-w-m);  /* fixed label width mobile */
+  }
+}
+
+.mission-card .mini-row .value{
+  flex: 1 1 auto;                 /* value area expands, left-aligned */
+}
+
+/* top row: title on the left, rounds on the right */
+.mission-head{
+  display:flex; align-items:center; justify-content:space-between; gap:.75rem;
+}
+.mission-title{
+  display:flex; align-items:center; gap:.5rem;
+  font-weight:700;
+  font-size: clamp(16px, 4.5vw, 20px);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;  /* title ≤ 24 chars fits */
+}
+.mission-rounds{
+  font-weight:600;
+  white-space:nowrap;
+  opacity:.9;
+}
+
+/* “small rows” under the title */
+.mini-row{ margin-top:.35rem; display:flex; gap:.5rem; align-items:baseline; }
+.mini-row .label{ color: var(--text-muted-2); font-size:.92rem; }
+
+/* two facts side-by-side (Fee + Duration) */
+.fact-row{
+  display:grid; grid-template-columns: 1fr 1fr;
+  gap:.5rem 1rem; margin-top:.5rem;
+}
+.fact-row .label{ color: var(--text-muted-2); font-size:.92rem; }
+.fact-row .value{ font-weight:700; }
+
+/* players line with slim progress bar */
+.players-line{
+  margin-top:.35rem;
+  display:flex; align-items:center; justify-content:space-between;
+}
+.players-count{ font-weight:700; white-space:nowrap; }
+
+/* color the current joined count later via JS (ok/low) */
+.players-count .ok  { color: var(--success); }
+.players-count .low { color: var(--error); }
+
+.progress-slim{
+  margin-top:.2rem; height:4px; background:var(--progress-track);
+  border-radius: 3px; overflow:hidden;
+}
+.progress-slim > i{
+  display:block; height:100%; width: var(--w,0%);
+  background: var(--progress-fill);
+}
+
+/* --- status pill used across pages --- */
+.status-pill{
+  display:inline-block;
+  padding:.15rem .5rem;
+  border:1px solid rgba(255,255,255,.2);
+  border-radius:999px;
+  font-size:.85rem;
+  line-height:1.1;
+}
+
+/* tint by status (uses existing color vars) */
+.status-0, .status-1, .status-2 { color: var(--cyan);    }  /* Pending/Enrolling/Arming */
+.status-3                       { color: var(--success); }  /* Active */
+.status-4                       { color: var(--warning); }  /* Paused */
+.status-5, .status-6            { color: var(--info);    }  /* PartlySuccess/Success */
+.status-7                       { color: var(--error);   }  /* Failed */
+
+.kv-grid{
+  display: grid;
+  grid-template-columns: var(--kv-label-w) 1fr var(--kv-label-w) 1fr;
+  column-gap: .7rem;
+  row-gap: .5rem;
+}
+
+.kv-grid .label{
+  color: var(--text-muted-2, rgba(255,255,255,.7));
+  font-size: .92rem;
+  align-self: center;
+}
+
+.kv-grid .value{
+  font-weight: 700;
+  min-width: 0;           /* allow wrapping/ellipsis if you ever add it */
+}
+
+/* Safety: if screen gets very narrow, stack to one pair per row */
+@media (max-width: 768px){
+  .kv-grid{
+    grid-template-columns: var(--kv-label-w) 1fr;
+  }
+}
+
+.card-grid{
+  display: grid;
+  grid-template-columns: 1fr;           /* mobile: single column */
+  gap: var(--card-grid-gap);
+  padding: 0;                           /* good for <ul> */
+  margin: 0;
+  list-style: none;
+}
+
+/* wide screens (~≥1170px container -> two ~590px cards) */
+@media (min-width: 992px){
+  .card-grid{
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* make each card fill its grid cell */
+.card-grid > li{
+  width: 100%;
 }

@@ -1,16 +1,15 @@
-using System;
-using System.IO;
+using Azure.Extensions.AspNetCore.Configuration.Secrets;
+using Azure.Identity;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.EventLog;
-using Microsoft.Extensions.Hosting.WindowsServices;
+using System;
+using System.IO;
 
 using B6.Indexer;
-
-using Azure.Identity;
-using Azure.Extensions.AspNetCore.Configuration.Secrets;
 
 var host = Host.CreateDefaultBuilder(args)
     .UseWindowsService()
@@ -40,6 +39,7 @@ var host = Host.CreateDefaultBuilder(args)
     .ConfigureServices((ctx, services) =>
     {
         services.AddHostedService<MissionIndexer>();
+        services.AddHostedService<RealtimeStatusRefresher>();
     })
     .Build();
 

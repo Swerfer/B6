@@ -1,5 +1,6 @@
 using Azure.Identity;
 using Azure.Extensions.AspNetCore.Configuration.Secrets;
+using B6.Backend;
 using B6.Backend.Hubs;
 using B6.Contracts; 
 using Microsoft.AspNetCore.SignalR;                       
@@ -147,6 +148,9 @@ app.MapGet("/missions/joinable",        async (IConfiguration cfg) => {
         m.enrollment_amount_wei::text  as enrollment_amount_wei,
         m.enrollment_min_players,
         m.enrollment_max_players,
+        m.mission_start,
+        m.mission_end,
+        m.mission_rounds_total,
         coalesce(c.enrolled,0)          as enrolled_players
       from missions m
       left join counts c using (mission_address)
@@ -170,6 +174,9 @@ app.MapGet("/missions/joinable",        async (IConfiguration cfg) => {
             enrollment_amount_wei  = (string)rd["enrollment_amount_wei"],
             enrollment_min_players = (short) rd["enrollment_min_players"],
             enrollment_max_players = (short) rd["enrollment_max_players"],
+            mission_start          = (long)  rd["mission_start"],
+            mission_end            = (long)  rd["mission_end"],
+            mission_rounds_total   = (short) rd["mission_rounds_total"],
             enrolled_players       = (int)   rd["enrolled_players"]
         });
     }
@@ -186,7 +193,12 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
     await conn.OpenAsync();
 
     var sql = @"
-      select
+    with counts as (
+        select mission_address, count(*)::int as enrolled
+        from mission_enrollments
+        group by mission_address
+    )
+    select
         m.mission_address,
         m.name,
         m.mission_type,
@@ -195,13 +207,21 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
         m.mission_end,
         m.mission_rounds_total,
         m.round_count,
+        m.enrollment_min_players,
+        coalesce(c.enrolled,0) as enrolled_players,
+        case
+            when m.status = 7 and m.round_count = 0 and coalesce(c.enrolled,0) <  m.enrollment_min_players then 'Not enough players'
+            when m.status = 7 and m.round_count = 0 and coalesce(c.enrolled,0) >= m.enrollment_min_players then 'No rounds played'
+        else null
+        end as failure_reason,
         e.enrolled_at,
         e.refunded,
         e.refund_tx_hash
-      from mission_enrollments e
-      join missions m using (mission_address)
-      where e.player_address = @p
-      order by m.status asc, m.mission_end asc nulls last;";
+    from mission_enrollments e
+    join missions m using (mission_address)
+    left join counts c using (mission_address)
+    where e.player_address = @p
+    order by m.status asc, m.mission_end asc nulls last;";
 
     await using var cmd = new NpgsqlCommand(sql, conn);
     cmd.Parameters.AddWithValue("p", addr);
@@ -211,19 +231,22 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
     while (await rd.ReadAsync())
     {
         list.Add(new {
-            mission_address     = rd["mission_address"] as string,
-            name                = rd["name"] as string,
-            mission_type        = (short) rd["mission_type"],
-            status              = (short) rd["status"],
-            mission_start       = (long)  rd["mission_start"],
-            mission_end         = (long)  rd["mission_end"],
-            mission_rounds_total= (short) rd["mission_rounds_total"],
-            round_count         = (short) rd["round_count"],
-            enrolled_at         = rd["enrolled_at"] is DBNull
+            mission_address       = rd["mission_address"] as string,
+            name                  = rd["name"] as string,
+            mission_type          = (short) rd["mission_type"],
+            status                = (short) rd["status"],
+            mission_start         = (long)  rd["mission_start"],
+            mission_end           = (long)  rd["mission_end"],
+            mission_rounds_total  = (short) rd["mission_rounds_total"],
+            round_count           = (short) rd["round_count"],
+            enrollment_min_players= (short) rd["enrollment_min_players"],   // +++
+            enrolled_players      = (int)   rd["enrolled_players"],         // +++
+            failure_reason        = rd["failure_reason"] as string,         // +++
+            enrolled_at           = rd["enrolled_at"] is DBNull
                 ? (long?)null
                 : ToUnixSeconds(((DateTime) rd["enrolled_at"]).ToUniversalTime()),
-            refunded            = (bool)  rd["refunded"],
-            refund_tx_hash      = rd["refund_tx_hash"] as string
+            refunded              = (bool)  rd["refunded"],
+            refund_tx_hash        = rd["refund_tx_hash"] as string
         });
     }
 
@@ -409,9 +432,6 @@ app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg) 
     });
 });
 
-/* ---------- HUB ---------- */
-app.MapHub<GameHub>("/hub/game");
-
 // Debug: ping a group to verify client subscription
 app.MapGet("/debug/push/{addr}", async (string addr, IHubContext<GameHub> hub) => {
     if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("addr required");
@@ -430,6 +450,26 @@ app.MapGet("/debug/env", (IHostEnvironment env) => {
         CurrentDir      = Environment.CurrentDirectory,
         User            = System.Security.Principal.WindowsIdentity.GetCurrent().Name
     });
+});
+
+/* ---------- HUB ---------- */
+app.MapHub<GameHub>("/hub/game");
+
+app.MapPost("/push/status", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto body) => {
+    // simple shared-secret guard
+    if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
+
+    var g = (body.Mission ?? "").ToLowerInvariant();
+    await hub.Clients.Group(g).SendAsync("StatusChanged", g, body.NewStatus);
+    return Results.Ok(new { pushed = true });
+});
+
+app.MapPost("/push/round", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto body) => {
+    if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
+
+    var g = (body.Mission ?? "").ToLowerInvariant();
+    await hub.Clients.Group(g).SendAsync("RoundResult", g, body.Round, body.Winner, body.AmountWei);
+    return Results.Ok(new { pushed = true });
 });
 
 app.Run();

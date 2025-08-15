@@ -4,6 +4,8 @@ using System.Globalization;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Net.Http;        
+using System.Net.Http.Json; 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -22,16 +24,19 @@ namespace B6.Indexer
 {
     public class MissionIndexer : BackgroundService
     {
-        private readonly ILogger<MissionIndexer>    _log;
-        private readonly string                     _rpc;
-        private readonly string                     _factory;
-        private readonly string                     _pg;
-        private readonly Web3                       _web3;
-        private const int                           REORG_CUSHION = 3;
-        private const int                           MAX_LOG_RANGE = 1800;
-        private readonly long                       _factoryDeployBlock;
-        private readonly List<string>               _rpcEndpoints = new();
-        private int                                 _rpcIndex = 0;
+        private readonly ILogger<MissionIndexer>        _log;
+        private readonly string                         _rpc;
+        private readonly string                         _factory;
+        private readonly string                         _pg;
+        private Web3                                    _web3;
+        private readonly long                           _factoryDeployBlock;
+        private readonly List<string>                   _rpcEndpoints = new();
+        private int                                     _rpcIndex = 0;
+        private const int                               REORG_CUSHION = 3;
+        private const int                               MAX_LOG_RANGE = 1800;
+        private readonly HttpClient                     _http = new HttpClient();
+        private readonly string                         _pushBase;   // e.g. https://b6missions.com/api
+        private readonly string                         _pushKey;
 
         public                                          MissionIndexer          (ILogger<MissionIndexer> log, IConfiguration cfg) {
             _log = log;
@@ -63,6 +68,10 @@ namespace B6.Indexer
             // start with first endpoint
             UseRpc(0);
 
+            // --- push config (optional; if empty, pushing is disabled) ---
+            _pushBase = cfg["Push:BaseUrl"] ?? "";
+            _pushKey  = cfg["Push:Key"]     ?? "";
+
         }
 
         private async Task<long>                        GetLatestBlockAsync() {
@@ -87,14 +96,15 @@ namespace B6.Indexer
             long windowFrom = start;
             while (windowFrom <= toBlock)
             {
-                long windowTo = Math.Min(windowFrom + MAX_LOG_RANGE, toBlock);
+                long windowTo       = Math.Min(windowFrom + MAX_LOG_RANGE, toBlock);
+                var pushStatuses    = new List<(string addr, short toStatus)>();
 
-                var from = new BlockParameter(new HexBigInteger(windowFrom));
-                var to   = new BlockParameter(new HexBigInteger(windowTo));
+                var from            = new BlockParameter(new HexBigInteger(windowFrom));
+                var to              = new BlockParameter(new HexBigInteger(windowTo));
 
-                var createdLogs = await createdEvt.GetAllChangesAsync(createdEvt.CreateFilterInput(from, to));
-                var statusLogs  = await statusEvt .GetAllChangesAsync(statusEvt .CreateFilterInput(from, to));
-                var finalLogs   = await finalEvt  .GetAllChangesAsync(finalEvt  .CreateFilterInput(from, to));
+                var createdLogs     = await createdEvt.GetAllChangesAsync(createdEvt.CreateFilterInput(from, to));
+                var statusLogs      = await statusEvt .GetAllChangesAsync(statusEvt .CreateFilterInput(from, to));
+                var finalLogs       = await finalEvt  .GetAllChangesAsync(finalEvt  .CreateFilterInput(from, to));
 
                 // 1) Seed unknown missions discovered via status/final (optional, same as before)
                 var seen    = new HashSet<string>(StringComparer.InvariantCulture);
@@ -224,6 +234,7 @@ namespace B6.Indexer
                     short toS   = ev.Event.ToStatus;
                     long  blk   = (long)ev.Log.BlockNumber.Value;
 
+                    int inserted;
                     await using (var h = new NpgsqlCommand(@"
                         insert into mission_status_history (mission_address, from_status, to_status, changed_at, block_number)
                         values (@a,@f,@t,@ca,@b)
@@ -234,7 +245,7 @@ namespace B6.Indexer
                         h.Parameters.AddWithValue("t",  toS);
                         h.Parameters.AddWithValue("b",  blk);
                         h.Parameters.AddWithValue("ca", tsByBlock.TryGetValue(blk, out var ca) ? ca : DateTime.UtcNow);
-                        await h.ExecuteNonQueryAsync(token);
+                        inserted = await h.ExecuteNonQueryAsync(token);
                     }
 
                     await using (var up = new NpgsqlCommand(@"
@@ -245,6 +256,7 @@ namespace B6.Indexer
                         up.Parameters.AddWithValue("s", toS);
                         await up.ExecuteNonQueryAsync(token);
                     }
+                    if (inserted > 0) pushStatuses.Add((mission, toS));
                 }
 
                 // Finalized (same write; from=to; with chain time)
@@ -254,6 +266,7 @@ namespace B6.Indexer
                     short toS   = ev.Event.FinalStatus;
                     long  blk   = (long)ev.Log.BlockNumber.Value;
 
+                    int inserted;
                     await using (var h = new NpgsqlCommand(@"
                         insert into mission_status_history (mission_address, from_status, to_status, changed_at, block_number)
                         values (@a,@f,@t,@ca,@b)
@@ -264,7 +277,7 @@ namespace B6.Indexer
                         h.Parameters.AddWithValue("t",  (short)toS);
                         h.Parameters.AddWithValue("b",  blk);
                         h.Parameters.AddWithValue("ca", tsByBlock.TryGetValue(blk, out var ca) ? ca : DateTime.UtcNow);
-                        await h.ExecuteNonQueryAsync(token);
+                        inserted = await h.ExecuteNonQueryAsync(token);
                     }
 
                     await using (var up = new NpgsqlCommand(@"
@@ -275,6 +288,7 @@ namespace B6.Indexer
                         up.Parameters.AddWithValue("s", toS);
                         await up.ExecuteNonQueryAsync(token);
                     }
+                    if (inserted > 0) pushStatuses.Add((mission, toS));
                 }
 
                 bool retried = false;
@@ -284,6 +298,12 @@ namespace B6.Indexer
                 {
                     // ... create from/to, fetch logs, compute tsByBlock, write DB ...
                     await tx.CommitAsync(token);
+
+                    foreach (var (a, s) in pushStatuses)
+                    {
+                        try { await NotifyStatusAsync(a, s, token); } catch { /* best-effort */ }
+                    }
+                    pushStatuses.Clear();
 
                     // advance cursor per window and continue
                     await SetCursorAsync("factory", windowTo, token);
@@ -334,6 +354,11 @@ namespace B6.Indexer
 
                     bool retried = false;
 
+                    // collectors to push AFTER commit
+                    var pushRounds   = new List<(short round, string winner, string amountWei)>();
+                    var pushStatuses = new List<short>(); // mission-level status changes for this address
+
+                    retry_window:
                     try
                     {
                         var from = new BlockParameter(new HexBigInteger(windowFrom));
@@ -372,6 +397,7 @@ namespace B6.Indexer
                             short next = ev.Event.NewStatus;
                             long  blk  = (long)ev.Log.BlockNumber.Value;
 
+                            int inserted;
                             await using var h = new NpgsqlCommand(@"
                                 insert into mission_status_history (mission_address, from_status, to_status, changed_at, block_number)
                                 values (@a,@f,@t,@ca,@b)
@@ -381,7 +407,7 @@ namespace B6.Indexer
                             h.Parameters.AddWithValue("t", next);
                             h.Parameters.AddWithValue("b", blk);
                             h.Parameters.AddWithValue("ca", tsByBlock.TryGetValue(blk, out var ca) ? ca : DateTime.UtcNow);
-                            await h.ExecuteNonQueryAsync(token);
+                            inserted = await h.ExecuteNonQueryAsync(token);
 
                             await using var up = new NpgsqlCommand(@"
                                 update missions set status = @s, updated_at = now()
@@ -389,6 +415,7 @@ namespace B6.Indexer
                             up.Parameters.AddWithValue("a", addr);
                             up.Parameters.AddWithValue("s", next);
                             await up.ExecuteNonQueryAsync(token);
+                            if (inserted > 0) pushStatuses.Add(next);
                         }
 
                         // rounds
@@ -413,9 +440,15 @@ namespace B6.Indexer
                             rr.Parameters.AddWithValue("b",  blk);
                             rr.Parameters.AddWithValue("tx", string.IsNullOrEmpty(txh) ? (object)DBNull.Value : txh);
                             rr.Parameters.AddWithValue("ca", tsByBlock.TryGetValue(blk, out var cra) ? cra : DateTime.UtcNow);
-                            await rr.ExecuteNonQueryAsync(token);
+                            var rows = await rr.ExecuteNonQueryAsync(token);
 
                             if (r > maxRound) maxRound = r;
+
+                            // only push if this was a *new* DB row (avoid dup pushes on re-scan)
+                            if (rows > 0)
+                            {
+                                pushRounds.Add((r, w, amt.ToString()));
+                            }
 
                             // keep cro_current_wei in sync using croRemaining
                             await using var upC = new NpgsqlCommand(@"
@@ -520,6 +553,17 @@ namespace B6.Indexer
                         }
 
                         await tx.CommitAsync(token);
+
+                        // publish after DB commit
+                        try
+                        {
+                            foreach (var s in pushStatuses)
+                                await NotifyStatusAsync(addr, s, token);
+
+                            foreach (var (r, w, a) in pushRounds)
+                                await NotifyRoundAsync(addr, r, w, a, token);
+                        }
+                        catch { /* best-effort */ }
                     }
                     catch (Exception ex) when (IsTransient(ex) && !retried && SwitchRpc())
                     {
@@ -838,6 +882,28 @@ namespace B6.Indexer
             cmd.Parameters.AddWithValue("k", key);
             cmd.Parameters.AddWithValue("b", block);
             await cmd.ExecuteNonQueryAsync(token);
+        }
+
+        private async Task NotifyStatusAsync(string mission, short newStatus, CancellationToken ct = default) {
+            if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/status")
+            {
+                Content = JsonContent.Create(new { Mission = mission, NewStatus = newStatus })
+            };
+            req.Headers.Add("X-Push-Key", _pushKey);
+            try { await _http.SendAsync(req, ct); }
+            catch (Exception ex) { _log.LogDebug(ex, "push/status failed for {mission}", mission); }
+        }
+
+        private async Task NotifyRoundAsync(string mission, short round, string winner, string amountWei, CancellationToken ct = default) {
+            if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/round")
+            {
+                Content = JsonContent.Create(new { Mission = mission, Round = round, Winner = winner, AmountWei = amountWei })
+            };
+            req.Headers.Add("X-Push-Key", _pushKey);
+            try { await _http.SendAsync(req, ct); }
+            catch (Exception ex) { _log.LogDebug(ex, "push/round failed for {mission} r{round}", mission, round); }
         }
 
     }
