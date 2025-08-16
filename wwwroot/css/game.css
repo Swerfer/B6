@@ -1,4 +1,109 @@
  /* --------------------------------------------------
    Game tweaks – complements global core.css
 -------------------------------------------------- */
- 
+/* ==== Gameplay stage (yellow-zone aware) ==== */
+
+html.scroll-lock,
+body.scroll-lock{
+  height: 100%;
+  overflow: hidden;               /* no scrollbars */
+  overscroll-behavior: none;      /* stop Android edge-bounce */
+}
+
+body.scroll-lock{
+  position: fixed;                /* iOS Safari: really freeze */
+  width: 100%;
+  left: 0; right: 0;
+  top: var(--lock-top, 0);        /* we’ll set this from JS */
+}
+
+#gameMain.stage-mode { padding-left: 0; padding-right: 0; }
+
+/* Lock everything inside gameMain during gameplay (no vertical panning) */
+#gameMain.stage-mode,
+#gameMain.stage-mode .section-box,
+#gameMain.stage-mode #gameStage,
+#gameMain.stage-mode .stage-viewport{
+  overflow: hidden !important;   /* beats .core-main .section-box { overflow:auto } */
+  overscroll-behavior: none;     /* Android edge-bounce */
+  touch-action: none;            /* prevent touch panning on the stage */
+}
+
+.stage-box{
+  /* override section-box chrome for max usable area */
+  padding:0; 
+  border:none; 
+  background:transparent; 
+  box-shadow:none;
+  display:flex; 
+  flex-direction:column; 
+  min-height:100%; 
+  height:100%;
+}
+
+.stage-viewport{
+  position:relative; 
+  width:100%; 
+  height:100%;
+  display:flex; 
+  align-items:center; 
+  justify-content:center;
+  overflow:hidden;  /* letterboxing when needed */
+}
+
+#stageImg{
+  display:block; 
+  max-width:none; 
+  max-height:none; /* sized via JS */
+  image-rendering:auto;
+}
+
+/* === Ring overlay + test controls (for gameStage) === */
+.stage-overlay{
+  /* size/position is driven from JS to match the scaled image exactly */
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: auto;      /* JS sets px equal to #stageImg */
+  height: auto;     /* JS sets px equal to #stageImg */
+  pointer-events: none;
+}
+
+/* Force the gradient stroke on the test ring (in case any generic stroke rules exist) */
+.stage-overlay #ringCover {
+  stroke: url(#metalGrad) !important;
+}
+
+/* Title displayed at the top of the game stage */
+.stage-title{
+  position:absolute;
+  top: 0.5rem;                 /* sits just under the header edge */
+  left:50%;
+  transform:translateX(-50%);
+  z-index:5;
+  max-width: 92vw;             /* avoid overflow on small screens */
+  padding: .35rem .75rem;
+  color: var(--white);
+  font: 700 2rem/1.2 "Arial Black", Impact, sans-serif;
+  letter-spacing:.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;         /* never blocks taps */
+}
+
+.stage-status-img{
+  position:absolute;
+  top: calc(0.5rem + 4rem);     /* just under the 2rem title */
+  left:50%;
+  transform:translateX(-50%);
+  z-index:5;
+  height: 3rem;                 /* keep aspect ratio; tweak if you want bigger */
+  width: auto;
+  max-width: 92vw;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,.5));
+  pointer-events:none;
+}
+
+

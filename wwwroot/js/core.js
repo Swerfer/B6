@@ -236,9 +236,11 @@ export function setBtnLoading(btn, state = true, label = "", restore = true) {
     btn.style.width = `${btn.dataset.loadingWidth}px`;
 
     btn.classList.add("btn-loading");
-    const labelSpan =
-      restore ? `<span class="label-loading">${label}</span>`
-              : `<span id="connectBtnText" class="label-loading">${label}</span>`;
+    const isConnect = btn.id === "connectWalletBtn";
+    const labelSpan = (restore || !isConnect)
+      ? `<span class="label-loading">${label}</span>`
+      : `<span id="connectBtnText" class="label-loading">${label}</span>`;
+
     btn.innerHTML = `
       <span class="spinner fade-spinner"></span>
       ${labelSpan}`;
@@ -256,7 +258,10 @@ export function setBtnLoading(btn, state = true, label = "", restore = true) {
     if (restore) {
       btn.innerHTML = btn.dataset.loading;
     } else {
-      btn.innerHTML = `<span id="connectBtnText" class="label-loading">${label}</span>`;
+      const isConnect = btn.id === "connectWalletBtn";
+      btn.innerHTML = isConnect
+        ? `<span id="connectBtnText" class="label-loading">${label}</span>`
+        : `<span class="label-loading">${label}</span>`;
     }
   };
   const cleanup = () => {

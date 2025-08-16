@@ -27,6 +27,7 @@ import {
 
 /* ---------- DOM ---------- */
 const adminSections     = document.querySelectorAll (".section-box");
+const missionsSection   = document.getElementById   ("missionsSection");
 const connectBtn        = document.getElementById   ("connectWalletBtn");
 const unauth            = document.getElementById   ("unauthNotice");
 const form              = document.getElementById   ("createMissionForm");
@@ -138,6 +139,17 @@ function flashCard(el, delay = 0) {
   }, delay);
 }
 
+function colorForStatusLabel(lbl){
+  const t = String(lbl || "").toLowerCase();
+  if (t.includes("success"))                  return "var(--success)"; // Success / Partly Success
+  if (t === "failed" || t.includes("fail"))   return "var(--error)";
+  if (t === "active" || t === "paused" || t.includes("pause"))
+                                               return "var(--warning)";
+  if (t === "pending" || t === "enrolling" || t === "arming")
+                                               return "var(--info)";
+  return "";
+}
+
 async function openMissionModal(item, btnRef = null, factoryStatus = null){
   try{
     const p  = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
@@ -165,7 +177,9 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       refundedPlayers
     ] = await mc.getMissionData();
 
-    const status = await mc.getRealtimeStatus();
+    const status        = await mc.getRealtimeStatus();
+    const realtimeLabel = statusText(status);
+    const rtColor       = colorForStatusLabel(realtimeLabel);
 
     if (btnRef && btnRef.dataset.loading){
       await new Promise(res => {
@@ -177,7 +191,7 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
     /* build rows */
     const rowTemplates = [
       `<tr><th>Factory Status</th>     <td>${statusText(factoryStatus)}</td></tr>`,
-      `<tr><th>Realtime Status</th>    <td>${statusText(status)}</td></tr>`,
+      `<tr><th>Realtime Status</th>    <td style="${rtColor ? `color:${rtColor};font-weight:600` : ""}">${realtimeLabel}</td></tr>`,
       `<tr><th>Players</th>            <td${players.length < enrollmentMinPlayers ? ' class="text-warning fw-bold"' : ''}>${players.length}</td></tr>`,
       `<tr><th>Mission Type</th>       <td>${missionTypeName[missionType]}</td></tr>`,
       `<tr><th>Enrollment Start</th>   <td>${formatLocalDateTime(enrollmentStart)}</td></tr>`,
@@ -875,7 +889,8 @@ function initializeAdminUI() {
 
 (document.readyState === "loading"
   ? document.addEventListener("DOMContentLoaded", initializeAdminUI, { once: true })
-  : initializeAdminUI());
+  : initializeAdminUI()
+);
 
 //* ---------- load missions list ---------- */
 async function loadMissions(filter = "all") {
@@ -991,10 +1006,13 @@ async function buildMissionGrid(addrs, stats, names){
     const li = document.createElement("li");
     li.className = "mission-item" + (m.status === 3 ? " partly-success" : "");
     li.innerHTML = `
-      <span>${m.name}</span>
-      <span>${statusText(m.status)}</span>
+      <span class="m-name">${m.name}</span>
+      <span class="m-status" data-addr="${m.addr}" data-factory="${m.status}">
+        ${statusText(m.status)}
+      </span>
       <span class="mission-spinner fade-spinner hidden"></span>
     `;
+
     li.addEventListener("click", () => {
       const sp = li.querySelector(".mission-spinner");
       fadeSpinner(sp, true);
@@ -1003,6 +1021,41 @@ async function buildMissionGrid(addrs, stats, names){
     missionsList.appendChild(li);
   });
   missionsSection.classList.remove("hidden");
+  await markStatusMismatches(items, 4);
+}
+
+async function markStatusMismatches(items, concurrency = 4){
+  if (!Array.isArray(items) || items.length === 0) return;
+
+  const p = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+
+  // simple shared cursor + worker pool
+  let cursor = 0;
+  const next = () => (cursor < items.length ? items[cursor++] : null);
+
+  async function worker(){
+    for(;;){
+      const m = next();
+      if (!m) break;
+      try{
+        const mc = new ethers.Contract(m.addr, MISSION_ABI, p);
+        const rt = Number(await mc.getRealtimeStatus());
+        if (rt !== m.status){
+          const el = document.querySelector(`.m-status[data-addr="${m.addr}"]`);
+          if (el){
+            el.classList.add("text-danger", "fw-bold");
+            el.title = `Realtime: ${statusText(rt)}`;
+            el.innerHTML = `${statusText(m.status)} <i class="fa-solid fa-triangle-exclamation ms-1"></i>`;
+          }
+        }
+      }catch{
+        /* ignore per-item fetch errors; list should still render */
+      }
+    }
+  }
+
+  const n = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: n }, () => worker()));
 }
 
 function setTitle(label) {
@@ -1085,14 +1138,12 @@ document.querySelectorAll(".icon-nav").forEach(btn => {
   });
 });
 
-document.addEventListener("DOMContentLoaded", () => {
-  document.querySelectorAll('[data-filter]').forEach(item => {
-    item.addEventListener('click', e => {
-      e.preventDefault();
-      const filter = item.getAttribute('data-filter');
-      loadMissions(filter); // use unified function
-    });
-  });
+document.querySelector('#missionsSection .dropdown-menu')
+  ?.addEventListener('click', (e) => {
+    const link = e.target.closest('[data-filter]');
+    if (!link) return;
+    e.preventDefault();
+    loadMissions(link.dataset.filter);
 });
 
 document.getElementById("reloadRead")?.addEventListener("click", async ()=>{

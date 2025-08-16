@@ -11,14 +11,12 @@ import {
 import { 
   showAlert, 
   showConfirm, 
-  shorten, 
   copyableAddr, 
   formatLocalDateTime, 
   formatCountdown,
   statusText,
   formatDurationShort,
   statusColorClass,
-  extLinkIcon,
   txLinkIcon,
   addrLinkIcon,
   missionTypeName,
@@ -32,11 +30,19 @@ import {
 const connectBtn          = document.getElementById("connectWalletBtn");
 const sectionBoxes        = document.querySelectorAll(".section-box");
 
-let lastListShownId       = "joinableSection";
-let hubConnection         = null;
-let hubStartPromise       = null;   // prevent concurrent starts
-let currentMissionAddr    = null;
-let subscribedAddr        = null;
+let   lastListShownId       = "joinableSection";
+let   hubConnection         = null;
+let   hubStartPromise       = null;   // prevent concurrent starts
+let   currentMissionAddr    = null;
+let   subscribedAddr        = null;
+let   detailRefreshTimer    = null;
+let   detailBackoffMs       = 15000;
+let   detailFailures        = 0;
+let   staleWarningShown     = false;
+let   ringTimer             = null;
+let   stageTicker           = null;
+const GAP_DEG               = 10;      // hinge gap in degrees
+let   START_OFFSET          = 126;  // fine start offset along the path (px)
 
 connectBtn.addEventListener("click", () => {
   if (walletAddress){
@@ -52,9 +58,168 @@ function showOnlySection(sectionId) {
   sectionBoxes.forEach(sec => {
     sec.style.display = (sec.id === sectionId) ? "" : "none";
   });
+  document.getElementById('gameMain').classList.toggle('stage-mode', sectionId === 'gameStage');
   if (sectionId === "joinableSection" || sectionId === "myMissionsSection") {
     lastListShownId = sectionId;
   }
+}
+
+async function cleanupMissionDetail(){
+  stopCountdown();
+  stopStageTimer();
+  unbindRing();                   // NEW: stop ring timer & leave last drawn state
+  clearDetailRefresh();
+  staleWarningShown = false;
+  // Optional: unsubscribe from hub for the last mission to cut noise
+  if (hubConnection && subscribedAddr){
+    try { await hubConnection.invoke("UnsubscribeMission", subscribedAddr); } catch {}
+    subscribedAddr = null;
+  }
+  currentMissionAddr = null;
+}
+
+function statusSlug(s){
+  switch (Number(s)) {
+    case 0:   return "pending";
+    case 1:   return "enrolling";
+    case 2:   return "arming";
+    case 3:   return "active";
+    case 4:   return "paused";
+    default:  return "ended";     // 5/6/7 are ended variants
+  }
+}
+
+/* Load + size the status word image and center it under the title */
+function setStageStatusImage(slug){
+  if (!stageStatusImgSvg || !slug) return;
+  stageStatusImgSvg.setAttribute("href", `assets/images/statuses/${slug}.png`);
+}
+
+// ---- center timer (short form) ----
+function stopStageTimer(){ if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } }
+
+function formatStageShort(leftSec){
+  const s = Math.max(0, Math.floor(leftSec));
+  if (s > 36*3600) return Math.floor(s/86400) + "d";   // > 36h → days
+  if (s > 90*60)   return Math.floor(s/3600)  + "h";   // > 90m → hours
+  if (s > 99)      return Math.floor(s/60)    + "m";   // > 99s  → minutes
+  return s + "s";                                      // ≤ 99s → seconds
+}
+
+function startStageTimer(toEpochSec){
+  stopStageTimer();
+  const node = document.getElementById("vaultTimerText"); // SVG text
+  if (!node || !toEpochSec) { if (node) node.textContent = ""; return; }
+
+  const paint = () => {
+    const now  = Math.floor(Date.now()/1000);
+    const left = Math.max(0, toEpochSec - now);
+    node.textContent = formatStageShort(left);  // e.g., 3d / 6h / 34m / 43s
+    if (left <= 0) stopStageTimer();
+  };
+  paint();
+  stageTicker = setInterval(paint, 1000);
+}
+
+// Choose the deadline shown in the vault center per status
+function nextDeadlineFor(m){
+  if (!m) return 0;
+  const st = Number(m.status);
+  if (st === 0) return Number(m.enrollment_start || m.mission_start || 0); // Pending
+  if (st === 1) return Number(m.enrollment_end   || 0);                    // Enrolling
+  if (st === 2) return Number(m.mission_start    || 0);                    // Arming
+  if (st === 3 || st === 4) return Number(m.mission_end || 0);             // Active / Paused
+  return 0; // Ended variants – no countdown in center
+}
+
+function bindCenterTimerToMission(mission){
+  const toTs = nextDeadlineFor(mission);
+  startStageTimer(toTs);
+}
+
+/* ---------- Ring overlay: bind to time window ---------- */
+
+function unbindRing(){
+  if (ringTimer){ clearInterval(ringTimer); ringTimer = null; }
+}
+
+function setRingProgress(pct){
+  // pct: 0..100 revealed (0 = all covered, 100 = fully blue)
+  const cover = document.getElementById("ringCover");
+  if (!cover) return;
+
+  const r   = Number(cover.getAttribute("r")) || 0;
+  const C   = 2 * Math.PI * r;
+  const gap = typeof GAP_DEG === "number" ? GAP_DEG : 0;
+  const gapLen = C * (gap / 360);
+  const drawable = Math.max(0, C - gapLen);
+  const startOffset = typeof START_OFFSET === "number" ? START_OFFSET : 0;
+
+
+  const clamped = Math.max(0, Math.min(100, pct));
+  const coverFrac = 1 - (clamped / 100);          // 1 = fully covered → 0 = fully revealed
+  const coverLen  = coverFrac * drawable;
+
+  cover.setAttribute("stroke-dasharray", `${coverLen} ${C - coverLen}`);
+  cover.setAttribute("stroke-dashoffset", String(startOffset + coverLen)); // clockwise
+}
+
+function bindRingToWindow(startSec, endSec){
+  unbindRing();
+  const cover = document.getElementById("ringCover");
+  if (!cover) return;
+  if (!startSec || !endSec || endSec <= startSec) return;
+
+  const tick = () => {
+    const now = Math.floor(Date.now()/1000);
+    let pct; // revealed percent 0..100
+    if (now <= startSec) pct = 0;                         // not started → all covered
+    else if (now >= endSec) pct = 100;                    // finished → fully revealed
+    else pct = ((now - startSec) / (endSec - startSec)) * 100;
+    setRingProgress(pct);
+  };
+
+  tick();                             // draw immediately
+  ringTimer = setInterval(tick, 1000);
+}
+
+/* Map mission.status to the correct time window */
+function bindRingToMission(m){
+  const st = Number(m?.status ?? -1);
+  // Decide which window to visualize
+  let S = 0, E = 0;
+  if (st === 1) {                         // Enrolling
+    S = Number(m.enrollment_start || 0);
+    E = Number(m.enrollment_end   || 0);
+  } else if (st === 2) {                  // Arming
+    S = Number(m.enrollment_end   || 0);
+    E = Number(m.mission_start    || 0);
+  } else if (st === 3 || st === 4) {      // Active / Paused
+    S = Number(m.mission_start    || 0);
+    E = Number(m.mission_end      || 0);
+  } else {
+    // Pending / ended: don’t animate; keep ring covered or fully revealed
+    setRingProgress(st >= 6 ? 100 : 0);
+    return;
+  }
+  if (S && E && E > S) bindRingToWindow(S, E);
+}
+
+/* ----- page scroll lock (for gameplay stage) ----- */
+function lockScroll(){
+  const y = window.scrollY || document.documentElement.scrollTop || 0;
+  document.documentElement.classList.add("scroll-lock");
+  document.body.classList.add("scroll-lock");
+  document.body.style.setProperty("--lock-top", `-${y}px`);
+}
+
+function unlockScroll(){
+  const top = parseInt(getComputedStyle(document.body).getPropertyValue("--lock-top")) || 0;
+  document.documentElement.classList.remove("scroll-lock");
+  document.body.classList.remove("scroll-lock");
+  document.body.style.removeProperty("--lock-top");
+  // restore previous scroll position
+  window.scrollTo(0, -top);
 }
 
 /* ---------- SignalR: connect to /hub/game ---------- */
@@ -142,6 +307,34 @@ async function safeSubscribe(){
   }
 }
 
+function clearDetailRefresh(){          
+  if (detailRefreshTimer) { clearTimeout(detailRefreshTimer); detailRefreshTimer = null; }
+}
+
+function scheduleDetailRefresh(reset=false){ 
+  if (els.missionDetail.style.display === "none" || !currentMissionAddr) return;
+
+  if (reset) { detailBackoffMs = 15000; detailFailures = 0; }
+  clearDetailRefresh();
+  detailRefreshTimer = setTimeout(async () => {
+    if (els.missionDetail.style.display === "none" || !currentMissionAddr) return;
+    try {
+      const data = await apiMission(currentMissionAddr);
+      renderMissionDetail(data);
+      detailFailures = 0;
+      detailBackoffMs = 15000; // reset on success
+    } catch (e) {
+      detailFailures++;
+      detailBackoffMs = Math.min(detailBackoffMs * 2, 60000); // cap @ 1 min
+      if (detailFailures === 1) {
+        showAlert("Auto-refresh failed; will retry with backoff. Check your connection.", "warning");
+      }
+    } finally {
+      scheduleDetailRefresh(); // chain next attempt
+    }
+  }, detailBackoffMs);
+}
+
 /* ---------- API wrappers (ALL under /api) ---------- */
 async function apiJoinable(){
   const r = await fetch("/api/missions/joinable", { cache: "no-store" });
@@ -176,17 +369,75 @@ const els = {
   enrollmentsList:     document.getElementById("enrollmentsList"),
   enrollmentsEmpty:    document.getElementById("enrollmentsEmpty"),
   closeMissionBtn:     document.getElementById("closeMissionBtn"),
+  reloadMissionBtn:    document.getElementById("reloadMissionBtn"),
 };
 
-const btnJoinable   = document.getElementById("btnJoinable");
-const btnMyMissions = document.getElementById("btnMyMissions");
+const btnJoinable         = document.getElementById("btnJoinable");
+const btnMyMissions       = document.getElementById("btnMyMissions");
 
+const stage               = document.getElementById("gameStage");
+const stageViewport       = document.getElementById("stageViewport");
+const stageImg            = document.getElementById("stageImg");
+
+const ringOverlay         = document.getElementById("ringOverlay");
+const ringCover           = document.getElementById("ringCover");
+
+const vaultTimerText      = document.getElementById("vaultTimerText");     // SVG <text> @ (499,417)
+const stageTitleText      = document.getElementById("stageTitleText");     // NEW: SVG <text> for title
+const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg");  // NEW: SVG <image> for status
+
+
+const IMG_W = 2048, IMG_H = 2048;
+const YELLOW = { x:566, y:420, w:914, h:1238 }; // YELLOW was the rectangle from the phone header to footer space on the vault bg image 
+
+function layoutStage(){
+  if (!stage || !stageViewport || !stageImg) return;
+  const availW = stageViewport.clientWidth;
+  const availH = stageViewport.clientHeight;
+
+  const scale = Math.min(availH / YELLOW.h, availW / YELLOW.w);
+
+  const w = Math.round(IMG_W * scale);
+  const h = Math.round(IMG_H * scale);
+  stageImg.style.width  = w + "px";
+  stageImg.style.height = h + "px";
+
+  if (ringOverlay){
+    ringOverlay.style.width  = w + "px";
+    ringOverlay.style.height = h + "px";
+  }
+
+}
+
+function showGameStage(mission){
+  document.getElementById('gameMain').classList.add('stage-mode');
+  showOnlySection("gameStage");
+
+  // Set title text (SVG)
+  if (stageTitleText){
+    const title = mission?.name || mission?.mission_address || "";
+    stageTitleText.textContent = title;
+  }
+
+  // Load status image (SVG) and size it
+  setStageStatusImage(statusSlug(mission?.status));
+
+  // Scale image + overlay, then place everything from the vault center
+  layoutStage();
+
+  // Center timer bound to this mission's next deadline
+  bindCenterTimerToMission(mission);
+}
+
+window.addEventListener("resize", layoutStage);
 // click handlers
-btnJoinable?.addEventListener("click", () => {
+btnJoinable?.addEventListener("click", async () => {
+  await cleanupMissionDetail();
   showOnlySection("joinableSection");
 });
 
 btnMyMissions?.addEventListener("click", async () => {
+  await cleanupMissionDetail();
   showOnlySection("myMissionsSection");
   if (walletAddress) {
     try {
@@ -426,9 +677,6 @@ function renderMissionDetail({ mission, enrollments, rounds }){
   const hasSpots = mission.enrollment_max_players > (enrollments?.length || 0);
   const canEnroll = isEnrolling && !alreadyEnrolled && hasSpots && walletAddress;
 
-  const isActive   = mission.status === 3; // Status enum: 0 Pending, 1 Enrolling, 2 Arming, 3 Active, ...
-  const roundsLeft = mission.round_count < mission.mission_rounds_total;
-
   const actions = document.getElementById("missionActions");
   actions.innerHTML = "";
 
@@ -440,17 +688,12 @@ function renderMissionDetail({ mission, enrollments, rounds }){
     btn.textContent = "Enter Mission";
     actions.appendChild(btn);
     // placeholder: wire up later to the in-mission HUD
-    btn.addEventListener("click", () => {
-      showAlert("Mission gameplay view coming next.", "info");
+    btn.addEventListener("click", async () => {
+      await cleanupMissionDetail();   // stop timers, unsub, etc.
+      lockScroll();
+      showGameStage(mission);                // hide lists/detail, show stage
+      bindRingToMission(mission);     // NEW: drive ring from the current phase window
     });
-  }
-
-  if (canEnroll) {
-    const btn = document.createElement("button");
-    btn.className = "btn btn-cyan";
-    btn.id = "btnEnroll";
-    btn.textContent = `Enroll (${weiToCro(mission.enrollment_amount_wei)} CRO)`;
-    actions.appendChild(btn);
   }
 
   els.missionDetail.classList.add("overlay");
@@ -469,84 +712,93 @@ function renderMissionDetail({ mission, enrollments, rounds }){
   const maxP = Number(mission.enrollment_max_players ?? 0);
   const joinedCls   = (joinedPlayers >= minP) ? "text-success" : "text-error";
 
-els.missionCore.innerHTML = `
-  <div class="row g-3">
-    <!-- Legend chips under the title (keep yours) -->
-    <div class="col-12">
-      <div class="d-flex flex-wrap align-items-center gap-2">
-        <span class="status-pill status-${mission.status}">
-          ${statusText(mission.status)}
-        </span>
-        <span class="status-pill">
-          Type: ${missionTypeName[mission.mission_type] ?? mission.mission_type}
-        </span>
-        <span class="status-pill">
-          Rounds: ${mission.round_count}/${mission.mission_rounds_total}
-        </span>
-        <span class="status-pill">
-          Players: Minimum ${minP} | Joined <span class="${joinedCls}">${joinedPlayers}</span> | Maximum ${maxP || "—"}
-        </span>
+  els.missionCore.innerHTML = `
+    <div class="row g-3">
+      <!-- Legend chips under the title (keep yours) -->
+      <div class="col-12">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <span class="status-pill status-${mission.status}">
+            ${statusText(mission.status)}
+          </span>
+          <span class="status-pill">
+            Type: ${missionTypeName[mission.mission_type] ?? mission.mission_type}
+          </span>
+          <span class="status-pill">
+            Rounds: ${mission.round_count}/${mission.mission_rounds_total}
+          </span>
+          <span class="status-pill">
+            Players: Minimum ${minP} | Joined <span class="${joinedCls}">${joinedPlayers}</span> | Maximum ${maxP || "—"}
+          </span>
+        </div>
       </div>
-    </div>
 
-    <!-- 👇 Two-by-two aligned key/value pairs -->
-    <div class="col-12">
-      <div class="kv-grid">
+      <!-- 👇 Two-by-two aligned key/value pairs -->
+      <div class="col-12">
+        <div class="kv-grid">
 
-        <div class="label">Mission address</div>
-        <div class="value">
-          ${copyableAddr(mission.mission_address)} ${addrLinkIcon(mission.mission_address)}
-        </div>
+          <div class="label">Mission address</div>
+          <div class="value">
+            ${copyableAddr(mission.mission_address)} ${addrLinkIcon(mission.mission_address)}
+          </div>
 
-        <div class="label">Mission type</div>
-        <div class="value">${missionTypeName[mission.mission_type] ?? mission.mission_type}</div>
+          <div class="label">Mission type</div>
+          <div class="value">${missionTypeName[mission.mission_type] ?? mission.mission_type}</div>
 
-        <div class="label">Mission status</div>
-        <div class="value"><span class="${statusCls}">${statusText(mission.status)}</span></div>
+          <div class="label">Mission status</div>
+          <div class="value"><span class="${statusCls}">${statusText(mission.status)}</span></div>
 
-        <div class="label">Rounds played</div>
-        <div class="value">${mission.round_count}/${mission.mission_rounds_total}</div>
+          <div class="label">Rounds played</div>
+          <div class="value">${mission.round_count}/${mission.mission_rounds_total}</div>
 
-        <div class="label">Mission Fee</div>
-        <div class="value">${weiToCro(mission.enrollment_amount_wei)} CRO</div>
+          <div class="label">Mission Fee</div>
+          <div class="value">${weiToCro(mission.enrollment_amount_wei)} CRO</div>
 
-        <div class="label">Prize pool</div>
-        <div class="value">${weiToCro(mission.cro_start_wei)} CRO</div>
+          <div class="label">Prize pool</div>
+          <div class="value">${weiToCro(mission.cro_start_wei)} CRO</div>
 
-        <div class="label">Enrollment Start</div>
-        <div class="value">
-          ${showEnrollStartCountdown
-            ? `<span id="enrollStartCountdown">${formatCountdown(mission.enrollment_start)}</span>`
-            : `${formatLocalDateTime(mission.enrollment_start)}`}
-        </div>
+          <div class="label">Enrollment Start</div>
+          <div class="value">
+            ${showEnrollStartCountdown
+              ? `<span id="enrollStartCountdown">${formatCountdown(mission.enrollment_start)}</span>`
+              : `${formatLocalDateTime(mission.enrollment_start)}`}
+          </div>
 
-        <div class="label">Enrollment End</div>
-        <div class="value">
-          ${showEnrollEndCountdown
-            ? `<span id="enrollEndCountdown">${formatCountdown(mission.enrollment_end)}</span>`
-            : `${formatLocalDateTime(mission.enrollment_end)}`}
-        </div>
+          <div class="label">Enrollment End</div>
+          <div class="value">
+            ${showEnrollEndCountdown
+              ? `<span id="enrollEndCountdown">${formatCountdown(mission.enrollment_end)}</span>`
+              : `${formatLocalDateTime(mission.enrollment_end)}`}
+          </div>
 
-        <div class="label">Mission Start</div>
-        <div class="value">
-          ${showMissionStartCountdown
-            ? `<span id="missionStartCountdown">${formatCountdown(mission.mission_start)}</span>`
-            : `${formatLocalDateTime(mission.mission_start)}`}
-        </div>
+          <div class="label">Mission Start</div>
+          <div class="value">
+            ${showMissionStartCountdown
+              ? `<span id="missionStartCountdown">${formatCountdown(mission.mission_start)}</span>`
+              : `${formatLocalDateTime(mission.mission_start)}`}
+          </div>
 
-        <div class="label">Mission End</div>
-        <div class="value">
-          ${showMissionEndCountdown
-            ? `<span id="missionEndCountdown">${formatCountdown(mission.mission_end)}</span>`
-            : `${formatLocalDateTime(mission.mission_end)}`}
-        </div>
+          <div class="label">Mission End</div>
+          <div class="value">
+            ${showMissionEndCountdown
+              ? `<span id="missionEndCountdown">${formatCountdown(mission.mission_end)}</span>`
+              : `${formatLocalDateTime(mission.mission_end)}`}
+          </div>
 
         <div class="label">Updated</div>
         <div class="value">
-          ${formatLocalDateTime(mission.updated_at)}
+          <span id="updatedAtStamp"
+                data-updated="${mission.updated_at}">
+            ${formatLocalDateTime(mission.updated_at)}
+          </span>
+          <i id="updatedAtIcon"
+            class="fa-solid fa-circle-exclamation ms-1 text-error"
+            style="display:none"
+            title="Data may be stale"></i>
         </div>
 
-        <div class="col-md-3">
+        </div>
+
+        <div class="mt-3">
           <h4>Players</h4>
           <div class="fw-bold">
             Minimum ${minP} | Joined <span class="${joinedCls}">${joinedPlayers}</span> | Maximum ${maxP || "—"}
@@ -555,10 +807,9 @@ els.missionCore.innerHTML = `
 
       </div>
     </div>
-  </div>
-`;
+  `;
 
-  // countdowns (only update spans that exist)
+  // countdowns + updated-at staleness (tick every second)
   stopCountdown();
   countdownTimer = setInterval(() => {
     const ids = [
@@ -570,6 +821,30 @@ els.missionCore.innerHTML = `
     for (const [id, ts] of ids) {
       const el = document.getElementById(id);
       if (el) el.textContent = formatCountdown(ts);
+    }
+
+    // UPDATED AGE → mark red + exclamation when > 60s
+    const stamp = document.getElementById("updatedAtStamp");
+    const icon  = document.getElementById("updatedAtIcon");
+    if (stamp) {
+      const t = Number(stamp.dataset.updated || 0);
+      const age = Math.floor(Date.now()/1000) - t;
+      const stale = age > 60;
+      stamp.classList.toggle("text-error", stale);
+      if (icon) icon.style.display = stale ? "inline-block" : "none";
+
+      // One-time popup when it first turns stale
+      if (stale && !staleWarningShown) {
+        showAlert("Mission data hasn’t updated for over 1 minute. Try reloading or check your connection.", "warning");
+        staleWarningShown = true;
+      }
+      if (!stale){
+        staleWarningShown = false;
+        const alertModal   = document.getElementById("alertModal");
+        const modalOverlay = document.getElementById("modalOverlay");
+        alertModal.classList.add("hidden");
+        modalOverlay.classList.remove("active");
+      }
     }
   }, 1000);
 
@@ -621,7 +896,6 @@ els.missionCore.innerHTML = `
     els.enrollmentsList.appendChild(li);
   }
 
-  document.getElementById("btnEnroll")?.addEventListener("click", () => enrollCurrentMission(mission));
   document.getElementById("btnTrigger")?.addEventListener("click", () => triggerRoundCurrentMission(mission));
 
 }
@@ -633,6 +907,7 @@ async function openMission(addr){
     await subscribeToMission(currentMissionAddr);
     const data = await apiMission(currentMissionAddr);
     renderMissionDetail(data);
+    scheduleDetailRefresh(true);
     window.scrollTo({ top: els.missionDetail.offsetTop - 20, behavior: "smooth" });
   } catch (e) {
     showAlert("Failed to load mission details.", "error");
@@ -640,42 +915,16 @@ async function openMission(addr){
   }
 }
 
-function closeMission(){
+async function closeMission(){
   els.missionDetail.classList.remove("overlay");
   els.missionDetail.style.display = "none";
+  unlockScroll();
+  await cleanupMissionDetail();
   stopCountdown();
+  clearDetailRefresh();
   currentMissionAddr = null;
   // restore the previous list (joinable by default until we add footer nav)
   showOnlySection(lastListShownId);
-}
-
-async function enrollCurrentMission(mission){
-  try {
-    const signer = getSigner();
-    if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
-
-    const c = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
-    const value = ethers.BigNumber.from(mission.enrollment_amount_wei);
-    setBtnLoading(document.getElementById("btnEnroll"), true, "Enrolling…", true);
-
-    // send tx
-    const tx = await c.enrollPlayer({ value });
-    await tx.wait(); // 1 confirmation is fine here
-
-    showAlert("Enrollment confirmed!", "success");
-    // refresh detail + “My Missions”
-    const data = await apiMission(mission.mission_address);
-    renderMissionDetail(data);
-    if (walletAddress) {
-      const mine = await apiPlayerMissions(walletAddress.toLowerCase());
-      renderMyMissions(mine);
-    }
-  } catch (err) {
-    console.error(err);
-    showAlert(`Enroll failed: ${decodeError(err)}`, "error");
-  } finally {
-    setBtnLoading(document.getElementById("btnEnroll"), false, `Enroll (${weiToCro(mission.enrollment_amount_wei)} CRO)`, false);
-  }
 }
 
 async function subscribeToMission(addr){
@@ -748,7 +997,19 @@ async function init(){
   // 3) close mission detail
   els.closeMissionBtn?.addEventListener("click", closeMission);
 
-  // 4) auto-load My Missions when wallet connects (event-based if available, else fallback poll)
+  // 4) Manual reload button
+  els.reloadMissionBtn?.addEventListener("click", async () => {
+    if (!currentMissionAddr) return;
+    try {
+      // icon-only button → keep original innerHTML, no text label
+      const data = await apiMission(currentMissionAddr);
+      renderMissionDetail(data);
+    } catch (e) {
+      showAlert("Reload failed. Please check your connection.", "error");
+    } 
+  });
+
+  // 5) auto-load My Missions when wallet connects (event-based if available, else fallback poll)
   const loadMy = async () => {
     if (!walletAddress) return;
     try {
@@ -768,15 +1029,6 @@ async function init(){
     if (walletAddress){ loadMy(); clearInterval(t); }
     if (++tried > 20) clearInterval(t);
   }, 500);
-
-  // 5) soft detail refresh if a mission is open
-  setInterval(() => {
-    if (els.missionDetail.style.display !== "none" && currentMissionAddr){
-      apiMission(currentMissionAddr)
-        .then(renderMissionDetail)
-        .catch(()=>{});
-    }
-  }, 15000);
 
 }
 

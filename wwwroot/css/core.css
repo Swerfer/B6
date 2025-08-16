@@ -9,7 +9,7 @@
 
   --black:                        #000000;
   --eerie-black:                  #111111;
-  --navy:                         #000818;
+  --abyss-navy-deep:              #0b0d12;
   --oxford-deep-blue:             #001e38;
   --indigo-dye:                   #0e2235;
   --deep-space-blue:              #0f2b45;
@@ -57,7 +57,7 @@ html,body {
   left: 0;
   right: 0;
   height: var(--header-h);        /* ← this is the key */
-  background: var(--navy);
+  background: var(--abyss-navy-deep);
   z-index: 100;
   display: flex;
   align-items: center;            /* vertically center text */
@@ -68,7 +68,7 @@ html,body {
 }
 
 .brand-line{
-  font-size:clamp(22px,4vw,42px);    /* larger ceiling */
+  font-size:clamp(22px,4vw,32px);    /* larger ceiling */
   font-weight:700; 
   color:var(--white); 
   white-space:nowrap; 
@@ -85,13 +85,16 @@ html,body {
 }
 
 .app-main{                     
-  flex:1 1 auto; width:100%;
+  flex:1 1 auto; 
+  width:100%;
   padding-top:44px;          /* same number as .inner height */
   padding-bottom:44px;
   overflow-y:auto;
-  display:flex; align-items:center; justify-content:center;
+  display:flex; 
+  align-items:center; 
+  justify-content:center;
   text-align:center;
-  background:var(--navy);            
+  background:var(--abyss-navy-deep);            
   color:var(--white);
   font-family:"Arial Black", Impact, sans-serif;
   flex-direction:column;
@@ -115,6 +118,7 @@ html,body {
   left: 0;
   right: 0;
   display: block;
+  overflow:hidden;
 }
 
 /* Fill the fixed main area (subtract 1rem top + 1rem bottom padding) */
@@ -225,7 +229,7 @@ html,body {
 }
 .btn-small:not(.btn-alt)
 {background:var(--cyan); 
-  color:var(--navy);
+  color:var(--abyss-navy-deep);
 }
 
 /* colour accents added by showAlert(type) */
@@ -384,7 +388,7 @@ button:disabled{
   left: 0;
   right: 0;
   height: var(--footer-h);
-  background: var(--navy);
+  background: var(--abyss-navy-deep);
   z-index: 100;
   display: flex;
   align-items: center;
@@ -400,7 +404,7 @@ body::before {
   content: "";
   position: fixed;
   inset: 0;
-  background: var(--navy);
+  background: var(--abyss-navy-deep);
   z-index: -1;
 }
 
