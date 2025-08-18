@@ -87,12 +87,15 @@ async function cleanupMissionDetail(){
 
 function statusSlug(s){
   switch (Number(s)) {
-    case 0:   return "pending";
-    case 1:   return "enrolling";
-    case 2:   return "arming";
-    case 3:   return "active";
-    case 4:   return "paused";
-    default:  return "ended";     // 5/6/7 are ended variants
+    case 0: return "pending";
+    case 1: return "enrolling";
+    case 2: return "arming";
+    case 3: return "active";
+    case 4: return "paused";
+    case 5: return "partly-success";
+    case 6: return "success";
+    case 7: return "failed";
+    default: return "ended";
   }
 }
 
