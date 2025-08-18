@@ -263,26 +263,33 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
 
     // 1) mission core row
     var coreSql = @"
+      with counts as (
+        select mission_address, count(*)::int as enrolled
+        from mission_enrollments
+        group by mission_address
+      )
       select
-        mission_address,
-        name,
-        mission_type,
-        status,
-        enrollment_start,
-        enrollment_end,
-        enrollment_amount_wei::text  as enrollment_amount_wei,
-        enrollment_min_players,
-        enrollment_max_players,
-        mission_start,
-        mission_end,
-        mission_rounds_total,
-        round_count,
-        cro_start_wei::text          as cro_start_wei,
-        cro_current_wei::text        as cro_current_wei,
-        pause_timestamp,
-        last_seen_block,
-        updated_at
-      from missions
+        m.mission_address,
+        m.name,
+        m.mission_type,
+        m.status,
+        m.enrollment_start,
+        m.enrollment_end,
+        m.enrollment_amount_wei::text  as enrollment_amount_wei,
+        m.enrollment_min_players,
+        m.enrollment_max_players,
+        m.mission_start,
+        m.mission_end,
+        m.mission_rounds_total,
+        m.round_count,
+        m.cro_start_wei::text          as cro_start_wei,
+        m.cro_current_wei::text        as cro_current_wei,
+        m.pause_timestamp,
+        m.last_seen_block,
+        m.updated_at,
+        coalesce(c.enrolled,0)       as enrolled_players
+      from missions m
+      left join counts c using (mission_address)
       where mission_address = @a;";
 
     await using var core = new NpgsqlCommand(coreSql, conn);
@@ -300,6 +307,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         enrollment_amount_wei  = (string)rd["enrollment_amount_wei"],
         enrollment_min_players = (short) rd["enrollment_min_players"],
         enrollment_max_players = (short) rd["enrollment_max_players"],
+        enrolled_players       = (int)   rd["enrolled_players"],
         mission_start          = (long)  rd["mission_start"],
         mission_end            = (long)  rd["mission_end"],
         mission_rounds_total   = (short) rd["mission_rounds_total"],

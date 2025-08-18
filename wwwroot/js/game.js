@@ -21,7 +21,10 @@ import {
   addrLinkIcon,
   missionTypeName,
   weiToCro, 
-  MISSION_ABI, 
+  FACTORY_ABI, 
+  READ_ONLY_RPC, 
+  FACTORY_ADDRESS,
+  MISSION_ABI,
   setBtnLoading, 
   decodeError, 
 } from "./core.js";
@@ -43,6 +46,7 @@ let   ringTimer             = null;
 let   stageTicker           = null;
 const GAP_DEG               = 10;      // hinge gap in degrees
 let   START_OFFSET          = 126;  // fine start offset along the path (px)
+let   stageCurrentStatus    = null;
 
 connectBtn.addEventListener("click", () => {
   if (walletAddress){
@@ -58,8 +62,11 @@ function showOnlySection(sectionId) {
   sectionBoxes.forEach(sec => {
     sec.style.display = (sec.id === sectionId) ? "" : "none";
   });
+
   document.getElementById('gameMain').classList.toggle('stage-mode', sectionId === 'gameStage');
-  if (sectionId === "joinableSection" || sectionId === "myMissionsSection") {
+
+  // Remember the last list view the user opened (now includes All Missions)
+  if (["joinableSection","myMissionsSection","allMissionsSection"].includes(sectionId)) {
     lastListShownId = sectionId;
   }
 }
@@ -89,6 +96,55 @@ function statusSlug(s){
   }
 }
 
+// MissionCreated → creation timestamp (for Pending phaseStart)
+const __mcIface = new ethers.utils.Interface([
+  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)"
+]);
+// MissionCreated → creation timestamp (for Pending phaseStart)
+// Paged over ≤2000 blocks to satisfy Cronos RPC
+const __missionCreatedCache = new Map();
+
+async function getMissionCreationTs(addr){
+  const key = String(addr).toLowerCase();
+  if (__missionCreatedCache.has(key)) return __missionCreatedCache.get(key);
+
+  try{
+    const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const topic0   = __mcIface.getEventTopic("MissionCreated");
+    const topic1   = ethers.utils.hexZeroPad(key, 32);
+
+    const latest   = await provider.getBlockNumber();
+    const STEP     = 1800; // keep under the RPC 2000 range cap (your indexer uses 1800 too)
+    // scan backwards until we find the first (and only) MissionCreated for this mission
+    let to = latest;
+    while (to >= 0){
+      const from = Math.max(0, to - STEP + 1);
+      const logs = await provider.getLogs({
+        address: FACTORY_ADDRESS,
+        topics: [topic0, topic1],
+        fromBlock: from,
+        toBlock: to
+      });
+      if (logs && logs.length){
+        // find the earliest log in this batch (defensive)
+        let first = logs[0];
+        for (const L of logs) if (L.blockNumber < first.blockNumber) first = L;
+        const blk = await provider.getBlock(first.blockNumber);
+        const ts  = Number(blk?.timestamp || 0);
+        __missionCreatedCache.set(key, ts);
+        return ts;
+      }
+      // next slice (previous window)
+      to = from - 1;
+    }
+    __missionCreatedCache.set(key, 0);
+    return 0;
+  }catch(err){
+    console.log("getMissionCreationTs failed:", err);
+    return 0;
+  }
+}
+
 /* Load + size the status word image and center it under the title */
 function setStageStatusImage(slug){
   if (!stageStatusImgSvg || !slug) return;
@@ -100,23 +156,102 @@ function stopStageTimer(){ if (stageTicker){ clearInterval(stageTicker); stageTi
 
 function formatStageShort(leftSec){
   const s = Math.max(0, Math.floor(leftSec));
-  if (s > 36*3600) return Math.floor(s/86400) + "d";   // > 36h → days
-  if (s > 90*60)   return Math.floor(s/3600)  + "h";   // > 90m → hours
-  if (s > 99)      return Math.floor(s/60)    + "m";   // > 99s  → minutes
-  return s + "s";                                      // ≤ 99s → seconds
+  if (s > 36*3600) return Math.ceil(s/86400) + "D";   // > 36h → days
+  if (s > 90*60)   return Math.ceil(s/3600)  + "H";   // > 90m → hours
+  if (s > 90)      return Math.ceil(s/60)    + "M";   // > 90s  → minutes
+  return s + "S";                                      // ≤ 90s → seconds
 }
 
-function startStageTimer(toEpochSec){
+// Unit classifier used by the center text and the ring "reset" windows
+function stageUnitFor(leftSec){
+  const s = Math.max(0, Math.floor(leftSec));
+  if (s > 36*3600) return "d";
+  if (s > 90*60)   return "h";
+  if (s > 90)      return "m";
+  return "s";
+}
+
+function ringWindowForUnit(unit, phaseStart, endTs){
+  if (!endTs) return [0,0];
+
+  const H36 = 36 * 3600;
+  const M90 = 90 * 60;
+  const S90 = 90;
+
+  // phaseStart is: creation (pending) / enroll_start / enroll_end (arming) / mission_start
+  // If creation couldn’t be fetched, you already fall back when computing phaseStartTs.
+  const start = phaseStart || (endTs - H36); // safe fallback to keep D/H sane
+  const phaseLen = Math.max(0, endTs - start);
+
+  if (unit === "d") {
+    return [start, endTs];
+  }
+  if (unit === "h") {
+    const S = (phaseLen < H36) ? start : (endTs - H36);
+    return [S, endTs];
+  }
+  if (unit === "m") {
+    const S = (phaseLen < M90) ? start : (endTs - M90);
+    return [S, endTs];
+  }
+  // seconds unit stays a fixed trailing window
+  return [endTs - S90, endTs];
+}
+
+function startStageTimer(endTs, phaseStartTs = 0, missionObj){
   stopStageTimer();
-  const node = document.getElementById("vaultTimerText"); // SVG text
-  if (!node || !toEpochSec) { if (node) node.textContent = ""; return; }
+  const node = document.getElementById("vaultTimerText");
+  if (!node || !endTs) { if (node) node.textContent = ""; return; }
+
+  let zeroFired = false;
+  let currentUnit = null;
 
   const paint = () => {
     const now  = Math.floor(Date.now()/1000);
-    const left = Math.max(0, toEpochSec - now);
-    node.textContent = formatStageShort(left);  // e.g., 3d / 6h / 34m / 43s
-    if (left <= 0) stopStageTimer();
+    const left = Math.max(0, endTs - now);
+
+    // center text only formats; does not drive windows
+    node.textContent = formatStageShort(left);
+
+    // NEW: tick lower-HUD countdown pills (full d hh:mm:ss)
+    document.querySelectorAll('#stageLowerHud [data-countdown]').forEach(el => {
+      const ts = Number(el.getAttribute('data-countdown') || 0);
+      el.textContent = ts ? formatCountdown(ts) : "—";
+    });
+
+    // Rebind ring when the unit changes...
+    const unit = stageUnitFor(left);
+    if (unit !== currentUnit) {
+      const [S, E] = ringWindowForUnit(unit, phaseStartTs, endTs);
+      if (S && E && E > S) bindRingToWindow(S, E); else setRingProgress(0);
+      currentUnit = unit;
+    }
+
+    if (left <= 0) {
+      stopStageTimer();
+      if (!zeroFired) {
+        zeroFired = true;
+
+        // (1) Instant front-end flip using immutable times
+        if (missionObj) {
+          const next = statusByClock(missionObj, now);
+          if (typeof next === "number" && next !== Number(missionObj.status)) {
+            const m2 = { ...missionObj, status: next };
+            setStageStatusImage(statusSlug(next));
+            buildStageLowerHudForStatus(m2);
+            bindRingToMission(m2);
+            bindCenterTimerToMission(m2);
+            renderStageCtaForStatus(m2);
+            stageCurrentStatus = next;
+          }
+        }
+
+        // (2) One server refresh (sync with backend / ended subtype)
+        refreshOpenStageFromServer(1);
+      }
+    }
   };
+
   paint();
   stageTicker = setInterval(paint, 1000);
 }
@@ -132,9 +267,42 @@ function nextDeadlineFor(m){
   return 0; // Ended variants – no countdown in center
 }
 
-function bindCenterTimerToMission(mission){
-  const toTs = nextDeadlineFor(mission);
-  startStageTimer(toTs);
+// NEW — compute the status purely from immutable times (front-end flip)
+function statusByClock(m, now = Math.floor(Date.now()/1000)) {
+  const es = Number(m.enrollment_start || 0);
+  const ee = Number(m.enrollment_end   || 0);
+  const ms = Number(m.mission_start    || 0);
+  const me = Number(m.mission_end      || 0);
+
+  const cur = Number(m.enrolled_players ?? 0);
+  const min = Number(m.enrollment_min_players ?? 0);
+
+  if (now < es) return 0;                                              // Pending
+  if (now < ee) return 1;                                              // Enrolling
+  if (now < ms) return (cur >= min ? 2 : 7);                           // Arming OR Failed if min not met
+  if (now < me) return (m.pause_timestamp ? 4 : 3);                    // Paused vs Active
+  return (m.status >= 5 ? m.status : 6);                               // Ended bucket (keep subtype if present)
+}
+
+async function bindCenterTimerToMission(mission){
+  const endTs = nextDeadlineFor(mission);
+  const st    = Number(mission?.status);
+
+  let startTs = 0;
+  if (st === 0) {
+    // Pending: creation → enroll start
+    startTs = await getMissionCreationTs(mission.mission_address);
+    if (!startTs) startTs = Number(mission.updated_at || 0); // fallback from API row
+  } else if (st === 1) {
+    startTs = Number(mission.enrollment_start || 0);
+  } else if (st === 2) {
+    startTs = Number(mission.enrollment_end   || 0);
+  } else if (st === 3 || st === 4) {
+    startTs = Number(mission.mission_start    || 0);
+  }
+
+  // pass mission to enable front-end flip at 0s
+  startStageTimer(endTs, startTs, mission);
 }
 
 /* ---------- Ring overlay: bind to time window ---------- */
@@ -186,9 +354,12 @@ function bindRingToWindow(startSec, endSec){
 /* Map mission.status to the correct time window */
 function bindRingToMission(m){
   const st = Number(m?.status ?? -1);
-  // Decide which window to visualize
   let S = 0, E = 0;
-  if (st === 1) {                         // Enrolling
+
+  if (st === 0) {                         // Pending → animate now → enrollment_start
+    setRingProgress(0);  // leave covered; unit timer will bind [E-90m, E] etc.
+    return;
+  } else if (st === 1) {                  // Enrolling
     S = Number(m.enrollment_start || 0);
     E = Number(m.enrollment_end   || 0);
   } else if (st === 2) {                  // Arming
@@ -198,11 +369,17 @@ function bindRingToMission(m){
     S = Number(m.mission_start    || 0);
     E = Number(m.mission_end      || 0);
   } else {
-    // Pending / ended: don’t animate; keep ring covered or fully revealed
-    setRingProgress(st >= 6 ? 100 : 0);
+    // Ended variants (5/6/7): show fully revealed
+    setRingProgress(100);
     return;
   }
-  if (S && E && E > S) bindRingToWindow(S, E);
+
+  if (S && E && E > S) {
+    bindRingToWindow(S, E);
+  } else {
+    // Window missing → keep a sensible static state
+    setRingProgress(st >= 5 ? 100 : 0);
+  }
 }
 
 /* ----- page scroll lock (for gameplay stage) ----- */
@@ -233,7 +410,7 @@ function stateName(s){
     : String(s);
 }
 
-async function startHub() {
+async function startHub() { // SignalR HUB
   if (!window.signalR) { showAlert("SignalR client script not found.", "error"); return; }
 
   if (!hubConnection) {
@@ -254,9 +431,25 @@ async function startHub() {
       });
 
       hubConnection.on("StatusChanged", (addr, newStatus) => {
-        showAlert(`Mission status changed:<br>${addr}<br>Status: ${newStatus}`, "warning");
         if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
-          apiMission(currentMissionAddr).then(renderMissionDetail).catch(()=>{});
+          const gameMain = document.getElementById('gameMain');
+          apiMission(currentMissionAddr).then(data => {
+            const m = data.mission || data;
+            if (gameMain && gameMain.classList.contains('stage-mode')) {
+              if (Number(m.status) === stageCurrentStatus) return;
+              // Rebuild the open stage
+              setStageStatusImage(statusSlug(m.status));
+              buildStageLowerHudForStatus(m);
+              bindRingToMission(m);
+              bindCenterTimerToMission(m);
+              renderStageCtaForStatus(m);
+              stageCurrentStatus = Number(m.status);
+            } else {
+              // Detail view open → keep existing behavior
+              renderMissionDetail(data);
+              showAlert(`Mission status changed:<br>${addr}<br>Status: ${newStatus}`, "warning");
+            }
+          }).catch(()=>{});
         }
       });
 
@@ -336,6 +529,51 @@ function scheduleDetailRefresh(reset=false){
 }
 
 /* ---------- API wrappers (ALL under /api) ---------- */
+async function fetchAndRenderAllMissions(){
+  try {
+    // 1) Factory call (chain): get the full mission index
+    const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
+    const [addrs, statuses, names] = await factory.getAllMissions();
+
+    // 2) Map and reverse (NEWEST FIRST)
+    const rows = addrs.map((a, i) => ({
+      mission_address: a,
+      status: Number(statuses[i]),
+      name: names[i]
+    })).reverse();
+
+    // 3) Hydrate with details from your API (address → mission object)
+    const details = await Promise.all(
+      rows.map(r => apiMission(r.mission_address).catch(() => null))
+    );
+
+    const missions = details.filter(Boolean).map(d => {
+      const m = d.mission;
+
+      // enrich with fields the All Missions renderer expects
+      m.current_players  = (d.enrollments?.length || 0);
+      m.min_players      = m.enrollment_min_players;
+      m.max_players      = m.enrollment_max_players;
+      m.rounds           = m.round_count;
+      m.max_rounds       = m.mission_rounds_total;
+      m.mission_duration = (m.mission_start && m.mission_end)
+                            ? (Number(m.mission_end) - Number(m.mission_start)) : 0;
+      m.mission_fee      = m.enrollment_amount_wei;   // show fee in CRO via weiToCro
+      return m;
+    });
+
+    renderAllMissions(missions);
+
+    startJoinableTicker();                       // update any data-start/data-end timers
+    hydrateAllMissionsRealtime(els.allMissionsList);  // NEW: live status (concurrency 4)
+  } catch (e) {
+    console.error(e);
+    showAlert("Failed to load All Missions.", "error");
+    renderAllMissions([]);                       // show empty state
+  }
+}
+
 async function apiJoinable(){
   const r = await fetch("/api/missions/joinable", { cache: "no-store" });
   if (!r.ok) throw new Error("/api/missions/joinable failed");
@@ -354,48 +592,74 @@ async function apiMission(addr){
   return r.json();
 }
 
+async function refreshOpenStageFromServer(retries = 3) {
+  const gameMain = document.getElementById('gameMain');
+  if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
+  if (!currentMissionAddr) return;
+
+  try {
+    const data = await apiMission(currentMissionAddr);
+    const m = data.mission || data;
+
+    // If status changed, or just to be safe, rebuild the stage pieces
+    const newStatus = Number(m.status);
+    if (newStatus !== stageCurrentStatus) {
+      setStageStatusImage(statusSlug(newStatus));                 // image under title
+      buildStageLowerHudForStatus(m);                             // pills for this status
+      bindRingToMission(m);                                       // ring window for this status
+      bindCenterTimerToMission(m);                                // center countdown for this status
+      renderStageCtaForStatus(m);
+      stageCurrentStatus = newStatus;
+    } else if (retries > 0) {
+      // backend might flip a second later; try a couple of times
+      setTimeout(() => refreshOpenStageFromServer(retries - 1), 1500);
+    }
+  } catch { /* ignore transient errors */ }
+}
+
 /* ---------- DOM refs ---------- */
 const els = {
-  joinableList:        document.getElementById("joinableList"),
-  joinableEmpty:       document.getElementById("joinableEmpty"),
-  refreshJoinableBtn:  document.getElementById("refreshJoinableBtn"),
+  joinableList:             document.getElementById("joinableList"),
+  joinableEmpty:            document.getElementById("joinableEmpty"),
+  refreshJoinableBtn:       document.getElementById("refreshJoinableBtn"),
 
-  myMissionsList:      document.getElementById("myMissionsList"),
-  myMissionsEmpty:     document.getElementById("myMissionsEmpty"),
+  myMissionsList:           document.getElementById("myMissionsList"),
+  myMissionsEmpty:          document.getElementById("myMissionsEmpty"),
 
-  missionDetail:       document.getElementById("missionDetailSection"),
-  missionTitle:        document.getElementById("missionTitle"),
-  missionCore:         document.getElementById("missionCore"),
-  enrollmentsList:     document.getElementById("enrollmentsList"),
-  enrollmentsEmpty:    document.getElementById("enrollmentsEmpty"),
-  closeMissionBtn:     document.getElementById("closeMissionBtn"),
-  reloadMissionBtn:    document.getElementById("reloadMissionBtn"),
+  missionDetail:            document.getElementById("missionDetailSection"),
+  missionTitle:             document.getElementById("missionTitle"),
+  missionCore:              document.getElementById("missionCore"),
+  enrollmentsList:          document.getElementById("enrollmentsList"),
+  enrollmentsEmpty:         document.getElementById("enrollmentsEmpty"),
+  closeMissionBtn:          document.getElementById("closeMissionBtn"),
+  reloadMissionBtn:         document.getElementById("reloadMissionBtn"),
+  allMissionsList:          document.getElementById("allMissionsList"),
+  allMissionsEmpty:         document.getElementById("allMissionsEmpty"),
+  refreshAllBtn:            document.getElementById("refreshAllBtn"),
+
 };
 
-const btnJoinable         = document.getElementById("btnJoinable");
-const btnMyMissions       = document.getElementById("btnMyMissions");
-
-const stage               = document.getElementById("gameStage");
-const stageViewport       = document.getElementById("stageViewport");
-const stageImg            = document.getElementById("stageImg");
-
-const ringOverlay         = document.getElementById("ringOverlay");
-const ringCover           = document.getElementById("ringCover");
-
-const vaultTimerText      = document.getElementById("vaultTimerText");     // SVG <text> @ (499,417)
-const stageTitleText      = document.getElementById("stageTitleText");     // NEW: SVG <text> for title
-const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg");  // NEW: SVG <image> for status
+const btnAllMissions      = document.getElementById("btnAllMissions"    );
+const btnJoinable         = document.getElementById("btnJoinable"       );
+const btnMyMissions       = document.getElementById("btnMyMissions"     );
+const stage               = document.getElementById("gameStage"         );
+const stageViewport       = document.getElementById("stageViewport"     );
+const stageImg            = document.getElementById("stageImg"          );
+const ringOverlay         = document.getElementById("ringOverlay"       );
+const stageTitleText      = document.getElementById("stageTitleText"    );    
+const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg" );
 
 
 const IMG_W = 2048, IMG_H = 2048;
-const YELLOW = { x:566, y:420, w:914, h:1238 }; // YELLOW was the rectangle from the phone header to footer space on the vault bg image 
+const visibleRectangle  = { x:566, y:420, w:914, h:1238 }; // visibleRectangle was the rectangle from the phone header to footer space and phone 
+                                                           // screen width on the vault bg image. This rectangle is always visible on every screen
 
 function layoutStage(){
   if (!stage || !stageViewport || !stageImg) return;
   const availW = stageViewport.clientWidth;
   const availH = stageViewport.clientHeight;
 
-  const scale = Math.min(availH / YELLOW.h, availW / YELLOW.w);
+  const scale = Math.min(availH / visibleRectangle .h, availW / visibleRectangle .w);
 
   const w = Math.round(IMG_W * scale);
   const h = Math.round(IMG_H * scale);
@@ -407,6 +671,281 @@ function layoutStage(){
     ringOverlay.style.height = h + "px";
   }
 
+}
+
+// --- Lower HUD (pills) builder --------------------------------------------
+const SVG_NS = "http://www.w3.org/2000/svg";
+const HUD = {
+  maxRows:    4,                          // The maximum rows of pills              
+  rectW:      214,                        // Pill rectangle width
+  rectH:      32,                         // Pill rectangle height
+  gapX:       10,                         // Horizontal gap between 2 pills
+  gapY:       10,                         // Vertical gap between 2 pill lines
+  xCenter:    500,                        // Center of visual image (1000 x 1000 viewbox)
+  yFirst:     640, // !!!!!! First pill line y. Correct if rectH and/or gapY are changed. yFirst = Yfirst - (4x rectH diff + 3x gapY diff).
+  labelFill:  "#7ad2ff",                // Label color
+  valueFill:  "#fff",                   // Value color
+  pillFill:   "rgba(6,29,45,.7)",       // Background color
+  pillStroke: "rgba(72,221,255,.35)",   // Stroke color
+  font:       "system-ui,Segoe UI,Arial", // Font
+  labelY:     20, // !!!!!!! Label center y. Correct if rectH is changed. labelY = LabelY - rectH diff / 2.
+  valueY:     20, // !!!!!!! Value center y. Correct if rectH is changed. valueY = valueY - rectH diff / 2.
+  valueX:     120,                        // Value center x
+  rx:         12,                         // Radius (?) x
+  ry:         12,                         // Radius (?) y
+};
+
+// Single source of truth for pill behaviors/labels
+const PILL_LIBRARY = {
+  missionType:    { label: "Mission Type",     value: m => missionTypeName[Number(m?.mission_type ?? 0)] },
+  opensAt:        { label: "Opens At",         value: m => m?.enrollment_start ? formatLocalDateTime(m.enrollment_start) : "—" },
+  missionStartAt: { label: "Start At",         value: m => m?.mission_start    ? formatLocalDateTime(m.mission_start)    : "—" },
+  duration:       { label: "Duration",         value: m => (m?.mission_start && m?.mission_end)
+                                                 ? formatDurationShort(Number(m.mission_end) - Number(m.mission_start)) : "—" },
+  fee:            { label: "Mission Fee",      value: m => (m && m.enrollment_amount_wei != null) ? `${weiToCro(m.enrollment_amount_wei)} CRO` : "—" },
+  poolStart:      { label: "Pool (start)",     value: m => (m && m.cro_start_wei    != null)      ? `${weiToCro(m.cro_start_wei)} CRO`    : "—" },
+  poolCurrent:    { label: "Pool (current)",   value: m => (m && m.cro_current_wei  != null)      ? `${weiToCro(m.cro_current_wei)} CRO`  : "—" },
+  playersCap:     { label: "Players cap",      value: m => (m?.enrollment_max_players ?? "—") },
+  players:        { label: "Players",          value: m => Number(m?.enrolled_players ?? 0) },      
+  rounds:         { label: "Rounds",           value: m => Number(m?.mission_rounds_total ?? 0) },
+  roundsOf:       { label: "RoundsOff",        value: m => `${Number(m?.round_count ?? 0)}/${Number(m?.mission_rounds_total ?? 0)}` },
+  playersAllStats:{ label: "Players",          value: m => `${m?.enrollment_min_players ?? "—"}/${m?.enrolled_players ?? 0}/${m?.enrollment_max_players ?? "—"}`},
+
+  // Countdown pills (short format like the center timer)
+  closesIn:       { label: "Closes In",        countdown: m => Number(m?.enrollment_end  || 0) },
+  startsIn:       { label: "Starts In",        countdown: m => Number(m?.mission_start   || 0) },
+  endsIn:         { label: "Ends In",          countdown: m => Number(m?.mission_end     || 0) },
+};
+
+// Which pills to show per status (0..7) — only using fields that exist in your payloads :contentReference[oaicite:0]{index=0}
+const PILL_SETS = {
+  0:        ["opensAt","missionStartAt","duration","fee","poolStart","playersCap","rounds"],                        // Pending
+  1:        ["missionType","rounds","fee","poolCurrent","playersAllStats","duration","closesIn","missionStartAt"],  // Enrolling
+  2:        ["poolStart","players","rounds","startsIn","duration"],                                                 // Arming
+  3:        ["poolCurrent","players","roundsOff","endsIn"],                                                         // Active
+  4:        ["poolCurrent","players","roundsOff","endsIn"],                                                         // Paused
+  default:  ["poolCurrent","players","roundsOff"],                                                                  // Ended variants
+};
+
+// Build (and fill) the pills for the current mission/status
+function buildStageLowerHudForStatus(mission){
+  const host = document.getElementById("stageLowerHud");
+  if (!host) return;
+  while (host.firstChild) host.removeChild(host.firstChild);
+
+  const keys = PILL_SETS[Number(mission?.status)] ?? PILL_SETS.default;
+console.log(mission);
+  // layout helpers
+  const { rectW, rectH, gapX, gapY, xCenter, yFirst, rx, ry,
+          pillFill, pillStroke, labelFill, valueFill, font,
+          labelY, valueY, valueX } = HUD;
+
+  const xLeft   = xCenter - rectW - (gapX / 2);
+  const xRight  = xCenter + (gapX / 2);
+  const xSingle = xCenter - (rectW / 2);
+
+  // 2 per row (left/right), last odd becomes single
+  const placed = keys.map((k, i) => ({
+    key: k,
+    row: Math.floor(i/2),
+    col: (i % 2 === 0) ? "left" : "right"
+  }));
+  if (keys.length % 2 === 1) { // last becomes single
+    placed[placed.length - 1].col = "single";
+  }
+
+  const rowsUsed  = Math.ceil(keys.length / 2);
+  const startRow  = Math.max(0, (HUD.maxRows || 4) - rowsUsed);  // bottom anchor
+
+  for (const p of placed){
+    const def = PILL_LIBRARY[p.key];
+    if (!def) continue;
+    const y = yFirst + (rectH + gapY) * (startRow + p.row);
+    const x = (p.col === "left") ? xLeft : (p.col === "right") ? xRight : xSingle;
+
+    const g = document.createElementNS(SVG_NS, "g");
+    g.setAttribute("class", "pillGroup");
+    g.setAttribute("transform", `translate(${Math.round(x)},${Math.round(y)})`);
+
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("rx", rx); rect.setAttribute("ry", ry);
+    rect.setAttribute("width", rectW); rect.setAttribute("height", rectH);
+    rect.setAttribute("fill", pillFill);
+    rect.setAttribute("stroke", pillStroke);
+    g.appendChild(rect);
+
+    const label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("x", 10);
+    label.setAttribute("y", labelY);
+    label.setAttribute("font-family", font);
+    label.setAttribute("font-size", "12");
+    label.setAttribute("fill", labelFill);
+    label.textContent = def.label;
+    g.appendChild(label);
+
+    const val = document.createElementNS(SVG_NS, "text");
+    val.setAttribute("x", valueX);
+    val.setAttribute("y", valueY);
+    val.setAttribute("text-anchor", "middle");
+    val.setAttribute("font-family", font);
+    val.setAttribute("font-size", "12");
+    val.setAttribute("fill", valueFill);
+
+    if (typeof def.countdown === "function") {
+      const ts = def.countdown(mission);
+      if (ts > 0) {
+        val.setAttribute("data-countdown", String(ts));
+        val.textContent = formatCountdown(ts);
+      } else {
+        val.textContent = "—";
+      }
+    } else if (p.key === "playersAllStats") {
+      // min / joined / max with colored "joined"
+      const min = Number(mission?.enrollment_min_players ?? 0);
+      const cur = Number(mission?.enrolled_players ?? 0);
+      const maxRaw = mission?.enrollment_max_players;
+      const max = (maxRaw == null) ? "—" : String(maxRaw);
+
+      const tMin = document.createElementNS(SVG_NS, "tspan");
+      tMin.textContent = ` (Min ${min}`;
+
+      const tCur = document.createElementNS(SVG_NS, "tspan");
+      tCur.textContent = String(cur);
+      // color by threshold (uses your CSS vars from core.css)
+      const color = cur >= min ? "var(--success)" : "var(--error)";
+      tCur.setAttribute("style", `fill:${color}`);   // use CSS var
+      // tCur.setAttribute("fill", color);           // (extra-safe duplicate if you want)
+
+      const tMax = document.createElementNS(SVG_NS, "tspan");
+      tMax.textContent = `/Max ${max})`;
+
+      // build the value as tspans
+      val.textContent = "";
+      val.appendChild(tCur);
+      val.appendChild(tMin);
+      val.appendChild(tMax);
+    } else {
+      val.textContent = def.value ? def.value(mission) : "—";
+    }
+
+    g.appendChild(val);
+    host.appendChild(g);
+  }
+}
+
+async function renderStageCtaForStatus(mission){
+  const host = document.getElementById("stageCtaGroup");
+  if (!host) return;
+  host.innerHTML = "";
+
+  const st = Number(mission?.status);
+  if (st !== 1) return; // only show CTA in Enrolling (status 1)
+
+  // --- Layout (center on vault; below pills) ---
+  const btnW = 240, btnH = 40;
+  const x = 500 - Math.round(btnW / 2); // center in 1000x1000 viewbox
+  const y = 560; 
+
+  // --- Gating (wallet, window, already enrolled, spots, optional canEnroll) ---
+  const now   = Math.floor(Date.now()/1000);
+  const inWin = now < Number(mission.enrollment_end || 0);
+  const me    = (walletAddress || "").toLowerCase();
+
+  let already = false;
+  let hasSpots = true;
+  let canEnrollSoft = true;
+
+  try {
+    const ro = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const mc = new ethers.Contract(mission.mission_address, MISSION_ABI, ro);
+    const md = await mc.getMissionData();
+    // ethers struct can be tuple[0] or named – cover both
+    const tuple = md?.[0] || md;
+    const players = (tuple?.players || []).map(a => String(a).toLowerCase());
+    already = !!(me && players.includes(me));
+
+    const maxP = Number(mission.enrollment_max_players || 0);
+    hasSpots = maxP ? (players.length < maxP) : true;
+
+    // optional factory soft gate
+    if (me && FACTORY_ADDRESS) {
+      const fac = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, ro);
+      canEnrollSoft = await fac.canEnroll(me);
+    }
+  } catch { /* on any read error, keep permissive defaults above */ }
+
+  let disabled = false, note = "";
+  if (!walletAddress) { disabled = true; note = "Connect your wallet to join"; }
+  else if (!inWin)    { disabled = true; note = "Enrollment closed"; }
+  else if (already)   { disabled = true; note = "You already joined"; }
+  else if (!hasSpots) { disabled = true; note = "No spots left"; }
+  else if (!canEnrollSoft) { disabled = true; note = "Weekly/monthly limit reached"; }
+
+  // --- Draw button ---
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "svg-cta-btn" + (disabled ? " disabled" : ""));
+  g.setAttribute("transform", `translate(${x},${y})`);
+
+  const rect = document.createElementNS(SVG_NS, "rect");
+  rect.setAttribute("width", String(btnW));
+  rect.setAttribute("height", String(btnH));
+  g.appendChild(rect);
+
+  const label = document.createElementNS(SVG_NS, "text");
+  label.setAttribute("x", String(Math.round(btnW/2)));
+  label.setAttribute("y", "25");
+  label.setAttribute("text-anchor", "middle");
+  label.setAttribute("class", "svg-cta-label");
+  label.textContent = "JOIN MISSION";
+  g.appendChild(label);
+
+  if (note) {
+    const n = document.createElementNS(SVG_NS, "text");
+    n.setAttribute("x", "500"); // absolute center
+    n.setAttribute("y", String(y + btnH + 18));
+    n.setAttribute("text-anchor", "middle");
+    n.setAttribute("class", "svg-cta-note");
+    n.textContent = note;
+    host.appendChild(n);
+  }
+
+  if (!disabled) {
+    g.style.cursor = "pointer";
+    g.addEventListener("click", () => handleEnrollClick(mission));
+  }
+
+  host.appendChild(g);
+}
+
+async function handleEnrollClick(mission){
+  const me = getSigner?.();
+  if (!me) { showAlert("Connect your wallet first.", "error"); return; }
+
+  try {
+    // optimistic UI: freeze CTA
+    const btn = document.querySelector("#stageCtaGroup .svg-cta-btn");
+    const lbl = btn?.querySelector(".svg-cta-label");
+    if (btn) btn.classList.add("disabled");
+    if (lbl) lbl.textContent = "Joining…";
+
+    const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, me);
+    const val = mission.enrollment_amount_wei ?? "0";
+    const tx  = await c.enrollPlayer({ value: val });
+    await tx.wait();
+
+    showAlert("You joined the mission!", "success");
+
+    // Re-evaluate the open stage (pills, ring, CTA) without page reload
+    await refreshOpenStageFromServer(2);
+  } catch (err) {
+    showAlert(`Join failed: ${decodeError(err)}`, "error");
+  } finally {
+    // Always re-render CTA state (handles success/failed)
+    const data = await apiMission(mission.mission_address).catch(()=>null);
+    const m2 = data?.mission || mission;
+    await renderStageCtaForStatus(m2);
+  }
 }
 
 function showGameStage(mission){
@@ -422,15 +961,31 @@ function showGameStage(mission){
   // Load status image (SVG) and size it
   setStageStatusImage(statusSlug(mission?.status));
 
+  stageCurrentStatus = Number(mission?.status ?? -1);
+
   // Scale image + overlay, then place everything from the vault center
   layoutStage();
+  
+  // Build lower HUD pills for THIS status & fill values
+  buildStageLowerHudForStatus(mission);
+
+  bindRingToMission(mission);
 
   // Center timer bound to this mission's next deadline
   bindCenterTimerToMission(mission);
+
+  // CTA (status 1 → JOIN MISSION)
+  renderStageCtaForStatus(mission);
 }
 
 window.addEventListener("resize", layoutStage);
 // click handlers
+btnAllMissions?.addEventListener("click", async () => {
+  await cleanupMissionDetail();
+  showOnlySection("allMissionsSection");
+  await fetchAndRenderAllMissions(); 
+});
+
 btnJoinable?.addEventListener("click", async () => {
   await cleanupMissionDetail();
   showOnlySection("joinableSection");
@@ -443,7 +998,10 @@ btnMyMissions?.addEventListener("click", async () => {
     try {
       const mine = await apiPlayerMissions(walletAddress.toLowerCase());
       renderMyMissions(mine);
-    } catch (e) { console.error(e); }
+    } catch (err) { 
+      console.error("[myMissions] failed" , err);
+      showAlert("Couldn't load your missions.", "error"); 
+    }
   }
 });
 
@@ -506,6 +1064,148 @@ function startJoinableTicker(){
 }
 
 /* ---------- renderers ---------- */
+function renderAllMissions(missions = []) {
+  const ul = document.getElementById("allMissionsList");
+  const empty = document.getElementById("allMissionsEmpty");
+  if (!ul || !empty) return;
+  ul.classList.add("card-grid");
+  ul.innerHTML = "";
+  if (!missions.length) {
+    empty.style.display = "";
+    return;
+  }
+  empty.style.display = "none";
+
+  // newest first (factory returns oldest→newest; we also reversed at fetch time, but
+  // keep this guard so we never regress)
+  const list = missions.slice().reverse();
+
+  for (const m of list) {
+    const li = document.createElement("li");
+    li.className = "mission-card";
+
+    // live status (same concurrent approach you used already)
+    const stNum   = Number(m.status ?? 0);
+    const stText  = statusText(stNum);
+    const stClass = statusColorClass(stNum);
+
+    // compute “next timebox” values for the mini rows
+    const enrollStart = Number(m.enrollment_start || 0);
+    const enrollEnd   = Number(m.enrollment_end   || 0);
+    const missionStart= Number(m.mission_start    || 0);
+    const missionEnd  = Number(m.mission_end      || 0);
+
+    let timeKey1 = "", timeValAttr1 = "", timeVal1 = "—";
+    let timeKey2 = "", timeValAttr2 = "", timeVal2 = "—";
+    let timeKey3 = "", timeValAttr3 = "", timeVal3 = "—";
+    if (stNum === 0) { // Pending
+      timeKey1 = "Join from:";
+      timeValAttr1 = ""; // no ticker on a fixed datetime
+      timeVal1 = enrollStart ? formatLocalDateTime(enrollStart) : "—";
+      timeKey2 = "Join until:";
+      timeValAttr2 = ""; // no ticker on a fixed datetime
+      timeVal2 = enrollStart ? formatLocalDateTime(enrollEnd) : "—";
+      timeKey3 = "Start at:";
+      timeValAttr3 = ""; // no ticker on a fixed datetime
+      timeVal3 = enrollStart ? formatLocalDateTime(missionStart) : "—";
+    } else if (stNum === 1) { // Enrolling
+      timeKey1 = "Join until:";
+      timeValAttr1 = ""; // no ticker on a fixed datetime
+      timeVal1 = enrollEnd ? formatLocalDateTime(enrollEnd) : "—";
+      timeKey3 = "Start at:";
+      timeValAttr3 = ""; // no ticker on a fixed datetime
+      timeVal3 = enrollStart ? formatLocalDateTime(missionStart) : "—";
+    } else if (stNum === 2) { // Arming
+      timeKey1 = "Starts in:";
+      timeValAttr1 = `data-start="${missionStart}"`;
+      timeVal1 = missionStart ? formatCountdown(missionStart) : "—";
+    } else if (stNum === 3 || stNum === 4) { // Active / Paused
+      timeKey1 = "Ends in:";
+      timeValAttr1 = `data-end="${missionEnd}"`;
+      timeVal1 = missionEnd ? formatCountdown(missionEnd) : "—";
+    } else {
+      timeKey1 = "";
+    }
+
+    // Fallbacks keep it resilient if you ever reuse this with raw mission objects
+    const maxPlayers = Number(m.max_players ?? m.enrollment_max_players ?? 0);
+    const minPlayers = Number(m.min_players ?? m.enrollment_min_players ?? 0);
+    const curPlayers = Number(m.current_players ?? 0);
+    const rounds     = Number(m.rounds ?? m.round_count ?? 0);
+    const maxRounds  = Number(m.max_rounds ?? m.mission_rounds_total ?? rounds ?? 0);
+
+    const duration   = Number(m.mission_duration ?? ((m.mission_start && m.mission_end) ? (m.mission_end - m.mission_start) : 0));
+    const feeWei     = (m.mission_fee ?? m.enrollment_amount_wei ?? 0);
+    const feeCro     = weiToCro(String(feeWei));
+
+    const playersPct = maxPlayers > 0 ? Math.min(100, Math.round((curPlayers / maxPlayers) * 100)) : 0;
+
+    li.className = "mission-card";
+    li.dataset.addr = (m.mission_address || "").toLowerCase();
+
+    li.innerHTML = `
+      <div class="mission-head d-flex justify-content-between align-items-center">
+        <div class="mission-title">
+          <i class="fa-regular fa-calendar me-2 text-info"></i>
+          <span class="title-text">${m.name || m.mission_address}</span>
+        </div>
+        <span class="status-pill ${stClass}">${stText}</span>
+      </div>
+
+      <div class="mini-row">
+        <div class="label">Duration:</div>
+        <div class="value">${formatDurationShort(duration)}</div>
+        <div class="ms-auto fw-bold">Rounds ${rounds}/${maxRounds}</div>
+      </div>
+
+      <div class="mini-row">
+        <div class="label">Mission Fee:</div>
+        <div class="value">${feeCro} CRO</div>
+      </div>
+
+      ${timeKey1 ? `
+      <div class="mini-row">
+        <div class="label">${timeKey1}</div>
+        <div class="value"><span ${timeValAttr1}>${timeVal1}</span></div>
+      </div>` : ""}
+
+      ${timeKey2 ? `
+      <div class="mini-row">
+        <div class="label">${timeKey2}</div>
+        <div class="value"><span ${timeValAttr2}>${timeVal2}</span></div>
+      </div>` : ""}
+
+      ${timeKey3 ? `
+      <div class="mini-row">
+        <div class="label">${timeKey3}</div>
+        <div class="value"><span ${timeValAttr3}>${timeVal3}</span></div>
+      </div>` : ""}
+
+      <div class="players-line">
+        <div class="label me-2">Players</div>
+        <div class="players-count">
+          <span class="current" data-current="${curPlayers}" data-min="${minPlayers}">${curPlayers}</span>/<span class="max">${maxPlayers}</span>
+        </div>
+      </div>
+      <div class="progress-slim"><i style="--w:${playersPct}%"></i></div>
+    `;
+
+    // clicking opens detail
+    li.addEventListener("click", async () => {
+      await cleanupMissionDetail();
+      currentMissionAddr = (m.mission_address || "").toLowerCase();
+      showOnlySection("missionDetailSection");
+      const data = await apiMission(currentMissionAddr).catch(() => null);
+      if (data?.mission) renderMissionDetail(data);
+    });
+
+    ul.appendChild(li);
+  }
+
+  // re-use the global ticker to keep countdowns + players color live
+  startJoinableTicker();
+}
+
 function renderJoinable(items){
   els.joinableList.innerHTML = "";
   els.joinableEmpty.style.display = items?.length ? "none" : "";
@@ -689,10 +1389,12 @@ function renderMissionDetail({ mission, enrollments, rounds }){
     actions.appendChild(btn);
     // placeholder: wire up later to the in-mission HUD
     btn.addEventListener("click", async () => {
-      await cleanupMissionDetail();   // stop timers, unsub, etc.
+      await cleanupMissionDetail();                         // stop timers, unsub, etc.
+      currentMissionAddr = String(mission.mission_address).toLowerCase();
+      await startHub();                                     // ensures connection + safeSubscribe()
+      await subscribeToMission(currentMissionAddr);         // idempotent if already subscribed
       lockScroll();
-      showGameStage(mission);                // hide lists/detail, show stage
-      bindRingToMission(mission);     // NEW: drive ring from the current phase window
+      showGameStage(mission);                               
     });
   }
 
@@ -900,6 +1602,39 @@ function renderMissionDetail({ mission, enrollments, rounds }){
 
 }
 
+async function hydrateAllMissionsRealtime(listEl){
+  if (!listEl) return;
+  const cards = [...listEl.querySelectorAll("li.mission-card")];
+  if (!cards.length) return;
+
+  const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const N = 4;                                      // concurrency
+  let i = 0;
+
+  async function worker(){
+    while (i < cards.length){
+      const idx = i++;
+      const li  = cards[idx];
+      const addr = li.dataset.addr;
+      if (!addr) continue;
+
+      try {
+        const c = new ethers.Contract(addr, MISSION_ABI, provider);
+        const rt = Number(await c.getRealtimeStatus());
+        const pill = li.querySelector(".status-pill");
+        if (pill){
+          pill.textContent = statusText(rt);
+          pill.className   = `status-pill ${statusColorClass(rt)}`;
+        }
+      } catch (err) {
+        console.warn("realtime status failed:", addr, err?.message || err);
+      }
+    }
+  }
+
+  await Promise.all([...Array(Math.min(N, cards.length))].map(worker));
+}
+
 /* ---------- interactions ---------- */
 async function openMission(addr){
   try {
@@ -992,6 +1727,11 @@ async function init(){
       renderJoinable(joinable);
       startJoinableTicker();
     } catch(e){ console.error(e); }
+  });
+
+  els.refreshAllBtn?.addEventListener("click", async () => {
+    // stay on the same section; just refetch
+    await fetchAndRenderAllMissions();
   });
 
   // 3) close mission detail

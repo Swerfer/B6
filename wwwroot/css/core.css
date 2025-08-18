@@ -2,8 +2,8 @@
 :root{
   --header-h:       3.5rem;                       /* header height – adjust if you resize the header */
   --footer-h:       3.5rem;                       /* footer height – adjust if you resize the footer */
-  --mini-label-w:   5rem;                         /* mini label minimum width desktop */
-  --mini-label-w-m: 4rem;                         /* mini label minimum width mobile */
+  --mini-label-w:   6.5rem;                         /* mini label minimum width desktop */
+  --mini-label-w-m: 5.5rem;                         /* mini label minimum width mobile */
   --kv-label-w:     8.5rem;                       /* label width for 2 columns at mission details */
   --card-grid-gap:  1rem;                         /* gap between 2 cards in a mission list */
 
@@ -442,6 +442,7 @@ body::before {
 
 .mission-card .mini-row .label{
   flex: 0 0 var(--mini-label-w);  /* fixed label width desktop*/
+  margin-right: .25rem;
 }
 
 @media (max-width:768px){
@@ -452,6 +453,10 @@ body::before {
 
 .mission-card .mini-row .value{
   flex: 1 1 auto;                 /* value area expands, left-aligned */
+}
+
+.mission-card .mini-row .value .players-count { 
+  white-space:nowrap; 
 }
 
 /* top row: title on the left, rounds on the right */

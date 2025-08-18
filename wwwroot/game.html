@@ -76,6 +76,8 @@
                       stroke="url(#metalGrad)" stroke-width="12" stroke-linecap="butt"/>
             </g>
 
+            <!-- Upper HUD: Mission title and status. Everything is inside SVG so it scales with the image -->
+
             <!-- Stage title (SVG text so it scales with the image) -->
             <text id="stageTitleText"
                   x="499" y="220"                      
@@ -91,23 +93,92 @@
                   x="430" y="250" width="140"  
                   preserveAspectRatio="xMidYMid meet" />
             
-            <!-- Center countdown (place at 499,417 as requested) -->
+            <!-- Center countdown -->
             <text id="vaultTimerText"
                   x="499" y="417"
                   text-anchor="middle" dominant-baseline="middle"
-                  font-family="Arial Black, Impact, system-ui, sans-serif"
-                  font-size="17" fill="#fff"
-                  stroke="rgba(0,0,0,.45)" stroke-width="1.2" paint-order="stroke fill">
+                  font-family="Consolas, Courier New" font-weight="Bold"
+                  font-size="20" fill="#4AB8F9"
+                  stroke="rgba(0,0,0,.45)" stroke-width="2" paint-order="stroke fill">
             </text>
+
+            <!-- LOWER HUD (Pending): two rows of pills -->
+            <g id="stageLowerHud">
+
+              <!-- Row 1 -->
+              <g class="pillGroup" id="pillOpensAt" transform="translate(281,612)">
+                <rect rx="12" ry="12" width="214" height="36" fill="rgba(6,29,45,.7)" stroke="rgba(72,221,255,.35)"/>
+                <text x="10" y="22" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#7ad2ff">Opens At</text>
+                <text id="pillOpensAtVal" x="120" y="22" text-anchor="middle" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#fff">—</text>
+              </g>
+
+              <g class="pillGroup" id="pillMissionStart" transform="translate(505,612)">
+                <rect rx="12" ry="12" width="214" height="36" fill="rgba(6,29,45,.7)" stroke="rgba(72,221,255,.35)"/>
+                <text x="10" y="22" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#7ad2ff">Starts At</text>
+                <text id="pillMissionStartVal" x="120" y="22" text-anchor="middle" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#fff">—</text>
+              </g>
+
+              <!-- Row 2 -->
+              <g class="pillGroup" id="pillMissionDuration" transform="translate(281,662)">
+                <rect rx="12" ry="12" width="214" height="36" fill="rgba(6,29,45,.7)" stroke="rgba(72,221,255,.35)"/>
+                <text x="10" y="22" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#7ad2ff">Duration</text>
+                <text id="pillMissionDurationVal" x="120" y="22" text-anchor="middle" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#fff">—</text>
+              </g>
+
+              <g class="pillGroup" id="pillMissionFee" transform="translate(505,662)">
+                <rect rx="12" ry="12" width="214" height="36" fill="rgba(6,29,45,.7)" stroke="rgba(72,221,255,.35)"/>
+                <text x="10" y="22" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#7ad2ff">Mission Fee</text>
+                <text id="pillMissionFeeVal" x="120" y="22" text-anchor="middle" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#fff">—</text>
+              </g>
+
+              <!-- Row 3 -->
+              <g class="pillGroup" id="pillPoolStart" transform="translate(281,712)">
+                <rect rx="12" ry="12" width="214" height="36" fill="rgba(6,29,45,.7)" stroke="rgba(72,221,255,.35)"/>
+                <text x="10" y="22" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#7ad2ff">Pool (start)</text>
+                <text id="pillPoolStartVal" x="120" y="22" text-anchor="middle" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#fff">—</text>
+              </g>
+
+              <g class="pillGroup" id="pillPlayersCap" transform="translate(505,712)">
+                <rect rx="12" ry="12" width="214" height="36" fill="rgba(6,29,45,.7)" stroke="rgba(72,221,255,.35)"/>
+                <text x="10" y="22" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#7ad2ff">Players cap</text>
+                <text id="pillPlayersCapVal" x="120" y="22" text-anchor="middle" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#fff">—</text>
+              </g>
+
+              <!-- Row 4 -->
+              <g class="pillGroup" id="pillRounds" transform="translate(393,762)">
+                <rect rx="12" ry="12" width="214" height="36" fill="rgba(6,29,45,.7)" stroke="rgba(72,221,255,.35)"/>
+                <text x="10" y="22" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#7ad2ff">Rounds</text>
+                <text id="pillRoundsVal" x="120" y="22" text-anchor="middle" font-family="system-ui,Segoe UI,Arial" font-size="12" fill="#fff">—</text>
+              </g>
+
+            </g>
+            <!-- CTA mount (rendered by JS). Pointer events enabled via CSS only here. -->
+            <g id="stageCtaGroup"></g>
           </svg>
        </div>
       </section>
 
       <div class="row g-4 w-100">
 
+        <section id="allMissionsSection" class="col-12 section-box" style="display:none;">
+          <div class="d-flex justify-content-between align-items-center">
+            <h2 class="section-title m-0">
+              <i class="fa-solid fa-list me-2"></i>All Missions
+            </h2>
+            <div>
+              <button id="refreshAllBtn" class="btn btn-sm btn-outline-info">Refresh</button>
+              <div id="allFilters" class="d-flex gap-2"></div>
+            </div>
+          </div>
+          <ul id="allMissionsList" class="list-unstyled mt-3 mb-0"></ul>
+          <div id="allMissionsEmpty" class="text-muted mt-3" style="display:none;">No missions found.</div>
+        </section>
+
         <section id="joinableSection" class="col-12 section-box">
           <div class="d-flex justify-content-between align-items-center">
-            <h2 class="section-title m-0"><i class="fa-solid fa-user-plus me-2"></i>Joinable Missions</h2>
+            <h2 class="section-title m-0">
+              <i class="fa-solid fa-user-plus me-2"></i>Joinable Missions
+            </h2>
             <button id="refreshJoinableBtn" class="btn btn-sm btn-outline-info">Refresh</button>
           </div>
           <ul id="joinableList" class="list-unstyled mt-3 mb-0"></ul>
@@ -116,7 +187,9 @@
 
         <section id="myMissionsSection" class="col-12 section-box">
           <div class="d-flex justify-content-between align-items-center">
-            <h2 class="section-title m-0"><i class="fa-solid fa-id-card me-2"></i>My Missions</h2>
+            <h2 class="section-title m-0">
+              <i class="fa-solid fa-id-card me-2"></i>My Missions
+            </h2>
             <small class="text-muted">Auto-loads after wallet connects</small>
           </div>
           <ul id="myMissionsList" class="list-unstyled mt-3 mb-0"></ul>
@@ -148,19 +221,22 @@
 
     <footer class="app-footer">
         <div class="inner gap-2">
-            <button id="btnJoinable"   class="btn btn-sm btn-outline-info icon-nav" title="Joinable Missions">
+
+            <button id="btnAllMissions"   class="btn btn-sm btn-outline-info icon-nav" title="All Missions">
+              <i class="fa-solid fa-list"></i>
+            </button>
+            <button id="btnJoinable"      class="btn btn-sm btn-outline-info icon-nav" title="Joinable Missions">
               <i class="fa-solid fa-user-plus"></i>
             </button>
-            <button id="btnMyMissions" class="btn btn-sm btn-outline-info icon-nav" title="My Missions">
-              <i class="fa-solid fa-id-card"></i>
-            </button>
 
-            <button id="connectWalletBtn" class="btn btn-sm btn-outline-info me-2">
+            <button id="connectWalletBtn" class="btn btn-sm btn-outline-info">
                 <i class="fa-solid fa-wallet me-2"></i>
                 <span id="connectBtnText">Connect Wallet</span>
             </button>
 
-            <!-- Placeholder for the buttons on the right -->
+            <button id="btnMyMissions"    class="btn btn-sm btn-outline-info icon-nav" title="My Missions">
+              <i class="fa-solid fa-id-card"></i>
+            </button>
 
         </div>
     </footer>
