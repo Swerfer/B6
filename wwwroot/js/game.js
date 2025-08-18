@@ -836,46 +836,47 @@ console.log(mission);
   }
 }
 
+// ---- Image CTA for status 1 (Enrolling) ----
 async function renderStageCtaForStatus(mission){
   const host = document.getElementById("stageCtaGroup");
   if (!host) return;
   host.innerHTML = "";
 
   const st = Number(mission?.status);
-  if (st !== 1) return; // only show CTA in Enrolling (status 1)
+  if (st !== 1) return; // only show CTA in Enrolling
 
-  // --- Layout (center on vault; below pills) ---
-  const btnW = 240, btnH = 40;
-  const x = 500 - Math.round(btnW / 2); // center in 1000x1000 viewbox
-  const y = 560; 
+  // Layout (center under the vault)
+  const btnW = 213, btnH = 50;                          // from assets
+  const txtW = 158, txtH = 23;                          // from assets
+  const x = 500 - Math.round(btnW / 2);                 // center in 1000x1000 viewBox
+  const y = 540;                                        // sits above your pill row
 
   // --- Gating (wallet, window, already enrolled, spots, optional canEnroll) ---
   const now   = Math.floor(Date.now()/1000);
   const inWin = now < Number(mission.enrollment_end || 0);
-  const me    = (walletAddress || "").toLowerCase();
 
-  let already = false;
-  let hasSpots = true;
-  let canEnrollSoft = true;
+  const me = (walletAddress || "").toLowerCase();
+  let already = false, hasSpots = true, canEnrollSoft = true;
 
   try {
     const ro = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
     const mc = new ethers.Contract(mission.mission_address, MISSION_ABI, ro);
     const md = await mc.getMissionData();
-    // ethers struct can be tuple[0] or named – cover both
     const tuple = md?.[0] || md;
     const players = (tuple?.players || []).map(a => String(a).toLowerCase());
+
     already = !!(me && players.includes(me));
 
-    const maxP = Number(mission.enrollment_max_players || 0);
+    const maxP = Number(mission.enrollment_max_players ?? 0);
     hasSpots = maxP ? (players.length < maxP) : true;
 
-    // optional factory soft gate
     if (me && FACTORY_ADDRESS) {
       const fac = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, ro);
       canEnrollSoft = await fac.canEnroll(me);
     }
-  } catch { /* on any read error, keep permissive defaults above */ }
+  } catch {
+    // leave permissive defaults
+  }
 
   let disabled = false, note = "";
   if (!walletAddress) { disabled = true; note = "Connect your wallet to join"; }
@@ -884,37 +885,46 @@ async function renderStageCtaForStatus(mission){
   else if (!hasSpots) { disabled = true; note = "No spots left"; }
   else if (!canEnrollSoft) { disabled = true; note = "Weekly/monthly limit reached"; }
 
-  // --- Draw button ---
   const SVG_NS = "http://www.w3.org/2000/svg";
+
+  // Button group
   const g = document.createElementNS(SVG_NS, "g");
-  g.setAttribute("class", "svg-cta-btn" + (disabled ? " disabled" : ""));
+  g.setAttribute("class", "cta-btn" + (disabled ? " cta-disabled" : ""));
   g.setAttribute("transform", `translate(${x},${y})`);
 
-  const rect = document.createElementNS(SVG_NS, "rect");
-  rect.setAttribute("width", String(btnW));
-  rect.setAttribute("height", String(btnH));
-  g.appendChild(rect);
+  // Background PNG
+  const bg = document.createElementNS(SVG_NS, "image");
+  bg.setAttribute("width", String(btnW));
+  bg.setAttribute("height", String(btnH));
+  bg.setAttribute("href", "assets/images/buttons/Button extra wide.png");
+  bg.setAttributeNS("http://www.w3.org/1999/xlink", "href", "assets/images/buttons/Button extra wide.png");
+  g.appendChild(bg);
 
-  const label = document.createElementNS(SVG_NS, "text");
-  label.setAttribute("x", String(Math.round(btnW/2)));
-  label.setAttribute("y", "25");
-  label.setAttribute("text-anchor", "middle");
-  label.setAttribute("class", "svg-cta-label");
-  label.textContent = "JOIN MISSION";
-  g.appendChild(label);
+  // Text PNG (centered inside)
+  const tx = document.createElementNS(SVG_NS, "image");
+  const txtX = x + Math.round((btnW - txtW)/2);
+  const txtY = y + Math.round((btnH - txtH)/2) - 1;
+  tx.setAttribute("x", String(txtX - x));
+  tx.setAttribute("y", String(txtY - y));
+  tx.setAttribute("width", String(txtW));
+  tx.setAttribute("height", String(txtH));
+  tx.setAttribute("href", "assets/images/buttons/Join Mission text.png");
+  tx.setAttributeNS("http://www.w3.org/1999/xlink", "href", "assets/images/buttons/Join Mission text.png");
+  g.appendChild(tx);
 
+  // Note below the button (re-usable for disabled and loading)
   if (note) {
     const n = document.createElementNS(SVG_NS, "text");
-    n.setAttribute("x", "500"); // absolute center
+    n.setAttribute("id", "stageCtaNote");
+    n.setAttribute("x", "500");                       // absolute center
     n.setAttribute("y", String(y + btnH + 18));
     n.setAttribute("text-anchor", "middle");
-    n.setAttribute("class", "svg-cta-note");
+    n.setAttribute("class", "cta-note");
     n.textContent = note;
     host.appendChild(n);
   }
 
   if (!disabled) {
-    g.style.cursor = "pointer";
     g.addEventListener("click", () => handleEnrollClick(mission));
   }
 
@@ -922,32 +932,34 @@ async function renderStageCtaForStatus(mission){
 }
 
 async function handleEnrollClick(mission){
-  const me = getSigner?.();
-  if (!me) { showAlert("Connect your wallet first.", "error"); return; }
+  const signer = getSigner?.();
+  if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
 
   try {
-    // optimistic UI: freeze CTA
-    const btn = document.querySelector("#stageCtaGroup .svg-cta-btn");
-    const lbl = btn?.querySelector(".svg-cta-label");
-    if (btn) btn.classList.add("disabled");
-    if (lbl) lbl.textContent = "Joining…";
+    // freeze UI
+    const btn = document.querySelector("#stageCtaGroup .cta-btn");
+    const note = document.getElementById("stageCtaNote");
+    if (btn) btn.classList.add("cta-disabled");
+    if (note) note.textContent = "Joining…";
 
-    const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, me);
+    const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
     const val = mission.enrollment_amount_wei ?? "0";
     const tx  = await c.enrollPlayer({ value: val });
     await tx.wait();
 
     showAlert("You joined the mission!", "success");
 
-    // Re-evaluate the open stage (pills, ring, CTA) without page reload
+    // Refresh everything on the open stage
     await refreshOpenStageFromServer(2);
   } catch (err) {
     showAlert(`Join failed: ${decodeError(err)}`, "error");
   } finally {
-    // Always re-render CTA state (handles success/failed)
-    const data = await apiMission(mission.mission_address).catch(()=>null);
-    const m2 = data?.mission || mission;
-    await renderStageCtaForStatus(m2);
+    // Always re-evaluate CTA state (success/failure)
+    try {
+      const data = await apiMission(mission.mission_address);
+      const m2 = data?.mission || mission;
+      await renderStageCtaForStatus(m2);
+    } catch { /* ignore */ }
   }
 }
 

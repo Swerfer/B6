@@ -109,6 +109,24 @@ body.scroll-lock{
 /* === Stage CTA (clickable inside otherwise non-interactive overlay) === */
 #stageCtaGroup { pointer-events: auto; }
 
+/* === Stage CTA (clickable inside otherwise non-interactive overlay) === */
+#stageCtaGroup { pointer-events: auto; }
+
+#stageCtaGroup .cta-btn { cursor: pointer; }
+#stageCtaGroup .cta-btn.cta-disabled { 
+  opacity: .45; 
+  filter: grayscale(40%); 
+  cursor: default; 
+}
+
+#stageCtaGroup .cta-note {
+  font-family: system-ui, Segoe UI, Arial, sans-serif;
+  font-size: 12px;
+  fill: #9fd0ff;
+  pointer-events: none;
+}
+
+/*
 .svg-cta-btn rect {
   fill: rgba(0, 192, 240, 0.95);
   stroke: rgba(255, 255, 255, 0.25);
@@ -130,5 +148,5 @@ body.scroll-lock{
   font-size: 12px;
   fill: #9fd0ff;
   pointer-events: none;
-}
+}*/
 
