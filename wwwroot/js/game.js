@@ -29,6 +29,13 @@ import {
   decodeError, 
 } from "./core.js";
 
+const DEV_SIMULATE_ACTIVE_BANNER = true;
+
+const STATUS_BANNERS = {
+  base: "assets/images/statuses/",
+  missionTime: "Mission time.png",  // <-- your uploaded file
+};
+
 // ─────────────────────────────────────────────
 // Mission custom errors (from Mission.sol)
 // ─────────────────────────────────────────────
@@ -260,14 +267,33 @@ function setStageStatusImage(slug){
   stageStatusImgSvg.setAttribute("href", `assets/images/statuses/${slug}.png`);
 }
 
+function setStageStatusBannerForMission(mission){
+  if (!stageStatusImgSvg || !mission) return;
+
+  // If a slug string sneaks in, just use it directly.
+  if (typeof mission === "string") {
+    setStageStatusImage(mission);
+    return;
+  }
+
+  const st = Number(mission.status);
+
+  if (DEV_SIMULATE_ACTIVE_BANNER && st === 1) {
+    stageStatusImgSvg.setAttribute("href", STATUS_BANNERS.base + STATUS_BANNERS.missionTime);
+    return;
+  }
+
+  setStageStatusImage(statusSlug(st));
+}
+
 // ---- center timer (short form) ----
 function stopStageTimer(){ if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } }
 
 function formatStageShort(leftSec){
   const s = Math.max(0, Math.floor(leftSec));
-  if (s > 36*3600) return Math.ceil(s/86400) + "D";   // > 36h → days
-  if (s > 90*60)   return Math.ceil(s/3600)  + "H";   // > 90m → hours
-  if (s > 90)      return Math.ceil(s/60)    + "M";   // > 90s  → minutes
+  if (s > 36*3600) return Math.round(s/86400) + "D";   // > 36h → days
+  if (s > 90*60)   return Math.round(s/3600)  + "H";   // > 90m → hours
+  if (s > 90)      return Math.round(s/60)    + "M";   // > 90s  → minutes
   return s + "S";                                      // ≤ 90s → seconds
 }
 
@@ -323,7 +349,7 @@ function startStageTimer(endTs, phaseStartTs = 0, missionObj){
     node.textContent = formatStageShort(left);
 
     // NEW: tick lower-HUD countdown pills (full d hh:mm:ss)
-    document.querySelectorAll('#stageLowerHud [data-countdown]').forEach(el => {
+    document.querySelectorAll('#stageLowerHud [data-countdown], #stageCtaGroup [data-countdown]').forEach(el => {
       const ts = Number(el.getAttribute('data-countdown') || 0);
       el.textContent = ts ? formatCountdown(ts) : "—";
     });
@@ -346,7 +372,7 @@ function startStageTimer(endTs, phaseStartTs = 0, missionObj){
           const next = statusByClock(missionObj, now);
           if (typeof next === "number" && next !== Number(missionObj.status)) {
             const m2 = { ...missionObj, status: next };
-            setStageStatusImage(statusSlug(next));
+            setStageStatusBannerForMission(m2);
             buildStageLowerHudForStatus(m2);
             bindRingToMission(m2);
             bindCenterTimerToMission(m2);
@@ -547,7 +573,7 @@ async function startHub() { // SignalR HUB
             if (gameMain && gameMain.classList.contains('stage-mode')) {
               if (Number(m.status) === stageCurrentStatus) return;
               // Rebuild the open stage
-              setStageStatusImage(statusSlug(m.status));
+              setStageStatusBannerForMission(m);
               buildStageLowerHudForStatus(m);
               bindRingToMission(m);
               bindCenterTimerToMission(m);
@@ -713,7 +739,7 @@ async function refreshOpenStageFromServer(retries = 3) {
     // If status changed, or just to be safe, rebuild the stage pieces
     const newStatus = Number(m.status);
     if (newStatus !== stageCurrentStatus) {
-      setStageStatusImage(statusSlug(newStatus));                 // image under title
+      setStageStatusBannerForMission(m);              // image under title
       buildStageLowerHudForStatus(m);                             // pills for this status
       bindRingToMission(m);                                       // ring window for this status
       bindCenterTimerToMission(m);                                // center countdown for this status
@@ -760,6 +786,43 @@ const stageTitleText      = document.getElementById("stageTitleText"    );
 const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg" );
 // #endregion
 
+function showGameStage(mission){
+  document.getElementById('gameMain').classList.add('stage-mode');
+  showOnlySection("gameStage");
+
+  // Set title text (SVG)
+  if (stageTitleText){
+    const title = mission?.name || mission?.mission_address || "";
+    stageTitleText.textContent = title;
+  }
+
+  // Load status image (SVG) and size it
+  setStageStatusBannerForMission(mission);
+
+  stageCurrentStatus = Number(mission?.status ?? -1);
+
+  // Scale image + overlay, then place everything from the vault center
+  layoutStage();
+  
+  // Build lower HUD pills for THIS status & fill values
+  buildStageLowerHudForStatus(mission);
+
+  bindRingToMission(mission);
+
+  // Center timer bound to this mission's next deadline
+  bindCenterTimerToMission(mission);
+
+  // CTA (status 1 → JOIN MISSION)
+  renderStageCtaForStatus(mission);
+}
+
+// Use "Active" HUD when simulating during Enrolling
+function hudStatusFor(mission){
+  const st = Number(mission?.status ?? -1);
+  return (DEV_SIMULATE_ACTIVE_BANNER && st === 1) ? 3 : st;
+}
+
+window.addEventListener("resize", layoutStage);
 
 const IMG_W = 2048, IMG_H = 2048;
 const visibleRectangle  = { x:566, y:420, w:914, h:1238 }; // visibleRectangle was the rectangle from the phone header to footer space and phone 
@@ -819,10 +882,8 @@ const PILL_LIBRARY = {
   playersCap:     { label: "Players cap",      value: m => (m?.enrollment_max_players ?? "—") },
   players:        { label: "Players",          value: m => Number(m?.enrolled_players ?? 0) },      
   rounds:         { label: "Rounds",           value: m => Number(m?.mission_rounds_total ?? 0) },
-  roundsOf:       { label: "RoundsOff",        value: m => `${Number(m?.round_count ?? 0)}/${Number(m?.mission_rounds_total ?? 0)}` },
+  roundsOff:      { label: "RoundsOff",        value: m => `${Number(m?.round_count ?? 0)}/${Number(m?.mission_rounds_total ?? 0)}` },
   playersAllStats:{ label: "Players",          value: m => `${m?.enrollment_min_players ?? "—"}/${m?.enrolled_players ?? 0}/${m?.enrollment_max_players ?? "—"}`},
-
-  // Countdown pills (short format like the center timer)
   closesIn:       { label: "Closes In",        countdown: m => Number(m?.enrollment_end  || 0) },
   startsIn:       { label: "Starts In",        countdown: m => Number(m?.mission_start   || 0) },
   endsIn:         { label: "Ends In",          countdown: m => Number(m?.mission_end     || 0) },
@@ -844,8 +905,7 @@ function buildStageLowerHudForStatus(mission){
   if (!host) return;
   while (host.firstChild) host.removeChild(host.firstChild);
 
-  const keys = PILL_SETS[Number(mission?.status)] ?? PILL_SETS.default;
-console.log(mission);
+  const keys = PILL_SETS[hudStatusFor(mission)] ?? PILL_SETS.default;
   // layout helpers
   const { rectW, rectH, gapX, gapY, xCenter, yFirst, rx, ry,
           pillFill, pillStroke, labelFill, valueFill, font,
@@ -944,22 +1004,80 @@ console.log(mission);
   }
 }
 
-// ---- Image CTA for status 1 (Enrolling) ----
-async function renderStageCtaForStatus(mission){
+function svgImage(href, x, y, w, h){
+  const el = document.createElementNS(SVG_NS, "image");
+  if (x != null) el.setAttribute("x", String(x));
+  if (y != null) el.setAttribute("y", String(y));
+  el.setAttribute("width",  String(w));
+  el.setAttribute("height", String(h));
+  el.setAttribute("href", href);
+  el.setAttributeNS("http://www.w3.org/1999/xlink", "href", href);
+  return el;
+}
+
+// Use "Active" (3) when simulating during Enrolling (1)
+function uiStatusFor(mission){
+  const st = Number(mission?.status ?? -1);
+  return (DEV_SIMULATE_ACTIVE_BANNER && st === 1) ? 3 : st;
+}
+
+// ── CTA assets & layout (single source of truth) ─────────────────────────
+const CTA_LAYOUT = {
+  xCenter: 500,       // viewBox center
+  topY:    550,       // same top Y for all CTAs (matches Join)
+};
+
+// JOIN (status 1)
+const CTA_JOIN = {
+  bg:    "assets/images/buttons/Button extra wide.png",
+  text:  "assets/images/buttons/Join Mission text.png",
+  btnW:  213, btnH: 50,
+  txtW:  158, txtH: 23,
+  txtDy: -1,           // vertical nudge (shadow compensation)
+};
+
+// ARMING (status 2) — disabled 2-line button: ENROLLMENT / CLOSED
+const CTA_ARMING = {
+  bg:     "assets/images/buttons/Button 2 lines wide.png",// ← replace with 2-line bg if you have one
+  line1:  "assets/images/buttons/Enrollment text.png",    // ← set to your uploaded filename
+  line2:  "assets/images/buttons/Closed text.png",        // ← set to your uploaded filename
+  btnW:   213, btnH: 50,
+  l1W:    120, l1H: 12,     // ← update to your actual text image sizes
+  l2W:    90,  l2H: 12,     // ← update to your actual text image sizes
+  gap:    4,                // vertical gap between lines
+};
+
+// ACTIVE (status 3) — BANK IT!
+const CTA_ACTIVE = {
+  bg:   "assets/images/buttons/Button extra wide.png",  // provided
+  text: "assets/images/buttons/Bank it text.png", // provided
+  btnW: 213, btnH: 50,     // consistent with other CTAs; PNG scales down nicely
+  txtW: 160, txtH: 30,     // tweak if you want tighter fit
+  txtDy: -1,
+};
+
+async function  renderStageCtaForStatus(mission){
   const host = document.getElementById("stageCtaGroup");
   if (!host) return;
   host.innerHTML = "";
 
-  const st = Number(mission?.status);
-  if (st !== 1) return; // only show CTA in Enrolling
+  const st = uiStatusFor(mission);
+  if (st === 1) return renderCtaEnrolling(host, mission); // JOIN
+  if (st === 2) return renderCtaArming(host, mission);    // ENROLLMENT / CLOSED (disabled)
+  if (st === 3) return renderCtaActive(host, mission);    // Active → BANK IT!
 
-  // Layout (center under the vault)
-  const btnW = 213, btnH = 50;                          // from assets
-  const txtW = 158, txtH = 23;                          // from assets
-  const x = 500 - Math.round(btnW / 2);                 // center in 1000x1000 viewBox
-  const y = 550;                                        // sits above your pill row
+  // no CTA for other statuses (4,5,6,7) for now
+}
 
-  // --- Gating (wallet, window, already enrolled, spots, optional canEnroll) ---
+async function  renderCtaEnrolling(host, mission){
+  const { xCenter, topY } = CTA_LAYOUT;
+  const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_JOIN;
+
+  // center under vault
+  const x = xCenter - Math.round(btnW / 2);
+  const y = topY;
+
+  // Gating (wallet, window, already, spots, optional canEnroll)
   const now   = Math.floor(Date.now()/1000);
   const inWin = now < Number(mission.enrollment_end || 0);
 
@@ -982,9 +1100,7 @@ async function renderStageCtaForStatus(mission){
       const fac = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, ro);
       canEnrollSoft = await fac.canEnroll(me);
     }
-  } catch {
-    // leave permissive defaults
-  }
+  } catch { /* leave permissive defaults */ }
 
   let disabled = false, note = "";
   if (!walletAddress) { disabled = true; note = "Connect your wallet to join"; }
@@ -994,38 +1110,25 @@ async function renderStageCtaForStatus(mission){
   else if (!canEnrollSoft) { disabled = true; note = "Weekly/monthly limit reached"; }
   if (ctaBusy) { disabled = true; note = "Joining…"; }
 
-  const SVG_NS = "http://www.w3.org/2000/svg";
   const g = document.createElementNS(SVG_NS, "g");
   g.setAttribute("class", "cta-btn" + (disabled ? " cta-disabled" : ""));
   g.setAttribute("transform", `translate(${x},${y})`);
-  g.setAttribute("role", "button");      // minor a11y
+  g.setAttribute("role", "button");
   g.setAttribute("tabindex", disabled ? "-1" : "0");
 
-  // Background PNG
-  const bg = document.createElementNS(SVG_NS, "image");
-  bg.setAttribute("width", String(btnW));
-  bg.setAttribute("height", String(btnH));
-  bg.setAttribute("href", "assets/images/buttons/Button extra wide.png");
-  bg.setAttributeNS("http://www.w3.org/1999/xlink", "href", "assets/images/buttons/Button extra wide.png");
-  g.appendChild(bg);
+  // bg + text
+  g.appendChild(svgImage(bg, null, null, btnW, btnH));
 
-  // Text PNG (centered inside)
-  const tx = document.createElementNS(SVG_NS, "image");
-  const txtX = x + Math.round((btnW - txtW)/2);
-  const txtY = y + Math.round((btnH - txtH)/2) - 1;
-  tx.setAttribute("x", String(txtX - x));
-  tx.setAttribute("y", String(txtY - y));
-  tx.setAttribute("width", String(txtW));
-  tx.setAttribute("height", String(txtH));
-  tx.setAttribute("href", "assets/images/buttons/Join Mission text.png");
-  tx.setAttributeNS("http://www.w3.org/1999/xlink", "href", "assets/images/buttons/Join Mission text.png");
+  const txtX = x + Math.round((btnW - txtW) / 2);
+  const txtY = y + Math.round((btnH - txtH) / 2) + (txtDy || 0);
+  const tx = svgImage(text, txtX - x, txtY - y, txtW, txtH);
   g.appendChild(tx);
 
-  // Note below the button (re-usable for disabled and loading)
+  // note
   if (note) {
     const n = document.createElementNS(SVG_NS, "text");
     n.setAttribute("id", "stageCtaNote");
-    n.setAttribute("x", "500");                       // absolute center
+    n.setAttribute("x", String(xCenter));
     n.setAttribute("y", String(y + btnH + 18));
     n.setAttribute("text-anchor", "middle");
     n.setAttribute("class", "cta-note");
@@ -1034,23 +1137,132 @@ async function renderStageCtaForStatus(mission){
   }
 
   if (!disabled) {
-    // click
     g.addEventListener("click", () => handleEnrollClick(mission));
-    // NEW: press feedback (1px down)
     g.addEventListener("mousedown", () => g.setAttribute("transform", `translate(${x},${y+1})`));
     const reset = () => g.setAttribute("transform", `translate(${x},${y})`);
     g.addEventListener("mouseup", reset);
     g.addEventListener("mouseleave", reset);
-    // keyboard
     g.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleEnrollClick(mission); }
     });
   }
 
   host.appendChild(g);
+} 
+
+function        renderCtaArming(host, mission){
+  const { xCenter, topY } = CTA_LAYOUT;
+  const { bg, line1, line2, btnW, btnH, l1W, l1H, l2W, l2H, gap } = CTA_ARMING;
+
+  const x = xCenter - Math.round(btnW / 2);
+  const y = topY;
+
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "cta-btn cta-disabled");
+  g.setAttribute("transform", `translate(${x},${y})`);
+
+  // bg
+  g.appendChild(svgImage(bg, null, null, btnW, btnH));
+
+  // two centered lines
+  const blockH = l1H + (gap || 0) + l2H;
+  const topPad = Math.max(0, Math.round((btnH - blockH) / 2));
+
+  const l1x = x + Math.round((btnW - l1W) / 2);
+  const l1y = y + topPad;
+  g.appendChild(svgImage(line1, l1x - x, l1y - y, l1W, l1H));
+
+  const l2x = x + Math.round((btnW - l2W) / 2);
+  const l2y = l1y + l1H + (gap || 0);
+  g.appendChild(svgImage(line2, l2x - x, l2y - y, l2W, l2H));
+
+  host.appendChild(g);
+
+  // One-line: "Starts in 00:12:34"
+  const line = document.createElementNS(SVG_NS, "text");
+  line.setAttribute("x", String(xCenter));
+  line.setAttribute("y", String(y + btnH + 20));   // tweak this if you want it higher/lower
+  line.setAttribute("text-anchor", "middle");
+  line.setAttribute("class", "cta-note");
+
+  // static label
+  const tLabel = document.createElementNS(SVG_NS, "tspan");
+  tLabel.textContent = "Starts in ";
+
+  // dynamic value
+  const tVal = document.createElementNS(SVG_NS, "tspan");
+  const startTs = Number(mission?.mission_start || 0);
+  if (startTs > 0) {
+    tVal.setAttribute("data-countdown", String(startTs));
+    tVal.textContent = formatCountdown(startTs);
+  } else {
+    tVal.textContent = "—";
+  }
+
+  tVal.style.fontWeight = "700";
+
+  line.appendChild(tLabel);
+  line.appendChild(tVal);
+  host.appendChild(line);
 }
 
-async function handleEnrollClick(mission){
+function        renderCtaActive(host, mission){
+  const { xCenter, topY } = CTA_LAYOUT;
+  const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_ACTIVE;
+
+  const x = xCenter - Math.round(btnW / 2);
+  const y = topY;
+
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "cta-btn");
+  g.setAttribute("transform", `translate(${x},${y})`);
+  g.setAttribute("role", "button");
+  g.setAttribute("tabindex", "0");
+
+  // button background + text
+  g.appendChild(svgImage(bg, null, null, btnW, btnH));
+  const txtX = x + Math.round((btnW - txtW) / 2);
+  const txtY = y + Math.round((btnH - txtH) / 2) + (txtDy || 0);
+  g.appendChild(svgImage(text, txtX - x, txtY - y, txtW, txtH));
+
+  // click → wallet popup (you can cancel)
+  g.addEventListener("click", () => handleBankItClick(mission));
+  g.addEventListener("mousedown", () => g.setAttribute("transform", `translate(${x},${y+1})`));
+  const reset = () => g.setAttribute("transform", `translate(${x},${y})`);
+  g.addEventListener("mouseup", reset);
+  g.addEventListener("mouseleave", reset);
+  g.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleBankItClick(mission); }
+  });
+
+  host.appendChild(g);
+
+  // One-line: "Ends in 00:12:34"
+  const line = document.createElementNS(SVG_NS, "text");
+  line.setAttribute("x", String(xCenter));
+  line.setAttribute("y", String(y + btnH + 20));
+  line.setAttribute("text-anchor", "middle");
+  line.setAttribute("class", "cta-note");
+
+  const tLabel = document.createElementNS(SVG_NS, "tspan");
+  tLabel.textContent = "Ends in ";
+
+  const tVal = document.createElementNS(SVG_NS, "tspan");
+  const endTs = Number(mission?.mission_end || 0);
+  if (endTs > 0) {
+    tVal.setAttribute("data-countdown", String(endTs));
+    tVal.textContent = formatCountdown(endTs);
+  } else {
+    tVal.textContent = "—";
+  }
+  tVal.style.fontWeight = "700";
+
+  line.appendChild(tLabel);
+  line.appendChild(tVal);
+  host.appendChild(line);
+}
+
+async function  handleEnrollClick(mission){
   const signer = getSigner?.();
   if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
 
@@ -1096,7 +1308,30 @@ async function handleEnrollClick(mission){
 
 }
 
-async function refreshStageCtaIfOpen(){
+async function  handleBankItClick(mission){
+  const signer = getSigner?.();
+  if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
+
+  try {
+    const c = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
+    // No callStatic probe here → we want the wallet popup immediately
+    const tx = await c.callRound();
+    await tx.wait();
+
+    showAlert("Round called. Good luck!", "success");
+    await refreshOpenStageFromServer(2);
+  } catch (err) {
+    if (err?.code === 4001 || err?.code === "ACTION_REJECTED") {
+      showAlert("Banking canceled.", "warning");
+    } else {
+      const custom = missionCustomErrorMessage(err);
+      const msg = custom || `Bank it failed: ${decodeError(err)}`;
+      showAlert(msg, custom ? "warning" : "error");
+    }
+  }
+}
+
+async function  refreshStageCtaIfOpen(){
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
   if (!currentMissionAddr) return;
@@ -1107,37 +1342,6 @@ async function refreshStageCtaIfOpen(){
   } catch {}
 }
 
-function showGameStage(mission){
-  document.getElementById('gameMain').classList.add('stage-mode');
-  showOnlySection("gameStage");
-
-  // Set title text (SVG)
-  if (stageTitleText){
-    const title = mission?.name || mission?.mission_address || "";
-    stageTitleText.textContent = title;
-  }
-
-  // Load status image (SVG) and size it
-  setStageStatusImage(statusSlug(mission?.status));
-
-  stageCurrentStatus = Number(mission?.status ?? -1);
-
-  // Scale image + overlay, then place everything from the vault center
-  layoutStage();
-  
-  // Build lower HUD pills for THIS status & fill values
-  buildStageLowerHudForStatus(mission);
-
-  bindRingToMission(mission);
-
-  // Center timer bound to this mission's next deadline
-  bindCenterTimerToMission(mission);
-
-  // CTA (status 1 → JOIN MISSION)
-  renderStageCtaForStatus(mission);
-}
-
-window.addEventListener("resize", layoutStage);
 // click handlers
 btnAllMissions?.addEventListener("click", async () => {
   await cleanupMissionDetail();

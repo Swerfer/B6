@@ -85,7 +85,7 @@ body.scroll-lock{
   max-width: 92vw;             /* avoid overflow on small screens */
   padding: .35rem .75rem;
   color: var(--white);
-  font: 700 2rem/1.2 "Arial Black", Impact, sans-serif;
+  font: 700 1.7rem/1.2 "Arial Black", Impact, sans-serif;
   letter-spacing:.5px;
   white-space: nowrap;
   overflow: hidden;
