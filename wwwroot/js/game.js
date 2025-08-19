@@ -29,7 +29,111 @@ import {
   decodeError, 
 } from "./core.js";
 
-/* ---------- button ---------- */
+// ─────────────────────────────────────────────
+// Mission custom errors (from Mission.sol)
+// ─────────────────────────────────────────────
+const MISSION_ERROR_ABI = [
+  "error EnrollmentNotStarted(uint256 nowTs, uint256 startTs)",
+  "error EnrollmentClosed(uint256 nowTs, uint256 endTs)",
+  "error MaxPlayers(uint8 maxPlayers)",
+  "error WrongEntryFee(uint256 expected, uint256 sent)",
+  "error AlreadyJoined()",
+  "error WeeklyLimit(uint256 secondsLeft)",
+  "error MonthlyLimit(uint256 secondsLeft)",
+  "error Cooldown(uint256 secondsLeft)",
+  "error NotActive(uint256 nowTs, uint256 missionStart)",
+  "error MissionEnded()",
+  "error AlreadyWon()",
+  "error NotJoined()",
+  "error AllRoundsDone()",
+  "error PayoutFailed(address winner, uint256 amount, bytes data)",
+  "error ContractsNotAllowed()",
+];
+
+const __missionErrIface = new ethers.utils.Interface(MISSION_ERROR_ABI);
+
+// map error names → friendly text (some include decoded args)
+function missionErrorToText(name, args = []) {
+  switch (name) {
+    case "EnrollmentNotStarted": {
+      const [nowTs, startTs] = args.map(a => Number(a));
+      const secs = Math.max(0, startTs - nowTs);
+      return `Enrollment hasn’t started yet (${formatDurationShort(secs)} to go).`;
+    }
+    case "EnrollmentClosed":
+      return "Enrollment is closed.";
+    case "MaxPlayers": {
+      const [max] = args;
+      return `Maximum number of players reached (${max}).`;
+    }
+    case "WrongEntryFee": {
+      const [expected, sent] = args;
+      return `Incorrect entry fee. Expected ${weiToCro(String(expected))} CRO, sent ${weiToCro(String(sent))} CRO.`;
+    }
+    case "AlreadyJoined":
+      return "You already joined this mission.";
+    case "WeeklyLimit": {
+      const [secsLeft] = args.map(a => Number(a));
+      return `Weekly limit reached. Try again in ${formatDurationShort(secsLeft)}.`;
+    }
+    case "MonthlyLimit": {
+      const [secsLeft] = args.map(a => Number(a));
+      return `Monthly limit reached. Try again in ${formatDurationShort(secsLeft)}.`;
+    }
+    case "Cooldown": {
+      const [secsLeft] = args.map(a => Number(a));
+      return `Cooldown active. Try again in ${formatDurationShort(secsLeft)}.`;
+    }
+    case "NotActive":
+      return "Mission is not active yet.";
+    case "MissionEnded":
+      return "Mission has already ended.";
+    case "AlreadyWon":
+      return "You already won in a previous round.";
+    case "NotJoined":
+      return "You haven’t joined this mission.";
+    case "AllRoundsDone":
+      return "All rounds have been completed.";
+    case "PayoutFailed": {
+      const [winner, amount] = args;
+      return `Payout failed (${weiToCro(String(amount))} CRO to ${winner}).`;
+    }
+    case "ContractsNotAllowed":
+      return "Contracts are not allowed to join this mission.";
+    default:
+      return null;
+  }
+}
+
+// extract revert data from common provider error shapes
+function __revertHex(err) {
+  return (
+    err?.error?.data ||
+    err?.data?.originalError?.data ||
+    err?.data ||
+    null
+  );
+}
+
+// decode a Mission custom error if present; otherwise return null
+function missionCustomErrorMessage(err) {
+  const hex = __revertHex(err);
+  if (!hex || typeof hex !== "string" || !hex.startsWith("0x")) return null;
+
+  // let generic decoder handle Error(string)
+  if (hex.startsWith("0x08c379a0")) return null;
+
+  try {
+    const parsed = __missionErrIface.parseError(hex);
+    const name   = parsed?.name;
+    const args   = parsed?.args ? Array.from(parsed.args) : [];
+    return missionErrorToText(name, args) || `Contract error: ${name}`;
+  } catch {
+    return null;
+  }
+}
+
+// #region Variables
 const connectBtn          = document.getElementById("connectWalletBtn");
 const sectionBoxes        = document.querySelectorAll(".section-box");
 
@@ -47,6 +151,8 @@ let   stageTicker           = null;
 const GAP_DEG               = 10;      // hinge gap in degrees
 let   START_OFFSET          = 126;  // fine start offset along the path (px)
 let   stageCurrentStatus    = null;
+let   ctaBusy               = false;
+// #endregion
 
 connectBtn.addEventListener("click", () => {
   if (walletAddress){
@@ -642,6 +748,7 @@ const els = {
 
 };
 
+// #region dom elements
 const btnAllMissions      = document.getElementById("btnAllMissions"    );
 const btnJoinable         = document.getElementById("btnJoinable"       );
 const btnMyMissions       = document.getElementById("btnMyMissions"     );
@@ -651,6 +758,7 @@ const stageImg            = document.getElementById("stageImg"          );
 const ringOverlay         = document.getElementById("ringOverlay"       );
 const stageTitleText      = document.getElementById("stageTitleText"    );    
 const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg" );
+// #endregion
 
 
 const IMG_W = 2048, IMG_H = 2048;
@@ -849,7 +957,7 @@ async function renderStageCtaForStatus(mission){
   const btnW = 213, btnH = 50;                          // from assets
   const txtW = 158, txtH = 23;                          // from assets
   const x = 500 - Math.round(btnW / 2);                 // center in 1000x1000 viewBox
-  const y = 540;                                        // sits above your pill row
+  const y = 550;                                        // sits above your pill row
 
   // --- Gating (wallet, window, already enrolled, spots, optional canEnroll) ---
   const now   = Math.floor(Date.now()/1000);
@@ -884,13 +992,14 @@ async function renderStageCtaForStatus(mission){
   else if (already)   { disabled = true; note = "You already joined"; }
   else if (!hasSpots) { disabled = true; note = "No spots left"; }
   else if (!canEnrollSoft) { disabled = true; note = "Weekly/monthly limit reached"; }
+  if (ctaBusy) { disabled = true; note = "Joining…"; }
 
   const SVG_NS = "http://www.w3.org/2000/svg";
-
-  // Button group
   const g = document.createElementNS(SVG_NS, "g");
   g.setAttribute("class", "cta-btn" + (disabled ? " cta-disabled" : ""));
   g.setAttribute("transform", `translate(${x},${y})`);
+  g.setAttribute("role", "button");      // minor a11y
+  g.setAttribute("tabindex", disabled ? "-1" : "0");
 
   // Background PNG
   const bg = document.createElementNS(SVG_NS, "image");
@@ -925,7 +1034,17 @@ async function renderStageCtaForStatus(mission){
   }
 
   if (!disabled) {
+    // click
     g.addEventListener("click", () => handleEnrollClick(mission));
+    // NEW: press feedback (1px down)
+    g.addEventListener("mousedown", () => g.setAttribute("transform", `translate(${x},${y+1})`));
+    const reset = () => g.setAttribute("transform", `translate(${x},${y})`);
+    g.addEventListener("mouseup", reset);
+    g.addEventListener("mouseleave", reset);
+    // keyboard
+    g.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleEnrollClick(mission); }
+    });
   }
 
   host.appendChild(g);
@@ -935,6 +1054,9 @@ async function handleEnrollClick(mission){
   const signer = getSigner?.();
   if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
 
+  if (ctaBusy) return;     // ← guard
+  ctaBusy = true;          // ← lock
+  
   try {
     // freeze UI
     const btn = document.querySelector("#stageCtaGroup .cta-btn");
@@ -952,15 +1074,37 @@ async function handleEnrollClick(mission){
     // Refresh everything on the open stage
     await refreshOpenStageFromServer(2);
   } catch (err) {
-    showAlert(`Join failed: ${decodeError(err)}`, "error");
+    // wallet cancel → warning, no “stuck” UI
+    if (err?.code === 4001 || err?.code === "ACTION_REJECTED") {
+      showAlert("Join canceled.", "warning");
+    } else {
+      // Prefer custom Mission errors; fall back to generic decodeError
+      const custom = missionCustomErrorMessage(err);
+      const msg = custom || `Join failed: ${decodeError(err)}`;
+      showAlert(msg, custom ? "warning" : "error");
+    }
   } finally {
-    // Always re-evaluate CTA state (success/failure)
+    // UNLOCK first, then re-render (prevents “Joining…” from sticking)
+    ctaBusy = false;
     try {
       const data = await apiMission(mission.mission_address);
-      const m2 = data?.mission || mission;
-      await renderStageCtaForStatus(m2);
-    } catch { /* ignore */ }
+      renderStageCtaForStatus(data?.mission || mission);
+    } catch {
+      renderStageCtaForStatus(mission);
+    }
   }
+
+}
+
+async function refreshStageCtaIfOpen(){
+  const gameMain = document.getElementById('gameMain');
+  if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
+  if (!currentMissionAddr) return;
+  try {
+    const data = await apiMission(currentMissionAddr);
+    const m = data.mission || data;
+    renderStageCtaForStatus(m);
+  } catch {}
 }
 
 function showGameStage(mission){
@@ -1783,6 +1927,25 @@ async function init(){
   const t = setInterval(() => {
     if (walletAddress){ loadMy(); clearInterval(t); }
     if (++tried > 20) clearInterval(t);
+  }, 500);
+
+  window.addEventListener("wallet:connected",    refreshStageCtaIfOpen);
+  window.addEventListener("wallet:changed",      refreshStageCtaIfOpen);
+  window.addEventListener("wallet:disconnected", refreshStageCtaIfOpen);
+
+ // Fallback if those custom events aren’t emitted:
+  if (window.ethereum) {
+    window.ethereum.on("accountsChanged", () => setTimeout(refreshStageCtaIfOpen, 0));
+  }
+
+  // Tiny poll as last resort (stops once it detects a change)
+  let lastWalletForCta = walletAddress || null;
+  const ctaPoll = setInterval(() => {
+    if ((walletAddress || null) !== lastWalletForCta) {
+      lastWalletForCta = walletAddress || null;
+      refreshStageCtaIfOpen();
+      if (lastWalletForCta) clearInterval(ctaPoll);
+    }
   }, 500);
 
 }

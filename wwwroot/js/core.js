@@ -284,7 +284,7 @@ export function setBtnLoading(btn, state = true, label = "", restore = true) {
   }
 }
 
-/* ---------- DOM caches ---------- */
+// #region ---------- DOM caches ---------- */
 const modalOverlay = document.getElementById("modalOverlay");
 const confirmModal = document.getElementById("confirmModal");
 const modalMsg     = document.getElementById("modalMessage");
@@ -294,6 +294,7 @@ const alertModal   = document.getElementById("alertModal");
 const alertTitle   = document.getElementById("alertModalTitle");
 const alertText    = document.getElementById("alertModalText");
 const alertClose   = document.getElementById("alertModalCloseBtn");
+// #endregion
 
 export function showConfirm(message, onYes) {
   alertModal.classList.add("hidden");

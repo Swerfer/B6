@@ -76,11 +76,12 @@
 
 pragma solidity ^0.8.30;
 
-// ───────────────────── Imports ────────────────────────
+// #region ───────────── Imports ────────────────────────
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/proxy/Clones.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
+// #endregion
 using Strings for uint256;
 
 // ─────────────────── Global Enums ─────────────────────
@@ -128,7 +129,7 @@ enum Limit      {
 contract MissionFactory is Ownable, ReentrancyGuard {
     using Clones    for address;
     
-    // ────────────────── Events ───────────────────────
+    // #region ────────── Events ───────────────────────
     /** 
      * @dev Events emitted by the MissionFactory contract.
      * These events are used to log important actions and state changes within the contract.
@@ -157,6 +158,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     event EnrollmentRecorded                    (address        indexed user,           uint256             timestamp                               );
     event MissionStatusUpdated                  (address        indexed mission,        uint8       indexed fromStatus,     uint8   indexed toStatus, uint256        timestamp);
     event MissionFinalized                      (address        indexed mission,        uint8       indexed finalStatus,    uint256 timestamp       );
+    // #endregion
 
     // ────────────────── Modifiers ─────────────────────
     /**
@@ -182,7 +184,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         _;
     }
 
-    // ────────────── State Variables ───────────────────
+    // #region ─────── State Variables ───────────────────
     /**
      * @dev State variables for the MissionFactory contract.
      * These variables store the state of the contract, including authorized addresses, reserved funds, mission statuses, and the implementation address for missions.
@@ -206,6 +208,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     mapping(address => uint256[])           private _enrollmentHistory;                         // Store timestamps
     mapping(address => string)              public missionNames;                                // Store mission names
     mapping(MissionType => uint256)         public missionTypeCounts;                           // Store per mission type the mission type count
+    // #endregion
 
     // ──────────────── Constructor ─────────────────────
     /**
@@ -1017,7 +1020,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 // ───────────────── Contract Mission ───────────────────
 contract Mission        is Ownable, ReentrancyGuard {
     
-    // ───────────────────── Events ─────────────────────
+    // #region ─────────────── Events ─────────────────────
     event MissionStatusChanged  (Status     indexed previousStatus, Status      indexed newStatus,      uint256 timestamp                   );
     event PlayerEnrolled        (address    indexed player,         uint256             amount,         uint256 totalPlayers                );
     event RoundCalled           (address    indexed player,         uint8       indexed roundNumber,    uint256 payout, uint256 croRemaining);
@@ -1027,8 +1030,9 @@ contract Mission        is Ownable, ReentrancyGuard {
     event MissionRefunded       (uint256    indexed nrOfPlayers,    uint256     indexed amount,         address[] player,  uint256 timestamp); // Event emitted when a player is refunded
     event MissionInitialized    (address    indexed owner,          MissionType indexed missionType,    uint256 timestamp                   );
 	event PotIncreased			(uint256			value,			uint256				croCurrent											);
+    // #endregion
 
-    // ────────── Player-facing custom errors ───────────
+    // #region ─── Player-facing custom errors ───────────
     error EnrollmentNotStarted(uint256 nowTs, uint256 startTs);     // Enrollment has not started yet.
     error EnrollmentClosed(uint256 nowTs, uint256 endTs);           // Enrollment is closed.
     error MaxPlayers(uint8 maxPlayers);                             // Maximum number of players has been reached.  
@@ -1043,7 +1047,8 @@ contract Mission        is Ownable, ReentrancyGuard {
     error NotJoined();                                              // Player has not joined the mission.
     error AllRoundsDone();                                          // All rounds of the mission have been completed.
     error PayoutFailed(address winner, uint256 amount, bytes data); // Payout to a winner failed.
-    error ContractsNotAllowed();                                    // Contracts are not allowed to join the mission.   
+    error ContractsNotAllowed();                                    // Contracts are not allowed to join the mission.
+    // #endregion 
 
     // ──────────────────── Modifiers ───────────────────
     /**
@@ -1092,7 +1097,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         string          name;                           // Name of the mission
     }
 
-    // ──────────────── State Variables ─────────────────
+    // #region ───────── State Variables ─────────────────
     /**
      * @dev Reference to the MissionFactory contract.
      * This contract manages the overall mission lifecycle and player interactions.
@@ -1108,6 +1113,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     MissionData                 private _missionData;        // Struct to hold all mission data  
     bool                        private _initialized;        // Flag to track if the contract has been initialized
     Status                      private _previousStatus;     // Track the previous status of the mission
+    // #endregion
 
     // ────────────────── Constructor ───────────────────
     /**
