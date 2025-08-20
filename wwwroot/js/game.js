@@ -29,13 +29,6 @@ import {
   decodeError, 
 } from "./core.js";
 
-const DEV_SIMULATE_ACTIVE_BANNER = true;
-
-const STATUS_BANNERS = {
-  base: "assets/images/statuses/",
-  missionTime: "Mission time.png",  // <-- your uploaded file
-};
-
 // ─────────────────────────────────────────────
 // Mission custom errors (from Mission.sol)
 // ─────────────────────────────────────────────
@@ -267,25 +260,6 @@ function setStageStatusImage(slug){
   stageStatusImgSvg.setAttribute("href", `assets/images/statuses/${slug}.png`);
 }
 
-function setStageStatusBannerForMission(mission){
-  if (!stageStatusImgSvg || !mission) return;
-
-  // If a slug string sneaks in, just use it directly.
-  if (typeof mission === "string") {
-    setStageStatusImage(mission);
-    return;
-  }
-
-  const st = Number(mission.status);
-
-  if (DEV_SIMULATE_ACTIVE_BANNER && st === 1) {
-    stageStatusImgSvg.setAttribute("href", STATUS_BANNERS.base + STATUS_BANNERS.missionTime);
-    return;
-  }
-
-  setStageStatusImage(statusSlug(st));
-}
-
 // ---- center timer (short form) ----
 function stopStageTimer(){ if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } }
 
@@ -372,7 +346,7 @@ function startStageTimer(endTs, phaseStartTs = 0, missionObj){
           const next = statusByClock(missionObj, now);
           if (typeof next === "number" && next !== Number(missionObj.status)) {
             const m2 = { ...missionObj, status: next };
-            setStageStatusBannerForMission(m2);
+            setStageStatusImage(statusSlug(m2.status));
             buildStageLowerHudForStatus(m2);
             bindRingToMission(m2);
             bindCenterTimerToMission(m2);
@@ -573,7 +547,7 @@ async function startHub() { // SignalR HUB
             if (gameMain && gameMain.classList.contains('stage-mode')) {
               if (Number(m.status) === stageCurrentStatus) return;
               // Rebuild the open stage
-              setStageStatusBannerForMission(m);
+              setStageStatusImage(statusSlug(m.status));
               buildStageLowerHudForStatus(m);
               bindRingToMission(m);
               bindCenterTimerToMission(m);
@@ -739,7 +713,7 @@ async function refreshOpenStageFromServer(retries = 3) {
     // If status changed, or just to be safe, rebuild the stage pieces
     const newStatus = Number(m.status);
     if (newStatus !== stageCurrentStatus) {
-      setStageStatusBannerForMission(m);              // image under title
+      setStageStatusImage(statusSlug(m.status));                         // image under title
       buildStageLowerHudForStatus(m);                             // pills for this status
       bindRingToMission(m);                                       // ring window for this status
       bindCenterTimerToMission(m);                                // center countdown for this status
@@ -797,7 +771,7 @@ function showGameStage(mission){
   }
 
   // Load status image (SVG) and size it
-  setStageStatusBannerForMission(mission);
+  setStageStatusImage(statusSlug(mission.status));
 
   stageCurrentStatus = Number(mission?.status ?? -1);
 
@@ -819,7 +793,7 @@ function showGameStage(mission){
 // Use "Active" HUD when simulating during Enrolling
 function hudStatusFor(mission){
   const st = Number(mission?.status ?? -1);
-  return (DEV_SIMULATE_ACTIVE_BANNER && st === 1) ? 3 : st;
+  return st;
 }
 
 window.addEventListener("resize", layoutStage);
@@ -859,12 +833,13 @@ const HUD = {
   yFirst:     640, // !!!!!! First pill line y. Correct if rectH and/or gapY are changed. yFirst = Yfirst - (4x rectH diff + 3x gapY diff).
   labelFill:  "#7ad2ff",                // Label color
   valueFill:  "#fff",                   // Value color
-  pillFill:   "rgba(6,29,45,.7)",       // Background color
-  pillStroke: "rgba(72,221,255,.35)",   // Stroke color
+  pillFill:   "rgba(26,29,35,.8)",      // Background color
+  pillStroke: "rgba(62,211,245,.35)",   // Stroke color
   font:       "system-ui,Segoe UI,Arial", // Font
-  labelY:     20, // !!!!!!! Label center y. Correct if rectH is changed. labelY = LabelY - rectH diff / 2.
-  valueY:     20, // !!!!!!! Value center y. Correct if rectH is changed. valueY = valueY - rectH diff / 2.
-  valueX:     120,                        // Value center x
+  fontSize:   13,                         // Font size
+  labelY:     21, // !!!!!!! Label center y. Correct if rectH is changed. labelY = LabelY - rectH diff / 2.
+  valueY:     21, // !!!!!!! Value center y. Correct if rectH is changed. valueY = valueY - rectH diff / 2.
+  valueX:     130,                        // Value center x
   rx:         12,                         // Radius (?) x
   ry:         12,                         // Radius (?) y
 };
@@ -908,7 +883,7 @@ function buildStageLowerHudForStatus(mission){
   const keys = PILL_SETS[hudStatusFor(mission)] ?? PILL_SETS.default;
   // layout helpers
   const { rectW, rectH, gapX, gapY, xCenter, yFirst, rx, ry,
-          pillFill, pillStroke, labelFill, valueFill, font,
+          pillFill, pillStroke, labelFill, valueFill, font, fontSize,
           labelY, valueY, valueX } = HUD;
 
   const xLeft   = xCenter - rectW - (gapX / 2);
@@ -949,7 +924,7 @@ function buildStageLowerHudForStatus(mission){
     label.setAttribute("x", 10);
     label.setAttribute("y", labelY);
     label.setAttribute("font-family", font);
-    label.setAttribute("font-size", "12");
+    label.setAttribute("font-size", fontSize);
     label.setAttribute("fill", labelFill);
     label.textContent = def.label;
     g.appendChild(label);
@@ -959,7 +934,7 @@ function buildStageLowerHudForStatus(mission){
     val.setAttribute("y", valueY);
     val.setAttribute("text-anchor", "middle");
     val.setAttribute("font-family", font);
-    val.setAttribute("font-size", "12");
+    val.setAttribute("font-size", fontSize);
     val.setAttribute("fill", valueFill);
 
     if (typeof def.countdown === "function") {
@@ -1018,7 +993,7 @@ function svgImage(href, x, y, w, h){
 // Use "Active" (3) when simulating during Enrolling (1)
 function uiStatusFor(mission){
   const st = Number(mission?.status ?? -1);
-  return (DEV_SIMULATE_ACTIVE_BANNER && st === 1) ? 3 : st;
+  return st;
 }
 
 // ── CTA assets & layout (single source of truth) ─────────────────────────

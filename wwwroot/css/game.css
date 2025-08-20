@@ -107,12 +107,27 @@ body.scroll-lock{
 }
 
 /* === Stage CTA (clickable inside otherwise non-interactive overlay) === */
-#stageCtaGroup { pointer-events: auto; }
+#stageCtaGroup { 
+  pointer-events: auto; 
+}
 
 /* === Stage CTA (clickable inside otherwise non-interactive overlay) === */
 #stageCtaGroup { pointer-events: auto; }
 
-#stageCtaGroup .cta-btn { cursor: pointer; }
+#stageCtaGroup .cta-btn,
+#stageCtaGroup .cta-btn * {
+  outline: none !important;
+  box-shadow: none !important;            /* in case a global rule adds one */
+  -webkit-tap-highlight-color: transparent;
+}
+
+#stageCtaGroup .cta-btn:focus,
+#stageCtaGroup .cta-btn:focus-visible,
+#stageCtaGroup .cta-btn:active {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
 #stageCtaGroup .cta-btn.cta-disabled { 
   opacity: .45; 
   filter: grayscale(40%); 
@@ -125,28 +140,4 @@ body.scroll-lock{
   fill: #9fd0ff;
   pointer-events: none;
 }
-
-/*
-.svg-cta-btn rect {
-  fill: rgba(0, 192, 240, 0.95);
-  stroke: rgba(255, 255, 255, 0.25);
-  stroke-width: 1;
-  rx: 12; ry: 12;
-}
-.svg-cta-btn:hover rect  { filter: brightness(1.1); }
-.svg-cta-btn:active rect { filter: brightness(0.95); }
-.svg-cta-btn.disabled rect { fill: rgba(255,255,255,0.20); }
-
-.svg-cta-label {
-  font-family: Arial Black, Impact, system-ui, sans-serif;
-  font-size: 16px;
-  fill: #0b0d12;
-  pointer-events: none;
-}
-.svg-cta-note {
-  font-family: system-ui, Segoe UI, Arial, sans-serif;
-  font-size: 12px;
-  fill: #9fd0ff;
-  pointer-events: none;
-}*/
 
