@@ -1095,6 +1095,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         uint256         pauseTimestamp;                 // Time when the mission was paused
         address[]       refundedPlayers;                // Track players who have been refunded
         string          name;                           // Name of the mission
+        uint256         missionCreated;                 // Timestamp of when the mission was created, used for 'Pending' stage in dApp
     }
 
     // #region ───────── State Variables ─────────────────
@@ -1177,7 +1178,8 @@ contract Mission        is Ownable, ReentrancyGuard {
         _missionData.pauseTimestamp          = 0;                               // Initialize pause time to 0
         _missionData.players                 = new address[](0);                // Initialize players array
         _missionData.playersWon              = new PlayersWon[](0);             // Initialize playersWon array
-        _missionData.name = _name;
+        _missionData.name                    = _name;
+        _missionData.missionCreated          = block.timestamp;
         emit MissionInitialized(_owner, _missionType, block.timestamp);         // Emit event for mission initialization
     }
 

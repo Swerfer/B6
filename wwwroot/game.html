@@ -34,10 +34,8 @@
       </div>
     </header>
 
-    <!-- MAIN — future DApp content goes here -->
     <main      id="gameMain"      class="app-main core-main">
 
-      <!-- Gameplay Stage (test overlay + controls) -->
       <section id="gameStage" class="col-12 section-box stage-box" style="display:none;">
         <div id="stageViewport" class="stage-viewport">
           <!-- your vault image (square) -->
@@ -48,8 +46,8 @@
             <defs>
               <mask id="ringMask">
                 <rect x="0" y="0" width="1000" height="1000" fill="black"/>
-                <circle id="maskOuter" cx="499" cy="414" r="100" fill="white"/>
-                <circle id="maskInner" cx="499" cy="414" r="88" fill="black"/>
+                <circle id="maskOuter" cx="501" cy="418" r="109" fill="white"/>
+                <circle id="maskInner" cx="501" cy="418" r="91" fill="black"/>
               </mask>
 
               <!--  Optional polish (when you revisit the gradient)
@@ -59,28 +57,27 @@
                     the gradient with gradientTransform="rotate(… 499 415)" for a tiny lighting shift. 
               -->
               <linearGradient id="metalGrad"
-                x1="440" y1="335" 
-                x2="595" y2="414" 
+                x1="400" y1="418" 
+                x2="600" y2="418" 
                 gradientUnits="userSpaceOnUse">
-                <stop offset="0%"   stop-color="#0a0f15"/>  <!-- dark -->
-                <stop offset="30%"  stop-color="#0b141b"/>  <!-- midtone -->
-                <stop offset="75%"  stop-color="#0e1b27"/>  <!-- midtone -->
-                <stop offset="100%" stop-color="#303e56"/>  <!-- light -->
+                <stop offset="0%"   stop-color="#182128"/>  <!-- dark -->
+                <stop offset="50%"  stop-color="#1f2931"/>  <!-- midtone -->
+                <stop offset="100%" stop-color="#3f5260"/>  <!-- light -->
               </linearGradient>
 
             </defs>
 
-            <g id="ringGroup" mask="url(#ringMask)" transform="rotate(-90 499 414)">
+            <g id="ringGroup" mask="url(#ringMask)" transform="rotate(-90 501 418)">
               <!-- IMPORTANT: use the gradient directly here -->
-              <circle id="ringCover" cx="499" cy="414" r="94" fill="none"
-                      stroke="url(#metalGrad)" stroke-width="12" stroke-linecap="butt"/>
+              <circle id="ringCover" cx="501" cy="418" r="91" fill="none"
+                      stroke="url(#metalGrad)" stroke-width="18" stroke-linecap="butt"/>
             </g>
 
             <!-- Upper HUD: Mission title and status. Everything is inside SVG so it scales with the image -->
 
             <!-- Stage title (SVG text so it scales with the image) -->
             <text id="stageTitleText"
-                  x="499" y="220"                      
+                  x="500" y="220"                      
                   text-anchor="middle" dominant-baseline="middle"
                   font-family="Arial Black, Impact, system-ui, sans-serif"
                   font-size="28" fill="#fff"
@@ -90,16 +87,16 @@
             <!-- Status word image (e.g., assets/images/statuses/pending.png) -->
             <image id="stageStatusImgSvg"
                   href=""
-                  x="430" y="250" width="140"  
+                  x="430" y="245" width="140"  
                   preserveAspectRatio="xMidYMid meet" />
             
             <!-- Center countdown -->
             <text id="vaultTimerText"
-                  x="499" y="417"
+                  x="501" y="418"
                   text-anchor="middle" dominant-baseline="middle"
                   font-family="Consolas, Courier New" font-weight="Bold"
-                  font-size="20" fill="#4AB8F9"
-                  stroke="rgba(0,0,0,.45)" stroke-width="2" paint-order="stroke fill">
+                  font-size="26" fill="#4AB8F9"
+                  stroke="rgba(0,0,0,.25)" stroke-width="3" paint-order="stroke fill">
             </text>
 
             <!-- LOWER HUD (Pending): two rows of pills -->
@@ -217,16 +214,17 @@
         </section>
         
       </div>
+
     </main>
 
     <footer class="app-footer">
         <div class="inner gap-2">
 
+            <a href="https://b6missions.com/home.html"  class="btn btn-sm btn-outline-info icon-nav" title="Home">
+              <i class="fa-solid fa-home"></i>
+            </a>
             <button id="btnAllMissions"   class="btn btn-sm btn-outline-info icon-nav" title="All Missions">
               <i class="fa-solid fa-list"></i>
-            </button>
-            <button id="btnJoinable"      class="btn btn-sm btn-outline-info icon-nav" title="Joinable Missions">
-              <i class="fa-solid fa-user-plus"></i>
             </button>
 
             <button id="connectWalletBtn" class="btn btn-sm btn-outline-info">
@@ -234,6 +232,9 @@
                 <span id="connectBtnText">Connect Wallet</span>
             </button>
 
+            <button id="btnJoinable"      class="btn btn-sm btn-outline-info icon-nav" title="Joinable Missions">
+              <i class="fa-solid fa-user-plus"></i>
+            </button>
             <button id="btnMyMissions"    class="btn btn-sm btn-outline-info icon-nav" title="My Missions">
               <i class="fa-solid fa-id-card"></i>
             </button>
@@ -241,7 +242,6 @@
         </div>
     </footer>
 
-    <!-- REUSABLE MODAL -->
     <div       id="modalOverlay"  class="modal-overlay">
 
         <div id="confirmModal" class="modal-box hidden">

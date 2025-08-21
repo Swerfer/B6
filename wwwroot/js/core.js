@@ -3,26 +3,38 @@
 **********************************************************************/
 
 // Defaults (fallbacks if /api/config is unavailable)
-export let READ_ONLY_RPC;
+export let READ_ONLY_RPC = '/api/rpc';
 export let FACTORY_ADDRESS;
+
+let __readProvider = null;
+
+export function getReadProvider() {
+  if (__readProvider) return __readProvider;
+  if (window.ethereum) {
+    try {
+      __readProvider = new ethers.providers.Web3Provider(window.ethereum);
+      return __readProvider;
+    } catch (err) {console.log(err);}
+  }
+  __readProvider = new ethers.providers.JsonRpcBatchProvider(READ_ONLY_RPC);
+  return __readProvider;
+}
 
 // Load runtime config once. Because this file is loaded as type="module",
 // top-level await is supported in modern browsers.
-try {
-  const res = await fetch('/api/config', { cache: 'no-store' });
-  if (res.ok) {
-    const cfg = await res.json();
-    const rpc     = cfg?.cronos?.rpc        || cfg?.rpc;
-    const factory = cfg?.contracts?.factory || cfg?.factory;
-    if (rpc)     READ_ONLY_RPC   = rpc;
-    if (factory) FACTORY_ADDRESS = factory;
-    console.log('[core] /api/config loaded');
-  } else {
-    console.warn('[core] /api/config failed', res.status);
-  }
-} catch (err) {
-  console.warn('[core] /api/config error', err);
+const res = await fetch('/api/config', { cache: 'no-store' });
+
+if (res.ok) {
+  const cfg = await res.json();
+  const factory = cfg?.contracts?.factory || cfg?.factory;
+
+  // Always send browser JSON-RPC via the same-origin reverse proxy to avoid CORS:
+  READ_ONLY_RPC = '/api/rpc';
+
+  if (factory) FACTORY_ADDRESS = factory;
+  console.log('[core] /api/config loaded');
 }
+
 
 export const FACTORY_ABI = [
   // --------- Factory methods ----------

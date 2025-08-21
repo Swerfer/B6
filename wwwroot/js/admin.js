@@ -152,7 +152,7 @@ function colorForStatusLabel(lbl){
 
 async function openMissionModal(item, btnRef = null, factoryStatus = null){
   try{
-    const p  = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const p  = getReadProvider();
     const mc = new ethers.Contract(item.addr, MISSION_ABI, p);
     if (btnRef instanceof HTMLButtonElement) {
       setBtnLoading(btnRef, true, "Reloading");
@@ -409,7 +409,7 @@ const toLocalIso = dt =>
 
 /* ---------- Read-only view helpers ---------- */
 async function refreshGlobalView(){
-  const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const p       = getReadProvider();
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
   const summary = await factory.getFactorySummary();
@@ -440,7 +440,7 @@ async function refreshGlobalView(){
 }
 
 async function loadFactoryWriteData() {
-  const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const provider = getReadProvider();
   const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 
   try {
@@ -584,7 +584,7 @@ async function updateConfirmCard() {
   card.style.display = "none";
 
   try {
-    const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const provider = getReadProvider();
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
     const [newOwner, proposer, timestamp, timeLeft] = await factory.getOwnershipProposal();
 
@@ -643,7 +643,7 @@ async function withdrawFunds(btn) {
 }
 
 function setMaxWithdraw() {
-  const p = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const p = getReadProvider();
   p.getBalance(FACTORY_ADDRESS).then(f => {
     document.getElementById("withdrawAmount").value = ethers.utils.formatEther(f);
   });
@@ -651,7 +651,7 @@ function setMaxWithdraw() {
 
 async function lookupPlayer(addr){
   const wrap = document.getElementById("playerView");
-  const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const p       = getReadProvider();
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
   const [limits, ok, wSec, mSec, [joined]] = await Promise.all([
@@ -685,7 +685,7 @@ async function lookupPlayer(addr){
 
 async function lookupAddr(addr){
   const wrap = document.getElementById("addrView");
-  const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  const p       = getReadProvider();
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
   const [ownerAddr, auth, isM] = await Promise.all([
@@ -807,7 +807,7 @@ async function isOwnerOrAuthorized(addr){
        We silently fall back to a public RPC for a read-only check. */
     if (String(err?.message).includes("dapp not connected")){
       try{
-        const fallback  = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+        const fallback  = getReadProvider();
         const factory   = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, fallback);
         const [ownerAddr, isAuth] = await Promise.all([
           factory.owner(),
@@ -901,7 +901,7 @@ async function loadMissions(filter = "all") {
     missionsList.innerHTML = "";
     missionsList.classList.remove("empty");
 
-    const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const provider = getReadProvider();
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 
     let addrs = [], stats = [], names = [];
@@ -965,7 +965,7 @@ async function loadLatestMissions(n = 10){
   const spinner = document.getElementById("missionsLoadingSpinner");
   fadeSpinner(spinner, true);
   try{
-    const p       = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const p       = getReadProvider();
     const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
 
     const [addrs, stats, names] = await factory.getLatestMissions(n);
@@ -1021,13 +1021,16 @@ async function buildMissionGrid(addrs, stats, names){
     missionsList.appendChild(li);
   });
   missionsSection.classList.remove("hidden");
-  await markStatusMismatches(items, 4);
+  await markStatusMismatches(items, 1);
 }
 
-async function markStatusMismatches(items, concurrency = 4){
+async function markStatusMismatches(items, concurrency = 1){
   if (!Array.isArray(items) || items.length === 0) return;
 
-  const p = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+  // Batch provider reduces upstream request count
+  const p = new ethers.providers.JsonRpcBatchProvider(READ_ONLY_RPC);
+  const SPACING_MS = 120;
+  const sleep      = (ms) => new Promise(r => setTimeout(r, ms));
 
   // simple shared cursor + worker pool
   let cursor = 0;
@@ -1051,6 +1054,7 @@ async function markStatusMismatches(items, concurrency = 4){
       }catch{
         /* ignore per-item fetch errors; list should still render */
       }
+      await sleep(SPACING_MS + Math.floor(Math.random() * 80)); // tiny jitter
     }
   }
 

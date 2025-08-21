@@ -9,6 +9,11 @@ using Nethereum.Web3;
 using Nethereum.Contracts;
 using Nethereum.ABI.FunctionEncoding.Attributes;
 using Npgsql;
+using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,11 +35,26 @@ foreach (var k in requiredKeys) {
 }
 
 builder.Services.AddSignalR();
+
+builder.Services.AddCors(options => {
+    options.AddPolicy("AllowFrontend", policy =>
+    {
+        policy.WithOrigins("https://b6missions.com") 
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials(); // Only if you're using cookies or auth headers
+    });
+});
+
+builder.Services.AddHttpClient();
+
 builder.Logging.ClearProviders();
 builder.Logging.SetMinimumLevel(LogLevel.Information);
 builder.Logging.AddConsole();
 
 var app = builder.Build();
+
+app.UseCors("AllowFrontend");
 
 /* --------------------- Helpers ---------------------*/
 static long     ToUnixSeconds(DateTime dtUtc){
@@ -61,6 +81,34 @@ app.MapGet("/config",                         (IConfiguration cfg) => {
     var rpc     = GetRequired(cfg, "Cronos:Rpc");
     var factory = GetRequired(cfg, "Contracts:Factory");
     return Results.Ok(new { rpc, factory });
+});
+
+app.MapPost("/rpc", async (HttpRequest req, IHttpClientFactory f, IConfiguration cfg) => {
+    using var reader = new StreamReader(req.Body);
+    var body = await reader.ReadToEndAsync();
+
+    var upstream = cfg["Cronos:Rpc"] ?? "https://evm.cronos.org/";
+
+    var client = f.CreateClient();
+    using var msg = new HttpRequestMessage(HttpMethod.Post, upstream);
+    msg.Content = new StringContent(body, Encoding.UTF8, "application/json");
+    msg.Headers.UserAgent.ParseAdd("B6MissionsProxy/1.0");
+
+    using var resp = await client.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead);
+    var text = await resp.Content.ReadAsStringAsync();
+
+    // ✅ Option A: preserve upstream status code & JSON
+    try
+    {
+        using var doc = JsonDocument.Parse(text);
+        var clone = doc.RootElement.Clone();                    // ← keeps data alive after dispose
+        return Results.Json(clone, statusCode: (int)resp.StatusCode);
+    }
+    catch
+    {
+        return Results.Content(text, "application/json", Encoding.UTF8, (int)resp.StatusCode);
+    }
+
 });
 
 /***********************

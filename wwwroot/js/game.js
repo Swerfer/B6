@@ -26,7 +26,8 @@ import {
   FACTORY_ADDRESS,
   MISSION_ABI,
   setBtnLoading, 
-  decodeError, 
+  decodeError,
+  getReadProvider,
 } from "./core.js";
 
 // ─────────────────────────────────────────────
@@ -148,8 +149,6 @@ let   detailFailures        = 0;
 let   staleWarningShown     = false;
 let   ringTimer             = null;
 let   stageTicker           = null;
-const GAP_DEG               = 10;      // hinge gap in degrees
-let   START_OFFSET          = 126;  // fine start offset along the path (px)
 let   stageCurrentStatus    = null;
 let   ctaBusy               = false;
 // #endregion
@@ -209,45 +208,58 @@ function statusSlug(s){
 const __mcIface = new ethers.utils.Interface([
   "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)"
 ]);
+
 // MissionCreated → creation timestamp (for Pending phaseStart)
 // Paged over ≤2000 blocks to satisfy Cronos RPC
 const __missionCreatedCache = new Map();
 
 async function getMissionCreationTs(addr){
-  const key = String(addr).toLowerCase();
-  if (__missionCreatedCache.has(key)) return __missionCreatedCache.get(key);
+  const keyLower = String(addr).toLowerCase();
+  if (__missionCreatedCache.has(keyLower)) return __missionCreatedCache.get(keyLower);
 
   try{
-    const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
-    const topic0   = __mcIface.getEventTopic("MissionCreated");
-    const topic1   = ethers.utils.hexZeroPad(key, 32);
+    const provider = getReadProvider();
 
-    const latest   = await provider.getBlockNumber();
-    const STEP     = 1800; // keep under the RPC 2000 range cap (your indexer uses 1800 too)
-    // scan backwards until we find the first (and only) MissionCreated for this mission
-    let to = latest;
-    while (to >= 0){
-      const from = Math.max(0, to - STEP + 1);
-      const logs = await provider.getLogs({
-        address: FACTORY_ADDRESS,
-        topics: [topic0, topic1],
-        fromBlock: from,
-        toBlock: to
-      });
-      if (logs && logs.length){
-        // find the earliest log in this batch (defensive)
-        let first = logs[0];
-        for (const L of logs) if (L.blockNumber < first.blockNumber) first = L;
-        const blk = await provider.getBlock(first.blockNumber);
-        const ts  = Number(blk?.timestamp || 0);
-        __missionCreatedCache.set(key, ts);
-        return ts;
+    // Event topic and indexed address topic
+    const topic0        = __mcIface.getEventTopic("MissionCreated");
+    const missionAddr   = ethers.utils.getAddress(addr);             // checksum
+    const topicMission  = ethers.utils.hexZeroPad(missionAddr, 32);  // 0x00..addr
+
+    const latest = await provider.getBlockNumber();
+    const STEP   = 1800; // keep under 2000 range cap
+
+    async function search(addressFilter){
+      let to = latest;
+      while (to >= 0){
+        const from = Math.max(0, to - STEP + 1);
+        const logs = await provider.getLogs({
+          address: addressFilter,                 // FACTORY_ADDRESS or undefined
+          topics:  [topic0, topicMission],        // MissionCreated + mission address
+          fromBlock: from,
+          toBlock:   to
+        });
+
+        if (logs && logs.length){
+          // pick the earliest log we saw
+          let first = logs[0];
+          for (const L of logs) if (L.blockNumber < first.blockNumber) first = L;
+          const blk = await provider.getBlock(first.blockNumber);
+          return Number(blk?.timestamp || 0);
+        }
+        to = from - 1;
       }
-      // next slice (previous window)
-      to = from - 1;
+      return 0;
     }
-    __missionCreatedCache.set(key, 0);
-    return 0;
+
+    // 1) Fast path: only the configured factory
+    let ts = await search(FACTORY_ADDRESS);
+
+    // 2) Fallback: global search (covers other factory instances)
+    if (!ts) ts = await search(undefined);
+
+    __missionCreatedCache.set(keyLower, ts || 0);
+    return ts || 0;
+
   }catch(err){
     console.log("getMissionCreationTs failed:", err);
     return 0;
@@ -427,18 +439,12 @@ function setRingProgress(pct){
 
   const r   = Number(cover.getAttribute("r")) || 0;
   const C   = 2 * Math.PI * r;
-  const gap = typeof GAP_DEG === "number" ? GAP_DEG : 0;
-  const gapLen = C * (gap / 360);
-  const drawable = Math.max(0, C - gapLen);
-  const startOffset = typeof START_OFFSET === "number" ? START_OFFSET : 0;
-
-
   const clamped = Math.max(0, Math.min(100, pct));
   const coverFrac = 1 - (clamped / 100);          // 1 = fully covered → 0 = fully revealed
-  const coverLen  = coverFrac * drawable;
+  const coverLen  = coverFrac * C;
 
   cover.setAttribute("stroke-dasharray", `${coverLen} ${C - coverLen}`);
-  cover.setAttribute("stroke-dashoffset", String(startOffset + coverLen)); // clockwise
+  cover.setAttribute("stroke-dashoffset", String(coverLen)); // clockwise
 }
 
 function bindRingToWindow(startSec, endSec){
@@ -461,12 +467,20 @@ function bindRingToWindow(startSec, endSec){
 }
 
 /* Map mission.status to the correct time window */
-function bindRingToMission(m){
+async function bindRingToMission(m){
   const st = Number(m?.status ?? -1);
   let S = 0, E = 0;
 
-  if (st === 0) {                         // Pending → animate now → enrollment_start
-    setRingProgress(0);  // leave covered; unit timer will bind [E-90m, E] etc.
+  if (st === 0) {                         // Pending: MissionCreated → enrollment_start
+    E = Number(m.enrollment_start || 0);
+
+    // MissionCreated event timestamp (cached). Fallback: updated_at.
+    S = m?.mission_address ? await getMissionCreationTs(m.mission_address) : 0;
+    console.log(E + " - " + S);
+    if (!S) S = Number(m.updated_at || 0);
+
+    if (S && E && E > S) { bindRingToWindow(S, E); }
+    else { setRingProgress(0); }
     return;
   } else if (st === 1) {                  // Enrolling
     S = Number(m.enrollment_start || 0);
@@ -478,7 +492,7 @@ function bindRingToMission(m){
     S = Number(m.mission_start    || 0);
     E = Number(m.mission_end      || 0);
   } else {
-    // Ended variants (5/6/7): show fully revealed
+    // Ended variants
     setRingProgress(100);
     return;
   }
@@ -486,7 +500,6 @@ function bindRingToMission(m){
   if (S && E && E > S) {
     bindRingToWindow(S, E);
   } else {
-    // Window missing → keep a sensible static state
     setRingProgress(st >= 5 ? 100 : 0);
   }
 }
@@ -539,28 +552,27 @@ async function startHub() { // SignalR HUB
         }
       });
 
-      hubConnection.on("StatusChanged", (addr, newStatus) => {
-        if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
-          const gameMain = document.getElementById('gameMain');
-          apiMission(currentMissionAddr).then(data => {
-            const m = data.mission || data;
-            if (gameMain && gameMain.classList.contains('stage-mode')) {
-              if (Number(m.status) === stageCurrentStatus) return;
-              // Rebuild the open stage
-              setStageStatusImage(statusSlug(m.status));
-              buildStageLowerHudForStatus(m);
-              bindRingToMission(m);
-              bindCenterTimerToMission(m);
-              renderStageCtaForStatus(m);
-              stageCurrentStatus = Number(m.status);
-            } else {
-              // Detail view open → keep existing behavior
-              renderMissionDetail(data);
-              showAlert(`Mission status changed:<br>${addr}<br>Status: ${newStatus}`, "warning");
-            }
-          }).catch(()=>{});
-        }
-      });
+    hubConnection.on("StatusChanged", async (addr, newStatus) => {
+      if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
+        const gameMain = document.getElementById('gameMain');
+        try {
+          const data = await apiMission(currentMissionAddr);
+          const m = data.mission || data;
+          if (gameMain && gameMain.classList.contains('stage-mode')) {
+            if (Number(m.status) === stageCurrentStatus) return;
+            setStageStatusImage(statusSlug(m.status));
+            buildStageLowerHudForStatus(m);
+            await bindRingToMission(m);
+            await bindCenterTimerToMission(m);
+            renderStageCtaForStatus(m);
+            stageCurrentStatus = Number(m.status);
+          } else {
+            renderMissionDetail(data);
+            showAlert(`Mission status changed:<br>${addr}<br>Status: ${newStatus}`, "warning");
+          }
+        } catch {}
+      }
+    });
 
       // on reconnect, re-subscribe to the open mission (if any)
       hubConnection.onreconnected(async () => {
@@ -641,7 +653,7 @@ function scheduleDetailRefresh(reset=false){
 async function fetchAndRenderAllMissions(){
   try {
     // 1) Factory call (chain): get the full mission index
-    const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const provider = getReadProvider();
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
     const [addrs, statuses, names] = await factory.getAllMissions();
 
@@ -715,8 +727,8 @@ async function refreshOpenStageFromServer(retries = 3) {
     if (newStatus !== stageCurrentStatus) {
       setStageStatusImage(statusSlug(m.status));                         // image under title
       buildStageLowerHudForStatus(m);                             // pills for this status
-      bindRingToMission(m);                                       // ring window for this status
-      bindCenterTimerToMission(m);                                // center countdown for this status
+      await bindRingToMission(m);                                       // ring window for this status
+      await bindCenterTimerToMission(m);                                // center countdown for this status
       renderStageCtaForStatus(m);
       stageCurrentStatus = newStatus;
     } else if (retries > 0) {
@@ -745,7 +757,6 @@ const els = {
   allMissionsList:          document.getElementById("allMissionsList"),
   allMissionsEmpty:         document.getElementById("allMissionsEmpty"),
   refreshAllBtn:            document.getElementById("refreshAllBtn"),
-
 };
 
 // #region dom elements
@@ -760,7 +771,7 @@ const stageTitleText      = document.getElementById("stageTitleText"    );
 const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg" );
 // #endregion
 
-function showGameStage(mission){
+async function showGameStage(mission){
   document.getElementById('gameMain').classList.add('stage-mode');
   showOnlySection("gameStage");
 
@@ -781,10 +792,10 @@ function showGameStage(mission){
   // Build lower HUD pills for THIS status & fill values
   buildStageLowerHudForStatus(mission);
 
-  bindRingToMission(mission);
+  await bindRingToMission(mission);
 
   // Center timer bound to this mission's next deadline
-  bindCenterTimerToMission(mission);
+  await bindCenterTimerToMission(mission);
 
   // CTA (status 1 → JOIN MISSION)
   renderStageCtaForStatus(mission);
@@ -798,7 +809,7 @@ function hudStatusFor(mission){
 
 window.addEventListener("resize", layoutStage);
 
-const IMG_W = 2048, IMG_H = 2048;
+const IMG_W = 2000, IMG_H = 2000;
 const visibleRectangle  = { x:566, y:420, w:914, h:1238 }; // visibleRectangle was the rectangle from the phone header to footer space and phone 
                                                            // screen width on the vault bg image. This rectangle is always visible on every screen
 
@@ -999,7 +1010,7 @@ function uiStatusFor(mission){
 // ── CTA assets & layout (single source of truth) ─────────────────────────
 const CTA_LAYOUT = {
   xCenter: 500,       // viewBox center
-  topY:    550,       // same top Y for all CTAs (matches Join)
+  topY:    555,       // same top Y for all CTAs (matches Join)
 };
 
 // JOIN (status 1)
@@ -1060,7 +1071,7 @@ async function  renderCtaEnrolling(host, mission){
   let already = false, hasSpots = true, canEnrollSoft = true;
 
   try {
-    const ro = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
+    const ro = getReadProvider();
     const mc = new ethers.Contract(mission.mission_address, MISSION_ABI, ro);
     const md = await mc.getMissionData();
     const tuple = md?.[0] || md;
@@ -1707,7 +1718,7 @@ function renderMyMissions(items){
   }
 }
 
-function renderMissionDetail({ mission, enrollments, rounds }){
+async function renderMissionDetail({ mission, enrollments, rounds }){
   const me   = (walletAddress || "").toLowerCase();
   const now  = Math.floor(Date.now()/1000);
   const isEnrolling = mission.status === 1 && now < mission.enrollment_end;
@@ -1732,7 +1743,7 @@ function renderMissionDetail({ mission, enrollments, rounds }){
       await startHub();                                     // ensures connection + safeSubscribe()
       await subscribeToMission(currentMissionAddr);         // idempotent if already subscribed
       lockScroll();
-      showGameStage(mission);                               
+      await showGameStage(mission);                               
     });
   }
 
@@ -1945,19 +1956,22 @@ async function hydrateAllMissionsRealtime(listEl){
   const cards = [...listEl.querySelectorAll("li.mission-card")];
   if (!cards.length) return;
 
-  const provider = new ethers.providers.JsonRpcProvider(READ_ONLY_RPC);
-  const N = 4;                                      // concurrency
+  // Use batch provider so parallel calls coalesce; also slow down a bit
+  const provider    = new ethers.providers.JsonRpcBatchProvider(READ_ONLY_RPC);
+  const N           = 1;    // was 4 — keep low to avoid 403 bursts
+  const SPACING_MS  = 150;  // small gap per request
+  const sleep       = ms => new Promise(r => setTimeout(r, ms));
   let i = 0;
 
   async function worker(){
     while (i < cards.length){
-      const idx = i++;
-      const li  = cards[idx];
+      const idx  = i++;
+      const li   = cards[idx];
       const addr = li.dataset.addr;
       if (!addr) continue;
 
       try {
-        const c = new ethers.Contract(addr, MISSION_ABI, provider);
+        const c  = new ethers.Contract(addr, MISSION_ABI, provider);
         const rt = Number(await c.getRealtimeStatus());
         const pill = li.querySelector(".status-pill");
         if (pill){
@@ -1967,10 +1981,14 @@ async function hydrateAllMissionsRealtime(listEl){
       } catch (err) {
         console.warn("realtime status failed:", addr, err?.message || err);
       }
+
+      // jitter to avoid synchronized bursts (helps with WAF/rate limit)
+      await sleep(SPACING_MS + Math.floor(Math.random() * 100));
     }
   }
 
-  await Promise.all([...Array(Math.min(N, cards.length))].map(worker));
+  await Promise.all([...Array(Math.min(N, cards.length))].map(() => worker()));
+
 }
 
 /* ---------- interactions ---------- */
