@@ -213,7 +213,9 @@ const __mcIface = new ethers.utils.Interface([
 // Paged over ≤2000 blocks to satisfy Cronos RPC
 const __missionCreatedCache = new Map();
 
-async function getMissionCreationTs(addr){
+async function getMissionCreationTs(mission){
+  if (mission.missionCreated) return mission.missionCreated;
+  const addr = mission.mission_address;
   const keyLower = String(addr).toLowerCase();
   if (__missionCreatedCache.has(keyLower)) return __missionCreatedCache.get(keyLower);
 
@@ -412,7 +414,7 @@ async function bindCenterTimerToMission(mission){
   let startTs = 0;
   if (st === 0) {
     // Pending: creation → enroll start
-    startTs = await getMissionCreationTs(mission.mission_address);
+    startTs = await getMissionCreationTs(mission);
     if (!startTs) startTs = Number(mission.updated_at || 0); // fallback from API row
   } else if (st === 1) {
     startTs = Number(mission.enrollment_start || 0);
@@ -475,7 +477,7 @@ async function bindRingToMission(m){
     E = Number(m.enrollment_start || 0);
 
     // MissionCreated event timestamp (cached). Fallback: updated_at.
-    S = m?.mission_address ? await getMissionCreationTs(m.mission_address) : 0;
+    S = m?.mission_address ? await getMissionCreationTs(m) : 0;
     console.log(E + " - " + S);
     if (!S) S = Number(m.updated_at || 0);
 
