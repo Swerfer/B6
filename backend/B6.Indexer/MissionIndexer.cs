@@ -1,24 +1,25 @@
-using System;
-using System.Numerics;
-using System.Globalization;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Net.Http;        
-using System.Net.Http.Json; 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Nethereum.Web3;
-using Nethereum.Contracts;
 using Nethereum.ABI.FunctionEncoding.Attributes;
-using Nethereum.RPC.Eth.DTOs;
+using Nethereum.Contracts;
 using Nethereum.Hex.HexTypes;
+using Nethereum.RPC.Eth.DTOs;
+using Nethereum.Web3;
 using Npgsql;
 using NpgsqlTypes;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;         
+using System.Globalization;
+using System.IO;  
+using System.Net.Http;        
+using System.Net.Http.Json; 
+using System.Numerics;
+using System.Threading;
+using System.Threading.Tasks;
 
 using B6.Contracts;
-
 
 namespace B6.Indexer
 {
@@ -34,9 +35,18 @@ namespace B6.Indexer
         private int                                     _rpcIndex = 0;
         private const int                               REORG_CUSHION = 3;
         private const int                               MAX_LOG_RANGE = 1800;
+        private const bool                              logRpcCalls   = true;  // ← toggle RPC file logging
+        private const bool                              scanMissionStatus = true; // ← toggle mission-level status logs
         private readonly HttpClient                     _http = new HttpClient();
         private readonly string                         _pushBase;   // e.g. https://b6missions.com/api
         private readonly string                         _pushKey;
+        private readonly Dictionary<long, DateTime>     _blockTsCache = new();
+        private readonly object                         _rpcLogLock   = new();
+        private DateTime                                _rpcLogDay    = DateTime.MinValue;   // UTC date boundary
+        private string                                  _rpcLogPath   = string.Empty;
+        private readonly Dictionary<string,int>         _rpcCounts    = new(StringComparer.InvariantCulture);
+        private readonly int                            _maxWinPerMission;
+        private readonly int                            _maxWinTotal;
 
         public                                          MissionIndexer          (ILogger<MissionIndexer> log, IConfiguration cfg) {
             _log = log;
@@ -48,6 +58,9 @@ namespace B6.Indexer
                     ?? throw new InvalidOperationException("Missing configuration key: Contracts:Factory");
             _pg      = cfg.GetConnectionString("Db") 
                     ?? throw new InvalidOperationException("Missing connection string: Db");
+
+            _maxWinPerMission = int.TryParse(cfg["Indexer:MaxWindowsPerMissionPerCycle"], out var m) ? Math.Max(1, m) : 2;
+            _maxWinTotal      = int.TryParse(cfg["Indexer:MaxWindowsTotalPerCycle"],      out var t) ? Math.Max(1, t) : 200;
 
             // NEW: optional deploy block (0 means disabled)
             _factoryDeployBlock = long.TryParse(cfg["Indexer:FactoryDeployBlock"], out var fb) ? fb : 0L;
@@ -79,8 +92,8 @@ namespace B6.Indexer
             return (long)val.Value;
         }
 
-        private async Task                              ScanFactoryEventsAsync(CancellationToken token) {
-            var latest  = await GetLatestBlockAsync();
+        private async Task                              ScanFactoryEventsAsync(CancellationToken token, long? latestOverride = null) {
+            var latest  = latestOverride ?? await GetLatestBlockAsync();
             var toBlock = latest - REORG_CUSHION;
             if (toBlock <= 0) return;
 
@@ -102,9 +115,27 @@ namespace B6.Indexer
                 var from            = new BlockParameter(new HexBigInteger(windowFrom));
                 var to              = new BlockParameter(new HexBigInteger(windowTo));
 
-                var createdLogs     = await createdEvt.GetAllChangesAsync(createdEvt.CreateFilterInput(from, to));
-                var statusLogs      = await statusEvt .GetAllChangesAsync(statusEvt .CreateFilterInput(from, to));
-                var finalLogs       = await finalEvt  .GetAllChangesAsync(finalEvt  .CreateFilterInput(from, to));
+                // pull logs via RunRpc so they’re counted & timed
+                var createdLogs = await RunRpc(
+                    w => {
+                        var e = w.Eth.GetEvent<MissionCreatedEventDTO>(_factory);
+                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                    },
+                    "GetLogs.Factory.MissionCreated");
+
+                var statusLogs = await RunRpc(
+                    w => {
+                        var e = w.Eth.GetEvent<MissionStatusUpdatedEventDTO>(_factory);
+                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                    },
+                    "GetLogs.Factory.StatusUpdated");
+
+                var finalLogs = await RunRpc(
+                    w => {
+                        var e = w.Eth.GetEvent<MissionFinalizedEventDTO>(_factory);
+                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                    },
+                    "GetLogs.Factory.Finalized");
 
                 // 1) Seed unknown missions discovered via status/final (optional, same as before)
                 var seen    = new HashSet<string>(StringComparer.InvariantCulture);
@@ -132,9 +163,10 @@ namespace B6.Indexer
                         var nameByAddr = new Dictionary<string,string>(StringComparer.InvariantCulture);
                         try
                         {
-                            var all = await _web3.Eth.GetContractQueryHandler<GetAllMissionsFunction>()
-                                .QueryDeserializingToObjectAsync<GetMissionsOutput>(new GetAllMissionsFunction(), _factory, null)
-                                .ConfigureAwait(false);
+                            var all = await RunRpc(
+                                w => w.Eth.GetContractQueryHandler<GetAllMissionsFunction>()
+                                    .QueryDeserializingToObjectAsync<GetMissionsOutput>(new GetAllMissionsFunction(), _factory, null),
+                                "Call.getAllMissions");
 
                             if (all?.Missions != null && all.Names != null)
                             {
@@ -169,6 +201,7 @@ namespace B6.Indexer
                 var statusBlocks = new HashSet<long>();
                 foreach (var e in statusLogs) statusBlocks.Add((long)e.Log.BlockNumber.Value);
                 foreach (var e in finalLogs)  statusBlocks.Add((long)e.Log.BlockNumber.Value);
+                foreach (var e in createdLogs) statusBlocks.Add((long)e.Log.BlockNumber.Value);
                 var tsByBlock = await GetBlockTimestampsAsync(statusBlocks);
 
                 // 3) DB writes (single tx per window)
@@ -182,19 +215,26 @@ namespace B6.Indexer
                     var a   = (ev.Event.Mission ?? string.Empty).ToLowerInvariant();
                     var blk = (long)ev.Log.BlockNumber.Value;
 
+                    // NEW: pull MissionData so we can take missionCreated from the tuple
+                    var wrap = await _web3.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                            new GetMissionDataFunction(), a, null)
+                        .ConfigureAwait(false);
+                    var md = wrap.Data;
+
                     await using var up = new NpgsqlCommand(@"
                         insert into missions (
                         mission_address, name, mission_type, status,
                         enrollment_start, enrollment_end, enrollment_amount_wei,
                         enrollment_min_players, enrollment_max_players,
                         mission_start, mission_end, mission_rounds_total, round_count,
-                        cro_start_wei, cro_current_wei, pause_timestamp, last_seen_block, updated_at
+                        cro_start_wei, cro_current_wei, pause_timestamp, mission_created, last_seen_block, updated_at
                         ) values (
                         @a,@n,@ty,@st,
                         @es,@ee,@amt,
                         @min,@max,
                         @ms,@me,@rt,0,
-                        0,0,null,@blkMinus1, now()
+                        0,0,null,@mc,@blkMinus1, now()
                         )
                         on conflict (mission_address) do update set
                         name                    = coalesce(nullif(excluded.name,''), missions.name),
@@ -207,6 +247,7 @@ namespace B6.Indexer
                         mission_start           = excluded.mission_start,
                         mission_end             = excluded.mission_end,
                         mission_rounds_total    = excluded.mission_rounds_total,
+                        mission_created         = excluded.mission_created,
                         last_seen_block         = greatest(coalesce(missions.last_seen_block,0), excluded.last_seen_block),
                         updated_at              = now();
                     ", conn, tx);
@@ -222,6 +263,10 @@ namespace B6.Indexer
                     up.Parameters.AddWithValue("ms", (long)ev.Event.MissionStart);
                     up.Parameters.AddWithValue("me", (long)ev.Event.MissionEnd);
                     up.Parameters.AddWithValue("rt", (short)ev.Event.MissionRounds);
+                    var createdUnix = tsByBlock.TryGetValue(blk, out var cr)
+                        ? new DateTimeOffset(cr).ToUnixTimeSeconds()
+                        : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                    up.Parameters.AddWithValue("mc", createdUnix);
                     up.Parameters.AddWithValue("blkMinus1", blk - 1);
                     await up.ExecuteNonQueryAsync(token);
                 }
@@ -318,16 +363,22 @@ namespace B6.Indexer
             }
         }
 
-        private async Task                              ScanMissionEventsAsync(CancellationToken token) {
+        private async Task                              ScanMissionEventsAsync(CancellationToken token, long? latestOverride = null) {
             // load missions + last_seen_block
             var missions = new List<(string addr, long fromBlock)>();
+            var latest  = latestOverride ?? await GetLatestBlockAsync();
+            var tipSafe = latest - REORG_CUSHION;
+            if (tipSafe <= 0) return;
+
             await using (var conn = new NpgsqlConnection(_pg))
             {
                 await conn.OpenAsync(token);
                 await using var cmd = new NpgsqlCommand(@"
                     select mission_address, coalesce(last_seen_block,0) as from_block
                     from missions
+                    where coalesce(last_seen_block,0) < @safeTip                 -- ← NEW filter
                     order by mission_address;", conn);
+                cmd.Parameters.AddWithValue("safeTip", tipSafe);                        // ← NEW
                 await using var rd = await cmd.ExecuteReaderAsync(token);
                 while (await rd.ReadAsync(token))
                 {
@@ -338,17 +389,16 @@ namespace B6.Indexer
             }
             if (missions.Count == 0) return;
 
-            var latest  = await GetLatestBlockAsync();
-            var tipSafe = latest - REORG_CUSHION;
-            if (tipSafe <= 0) return;
+            var windowsBudget = _maxWinTotal;
 
             foreach (var (addr, lastSeen) in missions)
             {
+                if (windowsBudget <= 0) break;
                 var start = Math.Max(0, lastSeen + 1);
-                if (start > tipSafe) continue;
 
                 long windowFrom = start;
-                while (windowFrom <= tipSafe)
+                int windowsDone = 0;
+                while (windowFrom <= tipSafe && windowsDone < _maxWinPerMission && windowsBudget > 0)
                 {
                     long windowTo = Math.Min(windowFrom + MAX_LOG_RANGE, tipSafe);
 
@@ -370,13 +420,52 @@ namespace B6.Indexer
                         var mrEvt     = _web3.Eth.GetEvent<MissionRefundedEventDTO>     (addr);
                         var peEvt     = _web3.Eth.GetEvent<PlayerEnrolledEventDTO>      (addr);
 
-                        var statusLogs = await statusEvt.GetAllChangesAsync(statusEvt.CreateFilterInput(from, to));
-                        var roundLogs  = await roundEvt .GetAllChangesAsync(roundEvt .CreateFilterInput(from, to));
-                        var prLogs     = await prEvt    .GetAllChangesAsync(prEvt    .CreateFilterInput(from, to));
-                        var peLogs     = await peEvt    .GetAllChangesAsync(peEvt    .CreateFilterInput(from, to));
+                        List<EventLog<MissionStatusChangedEventDTO>> statusLogs = new(); 
 
+                        var roundLogs = await RunRpc(
+                            w => {
+                                var e = w.Eth.GetEvent<RoundCalledEventDTO>(addr);
+                                return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                            },
+                            "GetLogs.Mission.RoundCalled");
+
+                        var prLogs = await RunRpc(
+                            w => {
+                                var e = w.Eth.GetEvent<PlayerRefundedEventDTO>(addr);
+                                return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                            },
+                            "GetLogs.Mission.PlayerRefunded");
+
+                        var peLogs = await RunRpc(
+                            w => {
+                                var e = w.Eth.GetEvent<PlayerEnrolledEventDTO>(addr);
+                                return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                            },
+                            "GetLogs.Mission.PlayerEnrolled");
+
+                        // optional mission-level status logs (factory status is canonical)
+                        // flip 'scanMissionStatus' const at the top to enable/disable this query
+                        if (scanMissionStatus)
+                        {
+                            statusLogs = await RunRpc(
+                                w => {
+                                    var e = w.Eth.GetEvent<MissionStatusChangedEventDTO>(addr);
+                                    return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                                },
+                                "GetLogs.Mission.StatusChanged");
+                        }
+
+                        // MissionRefunded is optional in your current code; keep the try/catch
                         List<EventLog<MissionRefundedEventDTO>> mrLogs = new();
-                        try { mrLogs = await mrEvt.GetAllChangesAsync(mrEvt.CreateFilterInput(from, to)); }
+                        try
+                        {
+                            mrLogs = await RunRpc(
+                                w => {
+                                    var e = w.Eth.GetEvent<MissionRefundedEventDTO>(addr);
+                                    return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                                },
+                                "GetLogs.Mission.MissionRefunded");
+                        }
                         catch (Exception ex) { _log.LogWarning(ex, "MissionRefunded decode failed for {addr}", addr); }
 
                         // Collect unique block numbers across this window’s logs
@@ -591,19 +680,19 @@ namespace B6.Indexer
                     }
 
                     windowFrom = windowTo + 1;
+                    windowsDone++; 
+                    windowsBudget--;  
                 }
             }
         }
 
         private async Task                              EnsureMissionSeededAsync(string missionAddr, string name, long seedLastSeenBlock, CancellationToken token) {
             // call mission.getMissionData (single tuple wrapper)
-            var wrap = await _web3.Eth
-                .GetContractQueryHandler<GetMissionDataFunction>()
-                .QueryDeserializingToObjectAsync<MissionDataWrapper>(
-                    new GetMissionDataFunction(),
-                    missionAddr,
-                    null)
-                .ConfigureAwait(false);
+            var wrap = await RunRpc(
+                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                    .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                        new GetMissionDataFunction(), missionAddr, null),
+                "Call.getMissionData");
 
             var md = wrap.Data;
 
@@ -618,13 +707,13 @@ namespace B6.Indexer
                 enrollment_start, enrollment_end, enrollment_amount_wei,
                 enrollment_min_players, enrollment_max_players,
                 mission_start, mission_end, mission_rounds_total, round_count,
-                cro_start_wei, cro_current_wei, pause_timestamp, last_seen_block, updated_at
+                cro_start_wei, cro_current_wei, pause_timestamp, mission_created, last_seen_block, updated_at
                 ) values (
                 @a,@n,@ty,@st,
                 @es,@ee,@amt,
                 @min,@max,
                 @ms,@me,@rt,@rc,
-                @cs,@cc,@pt,@blk, now()
+                @cs,@cc,@pt,@mc,@blk, now()
                 )
                 on conflict (mission_address) do update set
                 name                    = excluded.name,
@@ -642,6 +731,7 @@ namespace B6.Indexer
                 cro_start_wei           = excluded.cro_start_wei,
                 cro_current_wei         = excluded.cro_current_wei,
                 pause_timestamp         = excluded.pause_timestamp,
+                mission_created         = excluded.mission_created,
                 last_seen_block         = GREATEST(COALESCE(missions.last_seen_block,0), excluded.last_seen_block),
                 updated_at              = now();
             ", conn, tx))
@@ -669,6 +759,7 @@ namespace B6.Indexer
                 up.Parameters.Add("cc", NpgsqlDbType.Numeric).Value = md.EthCurrent;
 
                 up.Parameters.AddWithValue("pt",  ToInt64(md.PauseTimestamp));
+                up.Parameters.AddWithValue("mc",  ToInt64(md.MissionCreated));
                 up.Parameters.AddWithValue("blk", seedLastSeenBlock);
 
                 await up.ExecuteNonQueryAsync(token);
@@ -727,6 +818,37 @@ namespace B6.Indexer
             return (long)v;
         }
 
+        private static string                           NormalizeKind(string context) {
+            if (string.IsNullOrWhiteSpace(context)) return "RPC";
+            var p = context.IndexOf('(');
+            return p > 0 ? context.Substring(0, p) : context;
+        }
+
+        private void                                    RpcFileLog(string kind, string line) {
+            var nowUtc = DateTime.UtcNow;
+            var dayUtc = nowUtc.Date;
+
+            lock (_rpcLogLock)
+            {
+                // rotate per UTC day
+                if (dayUtc != _rpcLogDay)
+                {
+                    _rpcLogDay  = dayUtc;
+                    _rpcCounts.Clear();
+                    var dir = Path.Combine(AppContext.BaseDirectory, "logs");
+                    Directory.CreateDirectory(dir);
+                    _rpcLogPath = Path.Combine(dir, $"rpc-{dayUtc:yyyyMMdd}.log");
+                    File.AppendAllText(_rpcLogPath, $"===== NEW DAY {dayUtc:yyyy-MM-dd} UTC ====={Environment.NewLine}");
+                }
+
+                var next = _rpcCounts.TryGetValue(kind, out var n) ? n + 1 : 1;
+                _rpcCounts[kind] = next;
+
+                var ts = nowUtc.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+                File.AppendAllText(_rpcLogPath, $"{ts} [{kind}] #{next} {line}{Environment.NewLine}");
+            }
+        }
+
         private void                                    UseRpc(int idx) {
             _rpcIndex = idx % _rpcEndpoints.Count;
             var url = _rpcEndpoints[_rpcIndex];
@@ -752,30 +874,63 @@ namespace B6.Indexer
         }
 
         private async Task<T>                           RunRpc<T>(Func<Web3, Task<T>> fn, string context) {
+            var kind = NormalizeKind(context);
+            var sw = Stopwatch.StartNew();
             try
             {
-                return await fn(_web3);
+                var res = await fn(_web3);
+                sw.Stop();
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw.ElapsedMilliseconds} ms");     // ← guard
+                return res;
             }
             catch (Exception ex) when (IsTransient(ex) && SwitchRpc())
             {
+                sw.Stop();
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ↻ retry after switch ({sw.ElapsedMilliseconds} ms) — {ex.GetType().Name}: {ex.Message}");
                 _log.LogWarning(ex, "{ctx} failed; switched RPC and retrying", context);
-                return await fn(_web3);
+
+                var sw2 = Stopwatch.StartNew();
+                var res2 = await fn(_web3);
+                sw2.Stop();
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw2.ElapsedMilliseconds} ms (after switch)"); // ← guard
+                return res2;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ✗ in {sw.ElapsedMilliseconds} ms — {ex.GetType().Name}: {ex.Message}"); // ← guard
+                throw;
             }
         }
 
         private async Task<Dictionary<long, DateTime>>  GetBlockTimestampsAsync(IEnumerable<long> blockNumbers) {
             var result = new Dictionary<long, DateTime>();
-            foreach (var bn in new HashSet<long>(blockNumbers))
+            var unique = new HashSet<long>(blockNumbers);
+            var misses = new List<long>();
+
+            // hit cache first
+            foreach (var bn in unique)
+            {
+                if (_blockTsCache.TryGetValue(bn, out var cached))
+                    result[bn] = cached;
+                else
+                    misses.Add(bn);
+            }
+
+            // fetch only misses
+            foreach (var bn in misses)
             {
                 try
                 {
                     var block = await RunRpc(
                         w => w.Eth.Blocks.GetBlockWithTransactionsByNumber.SendRequestAsync(
                                 new Nethereum.RPC.Eth.DTOs.BlockParameter(new Nethereum.Hex.HexTypes.HexBigInteger(bn))),
-                        $"GetBlock({bn})");
+                        "GetBlock");
 
                     var unix = (long)block.Timestamp.Value;
-                    result[bn] = DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime;
+                    var dt   = DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime;
+                    _blockTsCache[bn] = dt;  // cache
+                    result[bn]        = dt;
                 }
                 catch (Exception ex)
                 {
@@ -842,8 +997,9 @@ namespace B6.Indexer
             {
                 try
                 {
-                    await ScanFactoryEventsAsync(token);
-                    await ScanMissionEventsAsync(token);
+                    var latest = await GetLatestBlockAsync();
+                    await ScanFactoryEventsAsync(token, latest);
+                    await ScanMissionEventsAsync(token, latest);
                 }
                 catch (Exception ex)
                 {
@@ -897,7 +1053,7 @@ namespace B6.Indexer
             await cmd.ExecuteNonQueryAsync(token);
         }
 
-        private async Task NotifyStatusAsync(string mission, short newStatus, CancellationToken ct = default) {
+        private async Task                              NotifyStatusAsync(string mission, short newStatus, CancellationToken ct = default) {
             if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/status")
             {
@@ -908,7 +1064,7 @@ namespace B6.Indexer
             catch (Exception ex) { _log.LogDebug(ex, "push/status failed for {mission}", mission); }
         }
 
-        private async Task NotifyRoundAsync(string mission, short round, string winner, string amountWei, CancellationToken ct = default) {
+        private async Task                              NotifyRoundAsync(string mission, short round, string winner, string amountWei, CancellationToken ct = default) {
             if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/round")
             {

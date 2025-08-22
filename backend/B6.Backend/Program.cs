@@ -335,6 +335,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         m.pause_timestamp,
         m.last_seen_block,
         m.updated_at,
+        m.mission_created,
         coalesce(c.enrolled,0)       as enrolled_players
       from missions m
       left join counts c using (mission_address)
@@ -364,7 +365,8 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         cro_current_wei        = (string)rd["cro_current_wei"],
         pause_timestamp        = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
         last_seen_block        = rd["last_seen_block"]  is DBNull ? null : (long?) rd["last_seen_block"],
-        updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime())
+        updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
+        mission_created        = (long)  rd["mission_created"]
     };
     await rd.CloseAsync();
 

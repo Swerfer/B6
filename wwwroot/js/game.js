@@ -246,7 +246,8 @@ function formatMMSS(s){
 }
 
 async function getMissionCreationTs(mission){
-  if (mission.missionCreated) return mission.missionCreated;
+  const inline = Number(mission.mission_created ?? 0);
+  if (inline > 0) return inline;           // skip log scan when API provides it
   const addr = mission.mission_address;
   const keyLower = String(addr).toLowerCase();
   if (__missionCreatedCache.has(keyLower)) return __missionCreatedCache.get(keyLower);
@@ -997,7 +998,8 @@ const HUD = {
 // Single source of truth for pill behaviors/labels
 const PILL_LIBRARY = {
   missionType:    { label: "Mission Type",     value: m => missionTypeName[Number(m?.mission_type ?? 0)] },
-  opensAt:        { label: "Opens At",         value: m => m?.enrollment_start ? formatLocalDateTime(m.enrollment_start) : "—" },
+  joinFrom:       { label: "Join from",        value: m => m?.enrollment_start ? formatLocalDateTime(m.enrollment_start) : "—" },
+  joinUntil:      { label: "Join until",       value: m => m?.enrollment_end ? formatLocalDateTime(m.enrollment_end) : "—" },
   missionStartAt: { label: "Start At",         value: m => m?.mission_start    ? formatLocalDateTime(m.mission_start)    : "—" },
   duration:       { label: "Duration",         value: m => (m?.mission_start && m?.mission_end)
                                                  ? formatDurationShort(Number(m.mission_end) - Number(m.mission_start)) : "—" },
@@ -1016,7 +1018,7 @@ const PILL_LIBRARY = {
 
 // Which pills to show per status (0..7) — only using fields that exist in your payloads :contentReference[oaicite:0]{index=0}
 const PILL_SETS = {
-  0:        ["opensAt","missionStartAt","duration","fee","poolStart","playersCap","rounds"],                        // Pending
+  0:        ["joinFrom","joinUntil","missionStartAt","duration","fee","poolStart","playersCap","rounds"],                        // Pending
   1:        ["missionType","rounds","fee","poolCurrent","playersAllStats","duration","closesIn","missionStartAt"],  // Enrolling
   2:        ["poolStart","players","rounds","startsIn","duration"],                                                 // Arming
   3:        ["poolCurrent","players","roundsOff","endsIn"],                                                         // Active
