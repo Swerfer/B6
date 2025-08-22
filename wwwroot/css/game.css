@@ -106,6 +106,22 @@ body.scroll-lock{
   pointer-events:none;
 }
 
+/* === Round-banked notice strip === */
+#stageNoticeGroup { 
+  pointer-events: auto; 
+}
+
+/* Ended panel should accept clicks */
+#stageEndedGroup { 
+  pointer-events: auto; 
+}
+
+#stageNoticeGroup .notice-text {
+  font-family: system-ui, Segoe UI, Arial, sans-serif;
+  font-size: 12px;
+  fill: var(--uranian-blue);
+}
+
 /* === Stage CTA (clickable inside otherwise non-interactive overlay) === */
 #stageCtaGroup { 
   pointer-events: auto; 

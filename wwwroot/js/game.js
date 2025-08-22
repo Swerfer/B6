@@ -28,11 +28,10 @@ import {
   setBtnLoading, 
   decodeError,
   getReadProvider,
+  shorten,
 } from "./core.js";
 
-// ─────────────────────────────────────────────
-// Mission custom errors (from Mission.sol)
-// ─────────────────────────────────────────────
+// #region Variables
 const MISSION_ERROR_ABI = [
   "error EnrollmentNotStarted(uint256 nowTs, uint256 startTs)",
   "error EnrollmentClosed(uint256 nowTs, uint256 endTs)",
@@ -52,6 +51,30 @@ const MISSION_ERROR_ABI = [
 ];
 
 const __missionErrIface = new ethers.utils.Interface(MISSION_ERROR_ABI);
+const connectBtn          = document.getElementById("connectWalletBtn");
+const sectionBoxes        = document.querySelectorAll(".section-box");
+const __missionCreatedCache = new Map();
+const __mcIface = new ethers.utils.Interface([
+  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)"
+]);
+
+let   lastListShownId       = "joinableSection";
+let   hubConnection         = null;
+let   hubStartPromise       = null;   // prevent concurrent starts
+let   currentMissionAddr    = null;
+let   subscribedAddr        = null;
+let   detailRefreshTimer    = null;
+let   detailBackoffMs       = 15000;
+let   detailFailures        = 0;
+let   staleWarningShown     = false;
+let   ringTimer             = null;
+let   stageTicker           = null;
+let   stageCurrentStatus    = null;
+let   ctaBusy               = false;
+let stageReturnTo           = null;   // "stage" when we navigated from stage → detail
+// #endregion
+
+// #region helpers ----------------------
 
 // map error names → friendly text (some include decoded args)
 function missionErrorToText(name, args = []) {
@@ -134,35 +157,6 @@ function missionCustomErrorMessage(err) {
   }
 }
 
-// #region Variables
-const connectBtn          = document.getElementById("connectWalletBtn");
-const sectionBoxes        = document.querySelectorAll(".section-box");
-
-let   lastListShownId       = "joinableSection";
-let   hubConnection         = null;
-let   hubStartPromise       = null;   // prevent concurrent starts
-let   currentMissionAddr    = null;
-let   subscribedAddr        = null;
-let   detailRefreshTimer    = null;
-let   detailBackoffMs       = 15000;
-let   detailFailures        = 0;
-let   staleWarningShown     = false;
-let   ringTimer             = null;
-let   stageTicker           = null;
-let   stageCurrentStatus    = null;
-let   ctaBusy               = false;
-// #endregion
-
-connectBtn.addEventListener("click", () => {
-  if (walletAddress){
-    showConfirm("Disconnect current wallet?", disconnectWallet);
-  } else {
-    connectWallet(); 
-  }
-});
-
-// ------------------- helpers ----------------------
-
 function showOnlySection(sectionId) {
   sectionBoxes.forEach(sec => {
     sec.style.display = (sec.id === sectionId) ? "" : "none";
@@ -196,22 +190,60 @@ function statusSlug(s){
     case 1: return "enrolling";
     case 2: return "arming";
     case 3: return "active";
-    case 4: return "paused";
-    case 5: return "partly-success";
-    case 6: return "success";
-    case 7: return "failed";
-    default: return "ended";
+    case 4: return "active";          // Paused uses the same "MISSION TIME" banner
+    case 5: return "ended";           // unified banner for all ended variants
+    case 6: return "ended";           // unified banner for all ended variants
+    case 7: return "ended";           // unified banner for all ended variants
   }
 }
 
-// MissionCreated → creation timestamp (for Pending phaseStart)
-const __mcIface = new ethers.utils.Interface([
-  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)"
-]);
+// ---- bank-now & cooldown helpers ----
+function getLastBankTs(mission, rounds){
+  const t0 = Number(mission?.mission_start || 0);
+  let last = t0;
+  if (Array.isArray(rounds)) {
+    for (const r of rounds) {
+      const t = Number(r?.created_at || r?.played_at || 0);
+      if (t > last) last = t;
+    }
+  }
+  return last;
+}
 
-// MissionCreated → creation timestamp (for Pending phaseStart)
-// Paged over ≤2000 blocks to satisfy Cronos RPC
-const __missionCreatedCache = new Map();
+function computeBankNowWei(mission, lastBankTs, now = Math.floor(Date.now()/1000)){
+  const st    = Number(mission?.status);
+  if (st !== 3) return "0";                      // only accrues while Active
+  const ms    = Number(mission?.mission_start || 0);
+  const me    = Number(mission?.mission_end   || 0);
+  const D     = Math.max(0, me - ms);
+  const base  = String(mission?.cro_start_wei || "0");
+  if (!D || base === "0") return "0";
+  const tNow  = Math.min(now, me);
+  const tLast = Math.max(ms, Number(lastBankTs || ms));
+  const dt    = Math.max(0, tNow - tLast);
+  try {
+    const wei = (BigInt(base) * BigInt(dt)) / BigInt(D);
+    return wei.toString();
+  } catch { return "0"; }
+}
+
+function cooldownInfo(mission, now = Math.floor(Date.now()/1000)){
+  const st          = Number(mission?.status);
+  const isPaused    = (st === 4);
+  const roundsTotal = Number(mission?.mission_rounds_total ?? mission?.mission_rounds ?? 0);
+  const roundCount  = Number(mission?.round_count ?? 0);
+  const secsTotal   = (roundCount === (roundsTotal - 1)) ? 60 : 300;  // last round → 60s, else 300s
+  const pauseTs     = Number(mission?.pause_timestamp || 0);
+  const pauseEnd    = pauseTs ? (pauseTs + secsTotal) : 0;
+  const secsLeft    = pauseEnd ? Math.max(0, pauseEnd - now) : 0;
+  return { isPaused, secsTotal, secsLeft, pauseEnd };
+}
+
+function formatMMSS(s){
+  s = Math.max(0, Math.floor(Number(s)||0));
+  const m = Math.floor(s/60), sec = s % 60;
+  return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
 
 async function getMissionCreationTs(mission){
   if (mission.missionCreated) return mission.missionCreated;
@@ -268,6 +300,39 @@ async function getMissionCreationTs(mission){
   }
 }
 
+function topWinners(enrollments = [], rounds = [], n = 5){
+  // Totals by address (BigInt)
+  const totals = new Map();
+  for (const r of (rounds || [])){
+    const addr = String(r?.winner_address || "").toLowerCase();
+    if (!addr) continue;
+    const wei = BigInt(String(r?.payout_wei || "0"));
+    totals.set(addr, (totals.get(addr) || 0n) + wei);
+  }
+
+  // Tie-break: earlier enrollment first
+  const enrolledAt = new Map();
+  for (const e of (enrollments || [])){
+    const a = String(e?.player_address || "").toLowerCase();
+    if (a) enrolledAt.set(a, Number(e.enrolled_at || 0));
+  }
+
+  const arr = [...totals.entries()].map(([addr, totalWei]) => ({
+    addr,
+    totalWei,
+    enrolledAt: enrolledAt.get(addr) || 0
+  }));
+
+  arr.sort((a, b) => {
+    if (a.totalWei === b.totalWei) return a.enrolledAt - b.enrolledAt;
+    return a.totalWei > b.totalWei ? -1 : 1;
+  });
+
+  return arr.slice(0, n);
+}
+
+// #endregion
+
 /* Load + size the status word image and center it under the title */
 function setStageStatusImage(slug){
   if (!stageStatusImgSvg || !slug) return;
@@ -321,7 +386,7 @@ function ringWindowForUnit(unit, phaseStart, endTs){
   return [endTs - S90, endTs];
 }
 
-function startStageTimer(endTs, phaseStartTs = 0, missionObj){
+async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
   stopStageTimer();
   const node = document.getElementById("vaultTimerText");
   if (!node || !endTs) { if (node) node.textContent = ""; return; }
@@ -340,6 +405,24 @@ function startStageTimer(endTs, phaseStartTs = 0, missionObj){
     document.querySelectorAll('#stageLowerHud [data-countdown], #stageCtaGroup [data-countdown]').forEach(el => {
       const ts = Number(el.getAttribute('data-countdown') || 0);
       el.textContent = ts ? formatCountdown(ts) : "—";
+    });
+
+    // NEW: update Bank-now (Active only; 2 decimals)
+    document.querySelectorAll('#stageCtaGroup [data-bank-now]').forEach(el => {
+      if (!missionObj) return;
+      const last = getLastBankTs(missionObj, missionObj?.rounds);
+      const wei  = computeBankNowWei(missionObj, last, now);
+      const cro  = weiToCro(String(wei), 2);             // ← 2 decimals
+      el.textContent = `Bank now: ${cro} CRO`;
+    });
+
+    // NEW: update Paused cooldown mm:ss
+    document.querySelectorAll('#stageCtaGroup [data-cooldown-end]').forEach(el => {
+      const end = Number(el.getAttribute('data-cooldown-end') || 0);
+      if (end > 0) {
+        const left = Math.max(0, end - now);
+        el.textContent = formatMMSS(left);
+      }
     });
 
     // Rebind ring when the unit changes...
@@ -365,6 +448,7 @@ function startStageTimer(endTs, phaseStartTs = 0, missionObj){
             bindRingToMission(m2);
             bindCenterTimerToMission(m2);
             renderStageCtaForStatus(m2);
+            await renderStageEndedPanelIfNeeded(m2);
             stageCurrentStatus = next;
           }
         }
@@ -543,16 +627,37 @@ async function startHub() { // SignalR HUB
       .withAutomaticReconnect()
       .build();
 
-      hubConnection.on("ServerPing", (msg) => {
-        showAlert(`Server ping:<br>${msg}`, "info");
-      });
+    hubConnection.on("ServerPing", (msg) => {
+      showAlert(`Server ping:<br>${msg}`, "info");
+    });
 
-      hubConnection.on("RoundResult", (addr, round, winner, amountWei) => {
-        showAlert(`Round ${round} – ${winner}<br/>Amount (wei): ${amountWei}<br/>Mission: ${addr}`, "success");
-        if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
-          apiMission(currentMissionAddr).then(renderMissionDetail).catch(()=>{});
+    hubConnection.on("RoundResult", (addr, round, winner, amountWei) => {
+      showAlert(`Round ${round} – ${winner}<br/>Amount (wei): ${amountWei}<br/>Mission: ${addr}`, "success");
+      if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
+        // Refresh detail AND use that fresh mission to schedule the auto-dismiss
+        apiMission(currentMissionAddr).then(data => {
+          renderMissionDetail(data);
+
+          // Auto-dismiss the notice 10s before cooldown ends (uses real pause_timestamp from API/chain)
+          const mission = data?.mission || data;
+          const { pauseEnd } = cooldownInfo(mission);
+          if (pauseEnd) {
+            const now = Math.floor(Date.now()/1000);
+            const ms  = Math.max(0, (pauseEnd - 10) - now) * 1000;
+            setTimeout(() => {
+              const g = document.getElementById("stageNoticeGroup");
+              if (g) g.innerHTML = "";
+            }, ms);
+          }
+        }).catch(()=>{});
+
+        // Show the inline notice on the gameplay stage
+        const gameMain = document.getElementById('gameMain');
+        if (gameMain && gameMain.classList.contains('stage-mode')) {
+          renderRoundBankedNotice(Number(round), String(winner || ""));
         }
-      });
+      }
+    });
 
     hubConnection.on("StatusChanged", async (addr, newStatus) => {
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
@@ -567,6 +672,7 @@ async function startHub() { // SignalR HUB
             await bindRingToMission(m);
             await bindCenterTimerToMission(m);
             renderStageCtaForStatus(m);
+            await renderStageEndedPanelIfNeeded(m);
             stageCurrentStatus = Number(m.status);
           } else {
             renderMissionDetail(data);
@@ -727,11 +833,12 @@ async function refreshOpenStageFromServer(retries = 3) {
     // If status changed, or just to be safe, rebuild the stage pieces
     const newStatus = Number(m.status);
     if (newStatus !== stageCurrentStatus) {
-      setStageStatusImage(statusSlug(m.status));                         // image under title
-      buildStageLowerHudForStatus(m);                             // pills for this status
+      setStageStatusImage(statusSlug(m.status));                        // image under title
+      buildStageLowerHudForStatus(m);                                   // pills for this status
       await bindRingToMission(m);                                       // ring window for this status
       await bindCenterTimerToMission(m);                                // center countdown for this status
       renderStageCtaForStatus(m);
+      await renderStageEndedPanelIfNeeded(m);
       stageCurrentStatus = newStatus;
     } else if (retries > 0) {
       // backend might flip a second later; try a couple of times
@@ -801,6 +908,9 @@ async function showGameStage(mission){
 
   // CTA (status 1 → JOIN MISSION)
   renderStageCtaForStatus(mission);
+
+  await renderStageEndedPanelIfNeeded(mission);
+
 }
 
 // Use "Active" HUD when simulating during Enrolling
@@ -808,8 +918,6 @@ function hudStatusFor(mission){
   const st = Number(mission?.status ?? -1);
   return st;
 }
-
-window.addEventListener("resize", layoutStage);
 
 const IMG_W = 2000, IMG_H = 2000;
 const visibleRectangle  = { x:566, y:420, w:914, h:1238 }; // visibleRectangle was the rectangle from the phone header to footer space and phone 
@@ -1009,6 +1117,7 @@ function uiStatusFor(mission){
   return st;
 }
 
+// #region CTA's
 // ── CTA assets & layout (single source of truth) ─────────────────────────
 const CTA_LAYOUT = {
   xCenter: 500,       // viewBox center
@@ -1044,211 +1153,7 @@ const CTA_ACTIVE = {
   txtDy: -1,
 };
 
-async function  renderStageCtaForStatus(mission){
-  const host = document.getElementById("stageCtaGroup");
-  if (!host) return;
-  host.innerHTML = "";
-
-  const st = uiStatusFor(mission);
-  if (st === 1) return renderCtaEnrolling(host, mission); // JOIN
-  if (st === 2) return renderCtaArming(host, mission);    // ENROLLMENT / CLOSED (disabled)
-  if (st === 3) return renderCtaActive(host, mission);    // Active → BANK IT!
-
-  // no CTA for other statuses (4,5,6,7) for now
-}
-
-async function  renderCtaEnrolling(host, mission){
-  const { xCenter, topY } = CTA_LAYOUT;
-  const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_JOIN;
-
-  // center under vault
-  const x = xCenter - Math.round(btnW / 2);
-  const y = topY;
-
-  // Gating (wallet, window, already, spots, optional canEnroll)
-  const now   = Math.floor(Date.now()/1000);
-  const inWin = now < Number(mission.enrollment_end || 0);
-
-  const me = (walletAddress || "").toLowerCase();
-  let already = false, hasSpots = true, canEnrollSoft = true;
-
-  try {
-    const ro = getReadProvider();
-    const mc = new ethers.Contract(mission.mission_address, MISSION_ABI, ro);
-    const md = await mc.getMissionData();
-    const tuple = md?.[0] || md;
-    const players = (tuple?.players || []).map(a => String(a).toLowerCase());
-
-    already = !!(me && players.includes(me));
-
-    const maxP = Number(mission.enrollment_max_players ?? 0);
-    hasSpots = maxP ? (players.length < maxP) : true;
-
-    if (me && FACTORY_ADDRESS) {
-      const fac = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, ro);
-      canEnrollSoft = await fac.canEnroll(me);
-    }
-  } catch { /* leave permissive defaults */ }
-
-  let disabled = false, note = "";
-  if (!walletAddress) { disabled = true; note = "Connect your wallet to join"; }
-  else if (!inWin)    { disabled = true; note = "Enrollment closed"; }
-  else if (already)   { disabled = true; note = "You already joined"; }
-  else if (!hasSpots) { disabled = true; note = "No spots left"; }
-  else if (!canEnrollSoft) { disabled = true; note = "Weekly/monthly limit reached"; }
-  if (ctaBusy) { disabled = true; note = "Joining…"; }
-
-  const g = document.createElementNS(SVG_NS, "g");
-  g.setAttribute("class", "cta-btn" + (disabled ? " cta-disabled" : ""));
-  g.setAttribute("transform", `translate(${x},${y})`);
-  g.setAttribute("role", "button");
-  g.setAttribute("tabindex", disabled ? "-1" : "0");
-
-  // bg + text
-  g.appendChild(svgImage(bg, null, null, btnW, btnH));
-
-  const txtX = x + Math.round((btnW - txtW) / 2);
-  const txtY = y + Math.round((btnH - txtH) / 2) + (txtDy || 0);
-  const tx = svgImage(text, txtX - x, txtY - y, txtW, txtH);
-  g.appendChild(tx);
-
-  // note
-  if (note) {
-    const n = document.createElementNS(SVG_NS, "text");
-    n.setAttribute("id", "stageCtaNote");
-    n.setAttribute("x", String(xCenter));
-    n.setAttribute("y", String(y + btnH + 18));
-    n.setAttribute("text-anchor", "middle");
-    n.setAttribute("class", "cta-note");
-    n.textContent = note;
-    host.appendChild(n);
-  }
-
-  if (!disabled) {
-    g.addEventListener("click", () => handleEnrollClick(mission));
-    g.addEventListener("mousedown", () => g.setAttribute("transform", `translate(${x},${y+1})`));
-    const reset = () => g.setAttribute("transform", `translate(${x},${y})`);
-    g.addEventListener("mouseup", reset);
-    g.addEventListener("mouseleave", reset);
-    g.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleEnrollClick(mission); }
-    });
-  }
-
-  host.appendChild(g);
-} 
-
-function        renderCtaArming(host, mission){
-  const { xCenter, topY } = CTA_LAYOUT;
-  const { bg, line1, line2, btnW, btnH, l1W, l1H, l2W, l2H, gap } = CTA_ARMING;
-
-  const x = xCenter - Math.round(btnW / 2);
-  const y = topY;
-
-  const g = document.createElementNS(SVG_NS, "g");
-  g.setAttribute("class", "cta-btn cta-disabled");
-  g.setAttribute("transform", `translate(${x},${y})`);
-
-  // bg
-  g.appendChild(svgImage(bg, null, null, btnW, btnH));
-
-  // two centered lines
-  const blockH = l1H + (gap || 0) + l2H;
-  const topPad = Math.max(0, Math.round((btnH - blockH) / 2));
-
-  const l1x = x + Math.round((btnW - l1W) / 2);
-  const l1y = y + topPad;
-  g.appendChild(svgImage(line1, l1x - x, l1y - y, l1W, l1H));
-
-  const l2x = x + Math.round((btnW - l2W) / 2);
-  const l2y = l1y + l1H + (gap || 0);
-  g.appendChild(svgImage(line2, l2x - x, l2y - y, l2W, l2H));
-
-  host.appendChild(g);
-
-  // One-line: "Starts in 00:12:34"
-  const line = document.createElementNS(SVG_NS, "text");
-  line.setAttribute("x", String(xCenter));
-  line.setAttribute("y", String(y + btnH + 20));   // tweak this if you want it higher/lower
-  line.setAttribute("text-anchor", "middle");
-  line.setAttribute("class", "cta-note");
-
-  // static label
-  const tLabel = document.createElementNS(SVG_NS, "tspan");
-  tLabel.textContent = "Starts in ";
-
-  // dynamic value
-  const tVal = document.createElementNS(SVG_NS, "tspan");
-  const startTs = Number(mission?.mission_start || 0);
-  if (startTs > 0) {
-    tVal.setAttribute("data-countdown", String(startTs));
-    tVal.textContent = formatCountdown(startTs);
-  } else {
-    tVal.textContent = "—";
-  }
-
-  tVal.style.fontWeight = "700";
-
-  line.appendChild(tLabel);
-  line.appendChild(tVal);
-  host.appendChild(line);
-}
-
-function        renderCtaActive(host, mission){
-  const { xCenter, topY } = CTA_LAYOUT;
-  const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_ACTIVE;
-
-  const x = xCenter - Math.round(btnW / 2);
-  const y = topY;
-
-  const g = document.createElementNS(SVG_NS, "g");
-  g.setAttribute("class", "cta-btn");
-  g.setAttribute("transform", `translate(${x},${y})`);
-  g.setAttribute("role", "button");
-  g.setAttribute("tabindex", "0");
-
-  // button background + text
-  g.appendChild(svgImage(bg, null, null, btnW, btnH));
-  const txtX = x + Math.round((btnW - txtW) / 2);
-  const txtY = y + Math.round((btnH - txtH) / 2) + (txtDy || 0);
-  g.appendChild(svgImage(text, txtX - x, txtY - y, txtW, txtH));
-
-  // click → wallet popup (you can cancel)
-  g.addEventListener("click", () => handleBankItClick(mission));
-  g.addEventListener("mousedown", () => g.setAttribute("transform", `translate(${x},${y+1})`));
-  const reset = () => g.setAttribute("transform", `translate(${x},${y})`);
-  g.addEventListener("mouseup", reset);
-  g.addEventListener("mouseleave", reset);
-  g.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleBankItClick(mission); }
-  });
-
-  host.appendChild(g);
-
-  // One-line: "Ends in 00:12:34"
-  const line = document.createElementNS(SVG_NS, "text");
-  line.setAttribute("x", String(xCenter));
-  line.setAttribute("y", String(y + btnH + 20));
-  line.setAttribute("text-anchor", "middle");
-  line.setAttribute("class", "cta-note");
-
-  const tLabel = document.createElementNS(SVG_NS, "tspan");
-  tLabel.textContent = "Ends in ";
-
-  const tVal = document.createElementNS(SVG_NS, "tspan");
-  const endTs = Number(mission?.mission_end || 0);
-  if (endTs > 0) {
-    tVal.setAttribute("data-countdown", String(endTs));
-    tVal.textContent = formatCountdown(endTs);
-  } else {
-    tVal.textContent = "—";
-  }
-  tVal.style.fontWeight = "700";
-
-  line.appendChild(tLabel);
-  line.appendChild(tVal);
-  host.appendChild(line);
-}
+// #endregion
 
 async function  handleEnrollClick(mission){
   const signer = getSigner?.();
@@ -1330,7 +1235,453 @@ async function  refreshStageCtaIfOpen(){
   } catch {}
 }
 
-// click handlers
+// #region Render functions
+async function  renderStageCtaForStatus (mission)         {
+  const host = document.getElementById("stageCtaGroup");
+  if (!host) return;
+  host.innerHTML = "";
+
+  const st = uiStatusFor(mission);
+  if (st === 1) return renderCtaEnrolling(host, mission); // JOIN
+  if (st === 2) return renderCtaArming(host, mission);    // ENROLLMENT / CLOSED (disabled)
+  if (st === 3) return renderCtaActive(host, mission);    // Active → BANK IT!
+  if (st === 4) return renderCtaPaused(host, mission);    // Paused → Cooldown
+
+  // no CTA for other statuses (4,5,6,7) for now
+}
+
+async function  renderCtaEnrolling      (host, mission)   {
+  const { xCenter, topY } = CTA_LAYOUT;
+  const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_JOIN;
+
+  // center under vault
+  const x = xCenter - Math.round(btnW / 2);
+  const y = topY;
+
+  // Gating (wallet, window, already, spots, optional canEnroll)
+  const now   = Math.floor(Date.now()/1000);
+  const inWin = now < Number(mission.enrollment_end || 0);
+
+  const me = (walletAddress || "").toLowerCase();
+  let already = false, hasSpots = true, canEnrollSoft = true;
+
+  try {
+    const ro = getReadProvider();
+    const mc = new ethers.Contract(mission.mission_address, MISSION_ABI, ro);
+    const md = await mc.getMissionData();
+    const tuple = md?.[0] || md;
+    const players = (tuple?.players || []).map(a => String(a).toLowerCase());
+
+    already = !!(me && players.includes(me));
+
+    const maxP = Number(mission.enrollment_max_players ?? 0);
+    hasSpots = maxP ? (players.length < maxP) : true;
+
+    if (me && FACTORY_ADDRESS) {
+      const fac = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, ro);
+      canEnrollSoft = await fac.canEnroll(me);
+    }
+  } catch { /* leave permissive defaults */ }
+
+  let disabled = false, note = "";
+  if (!walletAddress) { disabled = true; note = "Connect your wallet to join"; }
+  else if (!inWin)    { disabled = true; note = "Enrollment closed"; }
+  else if (already)   { disabled = true; note = "You already joined"; }
+  else if (!hasSpots) { disabled = true; note = "No spots left"; }
+  else if (!canEnrollSoft) { disabled = true; note = "Weekly/monthly limit reached"; }
+  if (ctaBusy) { disabled = true; note = "Joining…"; }
+
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "cta-btn" + (disabled ? " cta-disabled" : ""));
+  g.setAttribute("transform", `translate(${x},${y})`);
+  g.setAttribute("role", "button");
+  g.setAttribute("tabindex", disabled ? "-1" : "0");
+
+  // bg + text
+  g.appendChild(svgImage(bg, null, null, btnW, btnH));
+
+  const txtX = x + Math.round((btnW - txtW) / 2);
+  const txtY = y + Math.round((btnH - txtH) / 2) + (txtDy || 0);
+  const tx = svgImage(text, txtX - x, txtY - y, txtW, txtH);
+  g.appendChild(tx);
+
+  // note
+  if (note) {
+    const n = document.createElementNS(SVG_NS, "text");
+    n.setAttribute("id", "stageCtaNote");
+    n.setAttribute("x", String(xCenter));
+    n.setAttribute("y", String(y + btnH + 18));
+    n.setAttribute("text-anchor", "middle");
+    n.setAttribute("class", "cta-note");
+    n.textContent = note;
+    host.appendChild(n);
+  }
+
+  if (!disabled) {
+    g.addEventListener("click", () => handleEnrollClick(mission));
+    g.addEventListener("mousedown", () => g.setAttribute("transform", `translate(${x},${y+1})`));
+    const reset = () => g.setAttribute("transform", `translate(${x},${y})`);
+    g.addEventListener("mouseup", reset);
+    g.addEventListener("mouseleave", reset);
+    g.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleEnrollClick(mission); }
+    });
+  }
+
+  host.appendChild(g);
+} 
+
+function        renderCtaArming         (host, mission)   {
+  const { xCenter, topY } = CTA_LAYOUT;
+  const { bg, line1, line2, btnW, btnH, l1W, l1H, l2W, l2H, gap } = CTA_ARMING;
+
+  const x = xCenter - Math.round(btnW / 2);
+  const y = topY;
+
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "cta-btn cta-disabled");
+  g.setAttribute("transform", `translate(${x},${y})`);
+
+  // bg
+  g.appendChild(svgImage(bg, null, null, btnW, btnH));
+
+  // two centered lines
+  const blockH = l1H + (gap || 0) + l2H;
+  const topPad = Math.max(0, Math.round((btnH - blockH) / 2));
+
+  const l1x = x + Math.round((btnW - l1W) / 2);
+  const l1y = y + topPad;
+  g.appendChild(svgImage(line1, l1x - x, l1y - y, l1W, l1H));
+
+  const l2x = x + Math.round((btnW - l2W) / 2);
+  const l2y = l1y + l1H + (gap || 0);
+  g.appendChild(svgImage(line2, l2x - x, l2y - y, l2W, l2H));
+
+  host.appendChild(g);
+
+  // One-line: "Starts in 00:12:34"
+  const line = document.createElementNS(SVG_NS, "text");
+  line.setAttribute("x", String(xCenter));
+  line.setAttribute("y", String(y + btnH + 20));   // tweak this if you want it higher/lower
+  line.setAttribute("text-anchor", "middle");
+  line.setAttribute("class", "cta-note");
+
+  // static label
+  const tLabel = document.createElementNS(SVG_NS, "tspan");
+  tLabel.textContent = "Starts in ";
+
+  // dynamic value
+  const tVal = document.createElementNS(SVG_NS, "tspan");
+  const startTs = Number(mission?.mission_start || 0);
+  if (startTs > 0) {
+    tVal.setAttribute("data-countdown", String(startTs));
+    tVal.textContent = formatCountdown(startTs);
+  } else {
+    tVal.textContent = "—";
+  }
+
+  tVal.style.fontWeight = "700";
+
+  line.appendChild(tLabel);
+  line.appendChild(tVal);
+  host.appendChild(line);
+}
+
+function        renderCtaActive         (host, mission)   {
+  const { xCenter, topY } = CTA_LAYOUT;
+  const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_ACTIVE;
+  const x = xCenter - Math.round(btnW / 2);
+  const y = topY;
+
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "cta-btn");
+  g.setAttribute("transform", `translate(${x},${y})`);
+  g.setAttribute("role", "button");
+  g.setAttribute("tabindex", "0");
+
+  // button background + text
+  g.appendChild(svgImage(bg, null, null, btnW, btnH));
+  const txtX = x + Math.round((btnW - txtW) / 2);
+  const txtY = y + Math.round((btnH - txtH) / 2) + (txtDy || 0);
+  g.appendChild(svgImage(text, txtX - x, txtY - y, txtW, txtH));
+
+  // click → wallet popup
+  g.addEventListener("click", () => handleBankItClick(mission));
+  g.addEventListener("mousedown", () => g.setAttribute("transform", `translate(${x},${y+1})`));
+  const reset = () => g.setAttribute("transform", `translate(${x},${y})`);
+  g.addEventListener("mouseup", reset);
+  g.addEventListener("mouseleave", reset);
+  g.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleBankItClick(mission); }
+  });
+
+  host.appendChild(g);
+
+  // Line 1: "Ends in …" (auto-ticked by [data-countdown])
+  const line = document.createElementNS(SVG_NS, "text");
+  line.setAttribute("x", String(xCenter));
+  line.setAttribute("y", String(y + btnH + 20));
+  line.setAttribute("text-anchor", "middle");
+  line.setAttribute("class", "cta-note");
+
+  const tLabel = document.createElementNS(SVG_NS, "tspan");
+  tLabel.textContent = "Ends in ";
+
+  const tVal = document.createElementNS(SVG_NS, "tspan");
+  const endTs = Number(mission?.mission_end || 0);
+  if (endTs > 0) {
+    tVal.setAttribute("data-countdown", String(endTs));
+    tVal.textContent = formatCountdown(endTs);
+  } else {
+    tVal.textContent = "—";
+  }
+  tVal.style.fontWeight = "700";
+  line.appendChild(tLabel);
+  line.appendChild(tVal);
+  host.appendChild(line);
+
+  // Line 2: "Bank now: X.XX CRO" (updates every second)
+  const bank = document.createElementNS(SVG_NS, "text");
+  bank.setAttribute("x", String(xCenter));
+  bank.setAttribute("y", String(y + btnH + 36));
+  bank.setAttribute("text-anchor", "middle");
+  bank.setAttribute("class", "cta-note");
+  bank.setAttribute("data-bank-now", "1");
+
+  const lastTs = getLastBankTs(mission, mission?.rounds);
+  const weiNow = computeBankNowWei(mission, lastTs);
+  const croNow = weiToCro(String(weiNow), 2);          // ← 2 decimals
+  bank.textContent = `Bank now: ${croNow} CRO`;
+
+  host.appendChild(bank);
+}
+
+function        renderCtaPaused         (host, mission)   {
+  const { xCenter, topY } = CTA_LAYOUT;
+  const { bg, btnW, btnH } = CTA_ACTIVE; // reuse the wide button art
+  const x = xCenter - Math.round(btnW / 2);
+  const y = topY;
+
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "cta-btn cta-disabled");
+  g.setAttribute("transform", `translate(${x},${y})`);
+
+  // background only (no "BANK IT!" text)
+  g.appendChild(svgImage(bg, null, null, btnW, btnH));
+
+  // Centered dynamic cooldown label inside the button
+  const cool = document.createElementNS(SVG_NS, "text");
+  cool.setAttribute("x", String(xCenter));
+  cool.setAttribute("y", String(y + Math.round(btnH/2) + 5));
+  cool.setAttribute("text-anchor", "middle");
+  cool.setAttribute("font-family", "system-ui, Segoe UI, Arial");
+  cool.setAttribute("font-size", "14");
+  cool.setAttribute("fill", "#ffffff");
+
+  const tLabel = document.createElementNS(SVG_NS, "tspan");
+  tLabel.textContent = "Cooldown: ";
+
+  const tVal = document.createElementNS(SVG_NS, "tspan");
+  const info = cooldownInfo(mission);
+  if (info.pauseEnd) {
+    tVal.setAttribute("data-cooldown-end", String(info.pauseEnd));
+    tVal.textContent = formatMMSS(info.secsLeft);
+  } else {
+    tVal.textContent = "00:00";
+  }
+  tVal.style.fontWeight = "700";
+  cool.appendChild(tLabel);
+  cool.appendChild(tVal);
+  g.appendChild(cool);
+
+  host.appendChild(g);
+
+  // Under-button: "Ends in …"
+  const line = document.createElementNS(SVG_NS, "text");
+  line.setAttribute("x", String(xCenter));
+  line.setAttribute("y", String(y + btnH + 20));
+  line.setAttribute("text-anchor", "middle");
+  line.setAttribute("class", "cta-note");
+
+  const eLabel = document.createElementNS(SVG_NS, "tspan");
+  eLabel.textContent = "Ends in ";
+
+  const eVal = document.createElementNS(SVG_NS, "tspan");
+  const endTs = Number(mission?.mission_end || 0);
+  if (endTs > 0) {
+    eVal.setAttribute("data-countdown", String(endTs));
+    eVal.textContent = formatCountdown(endTs);
+  } else {
+    eVal.textContent = "—";
+  }
+  eVal.style.fontWeight = "700";
+  line.appendChild(eLabel);
+  line.appendChild(eVal);
+  host.appendChild(line);
+}
+
+function        renderRoundBankedNotice (roundNo, winner) {
+  const host = document.getElementById("stageNoticeGroup");
+  if (!host) return;
+
+  // Clear any previous notice
+  host.innerHTML = "";
+
+  // Simple centered capsule just above the CTA button
+  const { xCenter, topY } = CTA_LAYOUT;
+  const W = 360, H = 26;
+  const x = xCenter - Math.round(W/2);
+  const y = Math.max(0, topY - 12 - H);
+
+  const g = document.createElementNS(SVG_NS, "g");
+
+  // Background capsule
+  const bg = document.createElementNS(SVG_NS, "rect");
+  bg.setAttribute("x", String(x));
+  bg.setAttribute("y", String(y));
+  bg.setAttribute("width",  String(W));
+  bg.setAttribute("height", String(H));
+  bg.setAttribute("rx", "12");
+  bg.setAttribute("ry", "12");
+  bg.setAttribute("fill", "rgba(6,29,45,.85)");
+  bg.setAttribute("stroke", "rgba(72,221,255,.35)");
+  g.appendChild(bg);
+
+  // Main text
+  const txt = document.createElementNS(SVG_NS, "text");
+  txt.setAttribute("x", String(x + 12));
+  txt.setAttribute("y", String(y + 17));
+  txt.setAttribute("class", "notice-text");
+  const short = winner ? shorten(winner) : "";
+  txt.textContent = `Round ${roundNo} banked by ${short}`;
+  g.appendChild(txt);
+
+  // [copy] action
+  if (winner){
+    const tCopy = document.createElementNS(SVG_NS, "text");
+    tCopy.setAttribute("x", String(x + W - 74));
+    tCopy.setAttribute("y", String(y + 17));
+    tCopy.setAttribute("class", "notice-text");
+    tCopy.setAttribute("role", "button");
+    tCopy.setAttribute("tabindex", "0");
+    tCopy.style.cursor = "pointer";
+    tCopy.textContent = "[copy]";
+    tCopy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(winner); } catch {}
+    });
+    g.appendChild(tCopy);
+
+    // [↗︎] external link
+    const tLink = document.createElementNS(SVG_NS, "text");
+    tLink.setAttribute("x", String(x + W - 42));
+    tLink.setAttribute("y", String(y + 17));
+    tLink.setAttribute("class", "notice-text");
+    tLink.setAttribute("role", "button");
+    tLink.setAttribute("tabindex", "0");
+    tLink.style.cursor = "pointer";
+    tLink.textContent = "[↗︎]";
+    tLink.addEventListener("click", () => {
+      const url = `https://cronoscan.com/address/${winner}`;
+      try { window.open(url, "_blank", "noopener"); } catch {}
+    });
+    g.appendChild(tLink);
+  }
+
+  // Close ×
+  const tClose = document.createElementNS(SVG_NS, "text");
+  tClose.setAttribute("x", String(x + W - 16));
+  tClose.setAttribute("y", String(y + 17));
+  tClose.setAttribute("class", "notice-text");
+  tClose.setAttribute("role", "button");
+  tClose.setAttribute("tabindex", "0");
+  tClose.style.cursor = "pointer";
+  tClose.textContent = "×";
+  tClose.addEventListener("click", () => { host.innerHTML = ""; });
+  g.appendChild(tClose);
+
+  host.appendChild(g);
+}
+
+async function renderStageEndedPanelIfNeeded(mission){
+  const host = document.getElementById("stageEndedGroup");
+  if (!host) return;
+  host.innerHTML = "";
+
+  const st = Number(mission?.status ?? -1);
+  if (st < 5) return;                      // only for ended variants
+
+  // Fetch winners data (enrollments + rounds) for this mission
+  let enrollments = [], rounds = [];
+  try {
+    const data = await apiMission(mission.mission_address);
+    enrollments = data?.enrollments || [];
+    rounds      = data?.rounds       || [];
+  } catch { /* keep empty */ }
+
+  const winners = topWinners(enrollments, rounds, 3); // show top 3
+
+  // Panel layout (centered under the vault, above CTA)
+  const x = 500;                 // viewBox center
+  const y = 520;                 // a bit above CTA (CTA topY is 555)
+  const lineH = 16;
+
+  const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+
+  // Title
+  const t = document.createElementNS("http://www.w3.org/2000/svg","text");
+  t.setAttribute("x", String(x));
+  t.setAttribute("y", String(y));
+  t.setAttribute("text-anchor", "middle");
+  t.setAttribute("class", "notice-text");
+  t.textContent = "Mission ended — Top winners";
+  g.appendChild(t);
+
+  // Lines with top winners
+  winners.forEach((w, i) => {
+    const row = document.createElementNS("http://www.w3.org/2000/svg","text");
+    row.setAttribute("x", String(x));
+    row.setAttribute("y", String(y + (i+1)*lineH));
+    row.setAttribute("text-anchor", "middle");
+    row.setAttribute("class", "notice-text");
+    const cro = weiToCro(String(w.totalWei), 2);
+    row.textContent = `${w.addr.slice(0,6)}…${w.addr.slice(-4)} — ${cro} CRO`;
+    g.appendChild(row);
+  });
+
+  // Link: View all winners → open detail and mark return target
+  const link = document.createElementNS("http://www.w3.org/2000/svg","text");
+  link.setAttribute("x", String(x));
+  link.setAttribute("y", String(y + (winners.length+2)*lineH));
+  link.setAttribute("text-anchor", "middle");
+  link.setAttribute("class", "notice-text");
+  link.style.cursor = "pointer";
+  link.textContent = "View all winners";
+  link.addEventListener("click", async () => {
+    stageReturnTo = "stage";
+    await openMission(mission.mission_address);
+    // show as overlay so ESC/close feels modal from stage
+    els.missionDetail.classList.add("overlay");
+    els.missionDetail.style.display = "block";
+    lockScroll();
+  });
+
+  g.appendChild(link);
+  host.appendChild(g);
+}
+
+// #endregion
+
+window.addEventListener("resize", layoutStage);
+
+// #region click handlers
+connectBtn.addEventListener("click", () => {
+  if (walletAddress){
+    showConfirm("Disconnect current wallet?", disconnectWallet);
+  } else {
+    connectWallet(); 
+  }
+});
+
 btnAllMissions?.addEventListener("click", async () => {
   await cleanupMissionDetail();
   showOnlySection("allMissionsSection");
@@ -1355,6 +1706,7 @@ btnMyMissions?.addEventListener("click", async () => {
     }
   }
 });
+// #endregion
 
 let countdownTimer = null;
 function stopCountdown(){ if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }}
@@ -2009,14 +2361,31 @@ async function openMission(addr){
 }
 
 async function closeMission(){
+  const cameFromStage = (stageReturnTo === "stage") && !!currentMissionAddr;
+  const addr = currentMissionAddr;
+
   els.missionDetail.classList.remove("overlay");
   els.missionDetail.style.display = "none";
   unlockScroll();
+
   await cleanupMissionDetail();
   stopCountdown();
   clearDetailRefresh();
+
+  if (cameFromStage && addr){
+    // Re-open the stage for the same mission
+    try {
+      const data = await apiMission(addr);
+      const m = data?.mission || data;
+      await showGameStage(m);
+      await renderStageEndedPanelIfNeeded(m);
+      stageReturnTo = null;
+      return;
+    } catch { /* fall through */ }
+  }
+
+  stageReturnTo = null;
   currentMissionAddr = null;
-  // restore the previous list (joinable by default until we add footer nav)
   showOnlySection(lastListShownId);
 }
 
