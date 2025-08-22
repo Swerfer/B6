@@ -331,6 +331,21 @@ function topWinners(enrollments = [], rounds = [], n = 5){
   return arr.slice(0, n);
 }
 
+function failureReasonFor(mission){
+  if (Number(mission?.status) !== 7) return null;
+  const min   = Number(mission?.enrollment_min_players ?? 0);
+  const joined= Number(mission?.enrolled_players       ?? 0);
+  const rounds= Number(mission?.round_count            ?? 0);
+
+  // Your two failure modes:
+  // A) Not enough players enrolled (never started)
+  if (rounds === 0 && joined < min)  return "Not enough players";
+  // B) Enough players, but no rounds were played before end
+  if (rounds === 0 && joined >= min) return "No rounds played";
+
+  return null;
+}
+
 // #endregion
 
 /* Load + size the status word image and center it under the title */
@@ -422,6 +437,12 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
       if (end > 0) {
         const left = Math.max(0, end - now);
         el.textContent = formatMMSS(left);
+
+        // NEW: when cooldown hits 0 in Paused (4), force a single refresh
+        if (left === 0 && Number(missionObj?.status) === 4 && !el.dataset.cooldownFlipDone) {
+          el.dataset.cooldownFlipDone = "1";       // debounce
+          refreshOpenStageFromServer(1);           // re-pull status/CTA from backend
+        }
       }
     });
 
@@ -1602,15 +1623,53 @@ function        renderRoundBankedNotice (roundNo, winner) {
   host.appendChild(g);
 }
 
-async function renderStageEndedPanelIfNeeded(mission){
+async function  renderStageEndedPanelIfNeeded(mission){
   const host = document.getElementById("stageEndedGroup");
   if (!host) return;
   host.innerHTML = "";
 
   const st = Number(mission?.status ?? -1);
-  if (st < 5) return;                      // only for ended variants
+  if (st < 5) return; // only ended bucket
 
-  // Fetch winners data (enrollments + rounds) for this mission
+  // NEW — Failed (status 7): render reason + refund line and exit
+  if (st === 7) {
+    const x = 500, y = 520;
+    const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+
+    const title = document.createElementNS("http://www.w3.org/2000/svg","text");
+    title.setAttribute("x", String(x));
+    title.setAttribute("y", String(y));
+    title.setAttribute("text-anchor", "middle");
+    title.setAttribute("class", "notice-text");
+    title.textContent = "FAILED";
+    title.style.fill = "#ff6b6b";
+    title.style.fontWeight = "700";
+    g.appendChild(title);
+
+    const reason = failureReasonFor(mission); // ← NEW helper
+    if (reason){
+      const r = document.createElementNS("http://www.w3.org/2000/svg","text");
+      r.setAttribute("x", String(x));
+      r.setAttribute("y", String(y + 18));
+      r.setAttribute("text-anchor", "middle");
+      r.setAttribute("class", "notice-text");
+      r.textContent = reason;
+      g.appendChild(r);
+    }
+
+    const note = document.createElementNS("http://www.w3.org/2000/svg","text");
+    note.setAttribute("x", String(x));
+    note.setAttribute("y", String(y + 36));
+    note.setAttribute("text-anchor", "middle");
+    note.setAttribute("class", "notice-text");
+    note.textContent = "All players will be refunded soon.";
+    g.appendChild(note);
+
+    host.appendChild(g);
+    return; // <- do not fetch winners for failed
+  }
+
+  // Partly Success / Success (5/6) — existing “Top winners” block
   let enrollments = [], rounds = [];
   try {
     const data = await apiMission(mission.mission_address);
@@ -1618,16 +1677,11 @@ async function renderStageEndedPanelIfNeeded(mission){
     rounds      = data?.rounds       || [];
   } catch { /* keep empty */ }
 
-  const winners = topWinners(enrollments, rounds, 3); // show top 3
+  const winners = topWinners(enrollments, rounds, 3);
 
-  // Panel layout (centered under the vault, above CTA)
-  const x = 500;                 // viewBox center
-  const y = 520;                 // a bit above CTA (CTA topY is 555)
-  const lineH = 16;
-
+  const x = 500, y = 520, lineH = 16;
   const g = document.createElementNS("http://www.w3.org/2000/svg","g");
 
-  // Title
   const t = document.createElementNS("http://www.w3.org/2000/svg","text");
   t.setAttribute("x", String(x));
   t.setAttribute("y", String(y));
@@ -1636,7 +1690,6 @@ async function renderStageEndedPanelIfNeeded(mission){
   t.textContent = "Mission ended — Top winners";
   g.appendChild(t);
 
-  // Lines with top winners
   winners.forEach((w, i) => {
     const row = document.createElementNS("http://www.w3.org/2000/svg","text");
     row.setAttribute("x", String(x));
@@ -1648,7 +1701,6 @@ async function renderStageEndedPanelIfNeeded(mission){
     g.appendChild(row);
   });
 
-  // Link: View all winners → open detail and mark return target
   const link = document.createElementNS("http://www.w3.org/2000/svg","text");
   link.setAttribute("x", String(x));
   link.setAttribute("y", String(y + (winners.length+2)*lineH));
@@ -1659,7 +1711,6 @@ async function renderStageEndedPanelIfNeeded(mission){
   link.addEventListener("click", async () => {
     stageReturnTo = "stage";
     await openMission(mission.mission_address);
-    // show as overlay so ESC/close feels modal from stage
     els.missionDetail.classList.add("overlay");
     els.missionDetail.style.display = "block";
     lockScroll();
