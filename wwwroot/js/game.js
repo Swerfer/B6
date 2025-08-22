@@ -656,15 +656,15 @@ function unlockScroll(){
   window.scrollTo(0, -top);
 }
 
-/* ---------- SignalR: connect to /hub/game ---------- */
+// #region SignalR ---------- 
 
 function stateName(s){
   const H = signalR.HubConnectionState;
-  return s === H.Connected ? "Connected"
-    : s === H.Disconnected ? "Disconnected"
-    : s === H.Connecting ? "Connecting"
-    : s === H.Reconnecting ? "Reconnecting"
-    : String(s);
+  return  s === H.Connected     ? "Connected"
+        : s === H.Disconnected  ? "Disconnected"
+        : s === H.Connecting    ? "Connecting"
+        : s === H.Reconnecting  ? "Reconnecting"
+        : String(s);
 }
 
 async function startHub() { // SignalR HUB
@@ -778,8 +778,13 @@ async function safeSubscribe(){
   }
 }
 
+// #endregion
+
 function clearDetailRefresh(){          
-  if (detailRefreshTimer) { clearTimeout(detailRefreshTimer); detailRefreshTimer = null; }
+  if (detailRefreshTimer) { 
+    clearTimeout(detailRefreshTimer); 
+    detailRefreshTimer = null; 
+  }
 }
 
 function scheduleDetailRefresh(reset=false){ 
@@ -806,7 +811,7 @@ function scheduleDetailRefresh(reset=false){
   }, detailBackoffMs);
 }
 
-/* ---------- API wrappers (ALL under /api) ---------- */
+// #region API wrappers 
 async function fetchAndRenderAllMissions(){
   try {
     // 1) Factory call (chain): get the full mission index
@@ -870,6 +875,8 @@ async function apiMission(addr){
   return r.json();
 }
 
+// #endregion
+
 async function refreshOpenStageFromServer(retries = 3) {
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
@@ -896,7 +903,7 @@ async function refreshOpenStageFromServer(retries = 3) {
   } catch { /* ignore transient errors */ }
 }
 
-/* ---------- DOM refs ---------- */
+// #region dom elements
 const els = {
   joinableList:             document.getElementById("joinableList"),
   joinableEmpty:            document.getElementById("joinableEmpty"),
@@ -917,7 +924,6 @@ const els = {
   refreshAllBtn:            document.getElementById("refreshAllBtn"),
 };
 
-// #region dom elements
 const btnAllMissions      = document.getElementById("btnAllMissions"    );
 const btnJoinable         = document.getElementById("btnJoinable"       );
 const btnMyMissions       = document.getElementById("btnMyMissions"     );
@@ -962,7 +968,7 @@ async function showGameStage(mission){
 
 }
 
-// Use "Active" HUD when simulating during Enrolling
+// #region HUD
 function hudStatusFor(mission){
   const st = Number(mission?.status ?? -1);
   return st;
@@ -1165,6 +1171,7 @@ function uiStatusFor(mission){
   const st = Number(mission?.status ?? -1);
   return st;
 }
+// #endregion
 
 // #region CTA's
 // ── CTA assets & layout (single source of truth) ─────────────────────────
@@ -1812,105 +1819,7 @@ async function  renderStageEndedPanelIfNeeded(mission){
   host.appendChild(g);
 }
 
-// #endregion
-
-window.addEventListener("resize", layoutStage);
-
-// #region click handlers
-connectBtn.addEventListener("click", () => {
-  if (walletAddress){
-    showConfirm("Disconnect current wallet?", disconnectWallet);
-  } else {
-    connectWallet(); 
-  }
-});
-
-btnAllMissions?.addEventListener("click", async () => {
-  await cleanupMissionDetail();
-  showOnlySection("allMissionsSection");
-  await fetchAndRenderAllMissions(); 
-});
-
-btnJoinable?.addEventListener("click", async () => {
-  await cleanupMissionDetail();
-  showOnlySection("joinableSection");
-});
-
-btnMyMissions?.addEventListener("click", async () => {
-  await cleanupMissionDetail();
-  showOnlySection("myMissionsSection");
-  if (walletAddress) {
-    try {
-      const mine = await apiPlayerMissions(walletAddress.toLowerCase());
-      renderMyMissions(mine);
-    } catch (err) { 
-      console.error("[myMissions] failed" , err);
-      showAlert("Couldn't load your missions.", "error"); 
-    }
-  }
-});
-// #endregion
-
-let countdownTimer = null;
-function stopCountdown(){ if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }}
-
-// Live ticker for Joinable list
-let joinableTimer = null;
-function stopJoinableTicker(){
-  if (joinableTimer) { clearInterval(joinableTimer); joinableTimer = null; }
-}
-
-function startJoinableTicker(){
-  stopJoinableTicker();
-
-  const tick = () => {
-    const nowSec = Math.floor(Date.now() / 1000);
-    let needsRefresh = false;
-
-    // update "Starts in"
-    document.querySelectorAll('[data-start]').forEach(el => {
-      const t = Number(el.getAttribute('data-start') || 0);
-      if (t > 0) {
-        const left = Math.max(0, t - nowSec);
-        el.textContent = formatCountdown(t);
-        if (left <= 0) needsRefresh = true;
-      } else {
-        el.textContent = '—';
-      }
-    });
-
-    // update "Ends in" for cards that provide it (e.g., My Missions active ones)
-    document.querySelectorAll('[data-end]').forEach(el => {
-      const t = Number(el.getAttribute('data-end') || 0);
-      el.textContent = t > 0 ? formatCountdown(t) : '—';
-    });
-
-    // color the current players count by min threshold
-    document.querySelectorAll('.players-count .current[data-min][data-current]').forEach(el => {
-      const cur = Number(el.getAttribute('data-current') || 0);
-      const min = Number(el.getAttribute('data-min') || 0);
-      el.classList.remove('ok', 'low');
-      el.classList.add(cur >= min ? 'ok' : 'low');
-      // keep the text updated in case API changed
-      el.textContent = String(cur);
-    });
-
-    // if any mission just reached start, refresh the list once
-    if (needsRefresh) {
-      // small debounce: stop ticker, refetch, re-render, restart
-      stopJoinableTicker();
-      apiJoinable()
-        .then(items => { renderJoinable(items); startJoinableTicker(); })
-        .catch(() => { /* ignore transient */ });
-    }
-  };
-
-  tick(); // immediate paint
-  joinableTimer = setInterval(tick, 1000);
-}
-
-/* ---------- renderers ---------- */
-function renderAllMissions(missions = []) {
+function        renderAllMissions(missions = []) {
   const ul = document.getElementById("allMissionsList");
   const empty = document.getElementById("allMissionsEmpty");
   if (!ul || !empty) return;
@@ -2046,7 +1955,7 @@ function renderAllMissions(missions = []) {
   startJoinableTicker();
 }
 
-function renderJoinable(items){
+function        renderJoinable(items){
   els.joinableList.innerHTML = "";
   els.joinableEmpty.style.display = items?.length ? "none" : "";
   els.joinableList?.classList.add('card-grid');
@@ -2122,7 +2031,7 @@ function renderJoinable(items){
   }
 }
 
-function renderMyMissions(items){
+function        renderMyMissions(items){
   els.myMissionsList.innerHTML = "";
   els.myMissionsEmpty.style.display = items?.length ? "none" : "";
   els.myMissionsList?.classList.add('card-grid');
@@ -2209,7 +2118,7 @@ function renderMyMissions(items){
   }
 }
 
-async function renderMissionDetail({ mission, enrollments, rounds }){
+async function  renderMissionDetail({ mission, enrollments, rounds }){
   const me   = (walletAddress || "").toLowerCase();
   const now  = Math.floor(Date.now()/1000);
   const isEnrolling = mission.status === 1 && now < mission.enrollment_end;
@@ -2442,6 +2351,103 @@ async function renderMissionDetail({ mission, enrollments, rounds }){
 
 }
 
+// #endregion
+
+window.addEventListener("resize", layoutStage);
+
+// #region click handlers
+connectBtn.addEventListener("click", () => {
+  if (walletAddress){
+    showConfirm("Disconnect current wallet?", disconnectWallet);
+  } else {
+    connectWallet(); 
+  }
+});
+
+btnAllMissions?.addEventListener("click", async () => {
+  await cleanupMissionDetail();
+  showOnlySection("allMissionsSection");
+  await fetchAndRenderAllMissions(); 
+});
+
+btnJoinable?.addEventListener("click", async () => {
+  await cleanupMissionDetail();
+  showOnlySection("joinableSection");
+});
+
+btnMyMissions?.addEventListener("click", async () => {
+  await cleanupMissionDetail();
+  showOnlySection("myMissionsSection");
+  if (walletAddress) {
+    try {
+      const mine = await apiPlayerMissions(walletAddress.toLowerCase());
+      renderMyMissions(mine);
+    } catch (err) { 
+      console.error("[myMissions] failed" , err);
+      showAlert("Couldn't load your missions.", "error"); 
+    }
+  }
+});
+// #endregion
+
+let countdownTimer = null;
+function stopCountdown(){ if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }}
+
+// Live ticker for Joinable list
+let joinableTimer = null;
+function stopJoinableTicker(){
+  if (joinableTimer) { clearInterval(joinableTimer); joinableTimer = null; }
+}
+
+function startJoinableTicker(){
+  stopJoinableTicker();
+
+  const tick = () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    let needsRefresh = false;
+
+    // update "Starts in"
+    document.querySelectorAll('[data-start]').forEach(el => {
+      const t = Number(el.getAttribute('data-start') || 0);
+      if (t > 0) {
+        const left = Math.max(0, t - nowSec);
+        el.textContent = formatCountdown(t);
+        if (left <= 0) needsRefresh = true;
+      } else {
+        el.textContent = '—';
+      }
+    });
+
+    // update "Ends in" for cards that provide it (e.g., My Missions active ones)
+    document.querySelectorAll('[data-end]').forEach(el => {
+      const t = Number(el.getAttribute('data-end') || 0);
+      el.textContent = t > 0 ? formatCountdown(t) : '—';
+    });
+
+    // color the current players count by min threshold
+    document.querySelectorAll('.players-count .current[data-min][data-current]').forEach(el => {
+      const cur = Number(el.getAttribute('data-current') || 0);
+      const min = Number(el.getAttribute('data-min') || 0);
+      el.classList.remove('ok', 'low');
+      el.classList.add(cur >= min ? 'ok' : 'low');
+      // keep the text updated in case API changed
+      el.textContent = String(cur);
+    });
+
+    // if any mission just reached start, refresh the list once
+    if (needsRefresh) {
+      // small debounce: stop ticker, refetch, re-render, restart
+      stopJoinableTicker();
+      apiJoinable()
+        .then(items => { renderJoinable(items); startJoinableTicker(); })
+        .catch(() => { /* ignore transient */ });
+    }
+  };
+
+  tick(); // immediate paint
+  joinableTimer = setInterval(tick, 1000);
+}
+
 async function hydrateAllMissionsRealtime(listEl){
   if (!listEl) return;
   const cards = [...listEl.querySelectorAll("li.mission-card")];
@@ -2482,7 +2488,9 @@ async function hydrateAllMissionsRealtime(listEl){
 
 }
 
-/* ---------- interactions ---------- */
+
+
+// #region Interactions ---------- */
 async function openMission(addr){
   try {
     currentMissionAddr = addr.toLowerCase(); 
@@ -2572,6 +2580,8 @@ async function triggerRoundCurrentMission(mission){
     setBtnLoading(document.getElementById("btnTrigger"), false, "Trigger Round", false);
   }
 }
+
+// #endregion
 
 /* ---------- page init ---------- */
 async function init(){
