@@ -1966,13 +1966,7 @@ function renderAllMissions(missions = []) {
     `;
 
     // clicking opens detail
-    li.addEventListener("click", async () => {
-      await cleanupMissionDetail();
-      currentMissionAddr = (m.mission_address || "").toLowerCase();
-      showOnlySection("missionDetailSection");
-      const data = await apiMission(currentMissionAddr).catch(() => null);
-      if (data?.mission) renderMissionDetail(data);
-    });
+    li.addEventListener("click", () => openMission(m.mission_address));
 
     ul.appendChild(li);
   }
