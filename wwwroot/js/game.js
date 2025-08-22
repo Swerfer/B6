@@ -356,7 +356,9 @@ function setStageStatusImage(slug){
 }
 
 // ---- center timer (short form) ----
-function stopStageTimer(){ if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } }
+function stopStageTimer(){ 
+  if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } 
+}
 
 function formatStageShort(leftSec){
   const s = Math.max(0, Math.floor(leftSec));
@@ -428,8 +430,25 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
       if (!missionObj) return;
       const last = getLastBankTs(missionObj, missionObj?.rounds);
       const wei  = computeBankNowWei(missionObj, last, now);
-      const cro  = weiToCro(String(wei), 2);             // ← 2 decimals
-      el.textContent = `Bank now: ${cro} CRO`;
+      const cro  = weiToCro(String(wei), 2);
+
+      const st   = Number(missionObj?.status);
+      const me   = (walletAddress || "").toLowerCase();
+      const joined = !!(me && (missionObj?.enrollments || []).some(e => {
+        const p = String(e?.player_address || e?.address || e?.player || "").toLowerCase();
+        return p === me;
+      }));
+      const alreadyWon = !!(me && (missionObj?.rounds || []).some(r => {
+        const w = String(r?.winner_address || "").toLowerCase();
+        return w === me;
+      }));
+      const eligible = !!walletAddress && joined && !alreadyWon;
+
+      let label =                         "Bank this round:";       // Active & eligible
+      if (st === 3 && !eligible) label =  "Prize pool right now:";  // Active view-only
+      if (st === 4) label =               "Prize pool accruing:";   // Paused
+
+      el.textContent = `${label} ${cro} CRO`;
     });
 
     // NEW: update Paused cooldown mm:ss
@@ -952,7 +971,6 @@ function hudStatusFor(mission){
 const IMG_W = 2000, IMG_H = 2000;
 const visibleRectangle  = { x:566, y:420, w:914, h:1238 }; // visibleRectangle was the rectangle from the phone header to footer space and phone 
                                                            // screen width on the vault bg image. This rectangle is always visible on every screen
-
 function layoutStage(){
   if (!stage || !stageViewport || !stageImg) return;
   const availW = stageViewport.clientWidth;
@@ -1424,29 +1442,61 @@ function        renderCtaActive         (host, mission)   {
   const x = xCenter - Math.round(btnW / 2);
   const y = topY;
 
-  const g = document.createElementNS(SVG_NS, "g");
-  g.setAttribute("class", "cta-btn");
-  g.setAttribute("transform", `translate(${x},${y})`);
-  g.setAttribute("role", "button");
-  g.setAttribute("tabindex", "0");
+  // --- NEW: pre-render gating for view-only states ---
+  const me = (walletAddress || "").toLowerCase();
 
-  // button background + text
-  g.appendChild(svgImage(bg, null, null, btnW, btnH));
-  const txtX = x + Math.round((btnW - txtW) / 2);
-  const txtY = y + Math.round((btnH - txtH) / 2) + (txtDy || 0);
-  g.appendChild(svgImage(text, txtX - x, txtY - y, txtW, txtH));
+  // joined?
+  const joined = !!(me && (mission?.enrollments || []).some(e => {
+    const p = String(e?.player_address || e?.address || e?.player || "").toLowerCase();
+    return p === me;
+  }));
 
-  // click → wallet popup
-  g.addEventListener("click", () => handleBankItClick(mission));
-  g.addEventListener("mousedown", () => g.setAttribute("transform", `translate(${x},${y+1})`));
-  const reset = () => g.setAttribute("transform", `translate(${x},${y})`);
-  g.addEventListener("mouseup", reset);
-  g.addEventListener("mouseleave", reset);
-  g.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleBankItClick(mission); }
-  });
+  // already won any round?
+  const alreadyWon = !!(me && (mission?.rounds || []).some(r => {
+    const w = String(r?.winner_address || "").toLowerCase();
+    return w === me;
+  }));
 
-  host.appendChild(g);
+  let blockReason = "";
+  if (!walletAddress)        blockReason = "Connect your wallet to bank";
+  else if (!joined)          blockReason = "You did not join this mission";
+  else if (alreadyWon)       blockReason = "View only. You already won a round";
+
+  if (blockReason) {
+    // Centered message in the CTA area, no button rendered
+    const msg = document.createElementNS(SVG_NS, "text");
+    msg.setAttribute("x", String(xCenter));
+    msg.setAttribute("y", String(y + Math.round(btnH / 2) + 7));
+    msg.setAttribute("text-anchor", "middle");
+    msg.setAttribute("class", "cta-note");
+    msg.textContent = blockReason;
+    host.appendChild(msg);
+  } else {
+    // --- Original clickable BANK IT! button ---
+    const g = document.createElementNS(SVG_NS, "g");
+    g.setAttribute("class", "cta-btn");
+    g.setAttribute("transform", `translate(${x},${y})`);
+    g.setAttribute("role", "button");
+    g.setAttribute("tabindex", "0");
+
+    // button background + text
+    g.appendChild(svgImage(bg, null, null, btnW, btnH));
+    const txtX = x + Math.round((btnW - txtW) / 2);
+    const txtY = y + Math.round((btnH - txtH) / 2) + (txtDy || 0);
+    g.appendChild(svgImage(text, txtX - x, txtY - y, txtW, txtH));
+
+    // click → wallet popup
+    g.addEventListener("click", () => handleBankItClick(mission));
+    g.addEventListener("mousedown", () => g.setAttribute("transform", `translate(${x},${y+1})`));
+    const reset = () => g.setAttribute("transform", `translate(${x},${y})`);
+    g.addEventListener("mouseup", reset);
+    g.addEventListener("mouseleave", reset);
+    g.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleBankItClick(mission); }
+    });
+
+    host.appendChild(g);
+  }
 
   // Line 1: "Ends in …" (auto-ticked by [data-countdown])
   const line = document.createElementNS(SVG_NS, "text");
@@ -1471,7 +1521,7 @@ function        renderCtaActive         (host, mission)   {
   line.appendChild(tVal);
   host.appendChild(line);
 
-  // Line 2: "Bank now: X.XX CRO" (updates every second)
+  // Line 2: live bank/prize label (updates via [data-bank-now])
   const bank = document.createElementNS(SVG_NS, "text");
   bank.setAttribute("x", String(xCenter));
   bank.setAttribute("y", String(y + btnH + 36));
@@ -1479,11 +1529,14 @@ function        renderCtaActive         (host, mission)   {
   bank.setAttribute("class", "cta-note");
   bank.setAttribute("data-bank-now", "1");
 
+  // decide label based on viewer eligibility
+  const eligible  = !!walletAddress && joined && !alreadyWon;
+
   const lastTs = getLastBankTs(mission, mission?.rounds);
   const weiNow = computeBankNowWei(mission, lastTs);
-  const croNow = weiToCro(String(weiNow), 2);          // ← 2 decimals
-  bank.textContent = `Bank now: ${croNow} CRO`;
-
+  const croNow = weiToCro(String(weiNow), 2);
+  const label  = eligible ? "Bank now:" : "Current round prize pool:";
+  bank.textContent = `${label} ${croNow} CRO`;
   host.appendChild(bank);
 }
 
@@ -1692,7 +1745,7 @@ async function  renderStageEndedPanelIfNeeded(mission){
     return; // <- do not fetch winners for failed
   }
 
-  // Partly Success / Success (5/6) — existing “Top winners” block
+  // Partly Success / Success (5/6) — “Top winners” + subtype note
   let enrollments = [], rounds = [];
   try {
     const data = await apiMission(mission.mission_address);
@@ -1705,6 +1758,7 @@ async function  renderStageEndedPanelIfNeeded(mission){
   const x = 500, y = 520, lineH = 16;
   const g = document.createElementNS("http://www.w3.org/2000/svg","g");
 
+  // Title
   const t = document.createElementNS("http://www.w3.org/2000/svg","text");
   t.setAttribute("x", String(x));
   t.setAttribute("y", String(y));
@@ -1713,10 +1767,24 @@ async function  renderStageEndedPanelIfNeeded(mission){
   t.textContent = "Mission ended — Top winners";
   g.appendChild(t);
 
+  // NEW: subtype note (one extra line for 5/6)
+  let preLines = 1; // title only
+  if (st === 5 || st === 6) {
+    const sub = document.createElementNS("http://www.w3.org/2000/svg","text");
+    sub.setAttribute("x", String(x));
+    sub.setAttribute("y", String(y + lineH));
+    sub.setAttribute("text-anchor", "middle");
+    sub.setAttribute("class", "notice-text");
+    sub.textContent = (st === 6) ? "All rounds were banked." : "Mission time ended.";
+    g.appendChild(sub);
+    preLines = 2; // title + subtitle
+  }
+
+  // Winners list
   winners.forEach((w, i) => {
     const row = document.createElementNS("http://www.w3.org/2000/svg","text");
     row.setAttribute("x", String(x));
-    row.setAttribute("y", String(y + (i+1)*lineH));
+    row.setAttribute("y", String(y + preLines*lineH + i*lineH));
     row.setAttribute("text-anchor", "middle");
     row.setAttribute("class", "notice-text");
     const cro = weiToCro(String(w.totalWei), 2);
@@ -1724,9 +1792,10 @@ async function  renderStageEndedPanelIfNeeded(mission){
     g.appendChild(row);
   });
 
+  // “View all winners” link (shifted down by preLines)
   const link = document.createElementNS("http://www.w3.org/2000/svg","text");
   link.setAttribute("x", String(x));
-  link.setAttribute("y", String(y + (winners.length+2)*lineH));
+  link.setAttribute("y", String(y + (preLines + winners.length + 1)*lineH));
   link.setAttribute("text-anchor", "middle");
   link.setAttribute("class", "notice-text");
   link.style.cursor = "pointer";

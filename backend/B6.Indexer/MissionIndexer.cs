@@ -3,9 +3,12 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Nethereum.ABI.FunctionEncoding.Attributes;
 using Nethereum.Contracts;
+using Nethereum.Contracts.ContractHandlers;
+using Nethereum.Contracts.CQS;
 using Nethereum.Hex.HexTypes;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
+using Nethereum.Web3.Accounts;
 using Npgsql;
 using NpgsqlTypes;
 using System;
@@ -35,20 +38,26 @@ namespace B6.Indexer
         private int                                     _rpcIndex = 0;
         private const int                               REORG_CUSHION = 3;
         private const int                               MAX_LOG_RANGE = 1800;
-        private const bool                              logRpcCalls   = true;  // ← toggle RPC file logging
-        private const bool                              scanMissionStatus = true; // ← toggle mission-level status logs
+        private const bool                              logRpcCalls   = true;               // ← toggle RPC file logging
+        private const bool                              scanMissionStatus = true;           // ← toggle mission-level status logs
         private readonly HttpClient                     _http = new HttpClient();
-        private readonly string                         _pushBase;   // e.g. https://b6missions.com/api
+        private readonly string                         _pushBase;                          // e.g. https://b6missions.com/api
         private readonly string                         _pushKey;
         private readonly Dictionary<long, DateTime>     _blockTsCache = new();
         private readonly object                         _rpcLogLock   = new();
-        private DateTime                                _rpcLogDay    = DateTime.MinValue;   // UTC date boundary
+        private DateTime                                _rpcLogDay    = DateTime.MinValue;  // UTC date boundary
         private string                                  _rpcLogPath   = string.Empty;
         private readonly Dictionary<string,int>         _rpcCounts    = new(StringComparer.InvariantCulture);
         private readonly int                            _maxWinPerMission;
         private readonly int                            _maxWinTotal;
+        private readonly string                         _ownerPk;                           // from Key Vault / config
 
-        public                                          MissionIndexer          (ILogger<MissionIndexer> log, IConfiguration cfg) {
+        [Function("refundPlayers")]
+        public class RefundPlayersFunction : FunctionMessage {
+            // no args; add properties if your function signature differs
+        }
+
+        public                                          MissionIndexer              (ILogger<MissionIndexer> log, IConfiguration cfg) {
             _log = log;
 
             // Read from configuration only (Key Vault/appsettings/env) — no hardcoded defaults.
@@ -87,12 +96,12 @@ namespace B6.Indexer
 
         }
 
-        private async Task<long>                        GetLatestBlockAsync() {
+        private async Task<long>                        GetLatestBlockAsync         () {
             var val = await RunRpc(async w => await w.Eth.Blocks.GetBlockNumber.SendRequestAsync(), "GetBlockNumber");
             return (long)val.Value;
         }
 
-        private async Task                              ScanFactoryEventsAsync(CancellationToken token, long? latestOverride = null) {
+        private async Task                              ScanFactoryEventsAsync      (CancellationToken token, long? latestOverride = null) {
             var latest  = latestOverride ?? await GetLatestBlockAsync();
             var toBlock = latest - REORG_CUSHION;
             if (toBlock <= 0) return;
@@ -347,6 +356,9 @@ namespace B6.Indexer
                     foreach (var (a, s) in pushStatuses)
                     {
                         try { await NotifyStatusAsync(a, s, token); } catch { /* best-effort */ }
+
+                        // NEW: auto-refund exactly when we see a NEW Failed transition
+                        if (s == 7) { try { await TryAutoRefundAsync(a, token); } catch { /* best-effort */ } }
                     }
                     pushStatuses.Clear();
 
@@ -363,7 +375,7 @@ namespace B6.Indexer
             }
         }
 
-        private async Task                              ScanMissionEventsAsync(CancellationToken token, long? latestOverride = null) {
+        private async Task                              ScanMissionEventsAsync      (CancellationToken token, long? latestOverride = null) {
             // load missions + last_seen_block
             var missions = new List<(string addr, long fromBlock)>();
             var latest  = latestOverride ?? await GetLatestBlockAsync();
@@ -660,7 +672,10 @@ namespace B6.Indexer
                         try
                         {
                             foreach (var s in pushStatuses)
+                            {
                                 await NotifyStatusAsync(addr, s, token);
+                                if (s == 7) { try { await TryAutoRefundAsync(addr, token); } catch { /* best-effort */ } }
+                            }
 
                             foreach (var (r, w, a) in pushRounds)
                                 await NotifyRoundAsync(addr, r, w, a, token);
@@ -686,7 +701,7 @@ namespace B6.Indexer
             }
         }
 
-        private async Task                              EnsureMissionSeededAsync(string missionAddr, string name, long seedLastSeenBlock, CancellationToken token) {
+        private async Task                              EnsureMissionSeededAsync    (string missionAddr, string name, long seedLastSeenBlock, CancellationToken token) {
             // call mission.getMissionData (single tuple wrapper)
             var wrap = await RunRpc(
                 w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
@@ -812,19 +827,19 @@ namespace B6.Indexer
             await tx.CommitAsync(token);
         }
 
-        private static long                             ToInt64                 (BigInteger v) {
+        private static long                             ToInt64                     (BigInteger v) {
             if (v < long.MinValue) return long.MinValue;
             if (v > long.MaxValue) return long.MaxValue;
             return (long)v;
         }
 
-        private static string                           NormalizeKind(string context) {
+        private static string                           NormalizeKind               (string context) {
             if (string.IsNullOrWhiteSpace(context)) return "RPC";
             var p = context.IndexOf('(');
             return p > 0 ? context.Substring(0, p) : context;
         }
 
-        private void                                    RpcFileLog(string kind, string line) {
+        private void                                    RpcFileLog                  (string kind, string line) {
             var nowUtc = DateTime.UtcNow;
             var dayUtc = nowUtc.Date;
 
@@ -849,14 +864,14 @@ namespace B6.Indexer
             }
         }
 
-        private void                                    UseRpc(int idx) {
+        private void                                    UseRpc                      (int idx) {
             _rpcIndex = idx % _rpcEndpoints.Count;
             var url = _rpcEndpoints[_rpcIndex];
             _web3 = new Web3(url);
             _log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
         }
 
-        private bool                                    SwitchRpc() {
+        private bool                                    SwitchRpc                   () {
             if (_rpcEndpoints.Count <= 1) return false;
             var next = (_rpcIndex + 1) % _rpcEndpoints.Count;
             if (next == _rpcIndex) return false;
@@ -866,14 +881,14 @@ namespace B6.Indexer
             return true;
         }
 
-        private static bool                             IsTransient(Exception ex) {
+        private static bool                             IsTransient                 (Exception ex) {
             return ex is Nethereum.JsonRpc.Client.RpcResponseException
                 || ex is System.Net.Http.HttpRequestException
                 || ex is TaskCanceledException
                 || (ex.InnerException != null && IsTransient(ex.InnerException));
         }
 
-        private async Task<T>                           RunRpc<T>(Func<Web3, Task<T>> fn, string context) {
+        private async Task<T>                           RunRpc<T>                   (Func<Web3, Task<T>> fn, string context) {
             var kind = NormalizeKind(context);
             var sw = Stopwatch.StartNew();
             try
@@ -903,7 +918,7 @@ namespace B6.Indexer
             }
         }
 
-        private async Task<Dictionary<long, DateTime>>  GetBlockTimestampsAsync(IEnumerable<long> blockNumbers) {
+        private async Task<Dictionary<long, DateTime>>  GetBlockTimestampsAsync     (IEnumerable<long> blockNumbers) {
             var result = new Dictionary<long, DateTime>();
             var unique = new HashSet<long>(blockNumbers);
             var misses = new List<long>();
@@ -940,7 +955,7 @@ namespace B6.Indexer
             return result;
         }
 
-        private async Task                              EnsureFactoryCursorMinAsync(long minLastBlock, CancellationToken token) {
+        private async Task                              EnsureFactoryCursorMinAsync (long minLastBlock, CancellationToken token) {
             await using var conn = new NpgsqlConnection(_pg);
             await conn.OpenAsync(token);
 
@@ -976,7 +991,7 @@ namespace B6.Indexer
             }
         }
 
-        protected override async Task                   ExecuteAsync(CancellationToken token) {
+        protected override async Task                   ExecuteAsync                (CancellationToken token) {
             _log.LogInformation("Mission indexer started (events-only). Factory={factory} RPC={rpc}", _factory, _rpc);
 
             try
@@ -1012,7 +1027,7 @@ namespace B6.Indexer
 
         }
 
-        private async Task                              EnsureCursorsTableAsync (CancellationToken token) {
+        private async Task                              EnsureCursorsTableAsync     (CancellationToken token) {
             await using var conn = new NpgsqlConnection(_pg);
             await conn.OpenAsync(token);
 
@@ -1030,7 +1045,7 @@ namespace B6.Indexer
             await cmd.ExecuteNonQueryAsync(token);
         }
 
-        private async Task<long>                        GetCursorAsync          (string key, CancellationToken token) {
+        private async Task<long>                        GetCursorAsync              (string key, CancellationToken token) {
             await using var conn = new NpgsqlConnection(_pg);
             await conn.OpenAsync(token);
             await using var cmd = new NpgsqlCommand(
@@ -1040,7 +1055,7 @@ namespace B6.Indexer
             return val is long l ? l : 0L;
         }
 
-        private async Task                              SetCursorAsync          (string key, long block, CancellationToken token) {
+        private async Task                              SetCursorAsync              (string key, long block, CancellationToken token) {
             await using var conn = new NpgsqlConnection(_pg);
             await conn.OpenAsync(token);
             await using var cmd = new NpgsqlCommand(@"
@@ -1053,7 +1068,7 @@ namespace B6.Indexer
             await cmd.ExecuteNonQueryAsync(token);
         }
 
-        private async Task                              NotifyStatusAsync(string mission, short newStatus, CancellationToken ct = default) {
+        private async Task                              NotifyStatusAsync           (string mission, short newStatus, CancellationToken ct = default) {
             if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/status")
             {
@@ -1064,7 +1079,7 @@ namespace B6.Indexer
             catch (Exception ex) { _log.LogDebug(ex, "push/status failed for {mission}", mission); }
         }
 
-        private async Task                              NotifyRoundAsync(string mission, short round, string winner, string amountWei, CancellationToken ct = default) {
+        private async Task                              NotifyRoundAsync            (string mission, short round, string winner, string amountWei, CancellationToken ct = default) {
             if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/round")
             {
@@ -1073,6 +1088,52 @@ namespace B6.Indexer
             req.Headers.Add("X-Push-Key", _pushKey);
             try { await _http.SendAsync(req, ct); }
             catch (Exception ex) { _log.LogDebug(ex, "push/round failed for {mission} r{round}", mission, round); }
+        }
+
+        private Web3                                    BuildSignerWeb3             () {
+            if (string.IsNullOrWhiteSpace(_ownerPk)) return null;
+            var url = _rpcEndpoints[_rpcIndex];  // current active RPC
+            var acct = new Account(_ownerPk);
+            return new Web3(acct, url);
+        }
+
+        private async Task<bool>                        HasAnyRefundsRecordedAsync  (string mission, CancellationToken token) {
+            await using var c = new NpgsqlConnection(_pg);
+            await c.OpenAsync(token);
+            await using var cmd = new NpgsqlCommand(
+                "select 1 from mission_enrollments where mission_address=@a and refunded = true limit 1;", c);
+            cmd.Parameters.AddWithValue("a", mission);
+            var v = await cmd.ExecuteScalarAsync(token);
+            return v != null;
+        }
+
+        private async Task                              TryAutoRefundAsync          (string mission, CancellationToken token) {
+            if (string.IsNullOrWhiteSpace(_ownerPk)) {
+                _log.LogWarning("Auto-refund skipped for {mission}: missing Owner--PK/Owner:PK in configuration", mission);
+                return;
+            }
+
+            // Quick idempotency guard: if DB already has any refund rows, skip.
+            if (await HasAnyRefundsRecordedAsync(mission, token)) {
+                _log.LogInformation("Auto-refund skipped for {mission}: refunds already recorded", mission);
+                return;
+            }
+
+            var w3 = BuildSignerWeb3();
+            if (w3 == null) return;
+
+            try
+            {
+                var handler = w3.Eth.GetContractTransactionHandler<RefundPlayersFunction>();
+                var receipt = await handler.SendRequestAndWaitForReceiptAsync(mission, new RefundPlayersFunction());
+                _log.LogInformation("refundPlayers() sent for {mission}. Tx: {tx} Status: {st}",
+                    mission, receipt?.TransactionHash, receipt?.Status?.Value);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "refundPlayers() failed for {mission}", mission);
+                // Best-effort: the scanner loop will not spam because we only fire on new status rows.
+            }
         }
 
     }
