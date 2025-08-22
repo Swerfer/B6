@@ -394,7 +394,7 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
   let zeroFired = false;
   let currentUnit = null;
 
-  const paint = () => {
+  const paint = async () => {
     const now  = Math.floor(Date.now()/1000);
     const left = Math.max(0, endTs - now);
 
