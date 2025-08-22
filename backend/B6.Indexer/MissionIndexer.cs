@@ -448,6 +448,19 @@ namespace B6.Indexer
                             if (rows > 0)
                             {
                                 pushRounds.Add((r, w, amt.ToString()));
+
+                                // NEW: stamp pause_timestamp to the block time of this round
+                                var pauseUnix = tsByBlock.TryGetValue(blk, out var t)
+                                    ? new DateTimeOffset(t).ToUnixTimeSeconds()
+                                    : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+                                await using var upP = new NpgsqlCommand(@"
+                                    update missions
+                                    set pause_timestamp = @pt, updated_at = now()
+                                    where mission_address = @a;", conn, tx);
+                                upP.Parameters.AddWithValue("a",  addr);
+                                upP.Parameters.AddWithValue("pt", pauseUnix);
+                                await upP.ExecuteNonQueryAsync(token);
                             }
 
                             // keep cro_current_wei in sync using croRemaining

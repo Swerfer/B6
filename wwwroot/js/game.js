@@ -212,7 +212,7 @@ function getLastBankTs(mission, rounds){
 
 function computeBankNowWei(mission, lastBankTs, now = Math.floor(Date.now()/1000)){
   const st    = Number(mission?.status);
-  if (st !== 3) return "0";                      // only accrues while Active
+  if (st !== 3 && st !== 4) return "0";                      // only accrues while Active and paused
   const ms    = Number(mission?.mission_start || 0);
   const me    = Number(mission?.mission_end   || 0);
   const D     = Math.max(0, me - ms);
@@ -432,16 +432,25 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
     });
 
     // NEW: update Paused cooldown mm:ss
-    document.querySelectorAll('#stageCtaGroup [data-cooldown-end]').forEach(el => {
+    document.querySelectorAll('#stageCtaGroup [data-cooldown-end]').forEach(async el => {
       const end = Number(el.getAttribute('data-cooldown-end') || 0);
       if (end > 0) {
         const left = Math.max(0, end - now);
         el.textContent = formatMMSS(left);
 
-        // NEW: when cooldown hits 0 in Paused (4), force a single refresh
-        if (left === 0 && Number(missionObj?.status) === 4 && !el.dataset.cooldownFlipDone) {
-          el.dataset.cooldownFlipDone = "1";       // debounce
-          refreshOpenStageFromServer(1);           // re-pull status/CTA from backend
+        if (left === 0 && missionObj && Number(missionObj.status) === 4 && !el.dataset.flipDone) {
+          el.dataset.flipDone = "1";                 // debounce
+          const m2 = { ...missionObj, status: 3, pause_timestamp: 0 };
+
+          // instant front-end flip
+          setStageStatusImage(statusSlug(m2.status));
+          buildStageLowerHudForStatus(m2);
+          bindRingToMission(m2);
+          bindCenterTimerToMission(m2);
+          renderStageCtaForStatus(m2);
+          await renderStageEndedPanelIfNeeded(m2);
+          stageCurrentStatus = 3;
+          refreshOpenStageFromServer(1);
         }
       }
     });
@@ -583,7 +592,6 @@ async function bindRingToMission(m){
 
     // MissionCreated event timestamp (cached). Fallback: updated_at.
     S = m?.mission_address ? await getMissionCreationTs(m) : 0;
-    console.log(E + " - " + S);
     if (!S) S = Number(m.updated_at || 0);
 
     if (S && E && E > S) { bindRingToWindow(S, E); }
@@ -1539,6 +1547,19 @@ function        renderCtaPaused         (host, mission)   {
   line.appendChild(eLabel);
   line.appendChild(eVal);
   host.appendChild(line);
+
+  // New line: live “Accumulating: … CRO” (ticks via [data-bank-now])
+  const bank = document.createElementNS(SVG_NS, "text");
+  bank.setAttribute("x", String(xCenter));
+  bank.setAttribute("y", String(y + btnH + 36));
+  bank.setAttribute("text-anchor", "middle");
+  bank.setAttribute("class", "cta-note");
+  bank.setAttribute("data-bank-now", "1");
+  const lastTs = getLastBankTs(mission, mission?.rounds);
+  const weiNow = computeBankNowWei(mission, lastTs);
+  const croNow = weiToCro(String(weiNow), 2);
+  bank.textContent = `Accumulating: ${croNow} CRO`;
+  host.appendChild(bank);
 }
 
 function        renderRoundBankedNotice (roundNo, winner) {
