@@ -83,7 +83,7 @@ app.MapGet("/config",                         (IConfiguration cfg) => {
     return Results.Ok(new { rpc, factory });
 });
 
-app.MapPost("/rpc", async (HttpRequest req, IHttpClientFactory f, IConfiguration cfg) => {
+app.MapPost("/rpc",                     async (HttpRequest req, IHttpClientFactory f, IConfiguration cfg) => {
     using var reader = new StreamReader(req.Body);
     var body = await reader.ReadToEndAsync();
 
@@ -491,7 +491,7 @@ app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg) 
 });
 
 // Debug: ping a group to verify client subscription
-app.MapGet("/debug/push/{addr}", async (string addr, IHubContext<GameHub> hub) => {
+app.MapGet("/debug/push/{addr}",        async (string addr, IHubContext<GameHub> hub) => {
     if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("addr required");
     var g = addr.ToLowerInvariant();
     await hub.Clients.Group(g).SendAsync("ServerPing", $"Hello group: {g}");
@@ -499,7 +499,7 @@ app.MapGet("/debug/push/{addr}", async (string addr, IHubContext<GameHub> hub) =
 });
 
 // Inspect environment paths and process identity
-app.MapGet("/debug/env", (IHostEnvironment env) => {
+app.MapGet("/debug/env",                      (IHostEnvironment env) => {
     return Results.Ok(new {
         env.ApplicationName,
         env.EnvironmentName,
@@ -513,7 +513,15 @@ app.MapGet("/debug/env", (IHostEnvironment env) => {
 /* ---------- HUB ---------- */
 app.MapHub<GameHub>("/hub/game");
 
-app.MapPost("/push/status", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto body) => {
+app.MapPost("/push/mission",            async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushMissionDto body) => {
+    if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
+
+    var g = (body.Mission ?? "").ToLowerInvariant();
+    await hub.Clients.Group(g).SendAsync("MissionUpdated", g);
+    return Results.Ok(new { pushed = true });
+});
+
+app.MapPost("/push/status",             async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto  body) => {
     // simple shared-secret guard
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
@@ -522,7 +530,7 @@ app.MapPost("/push/status", async (HttpRequest req, IConfiguration cfg, IHubCont
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/push/round", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto body) => {
+app.MapPost("/push/round",              async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto   body) => {
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
     var g = (body.Mission ?? "").ToLowerInvariant();

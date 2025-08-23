@@ -623,6 +623,8 @@ namespace B6.Indexer
                             }
                         }
 
+                        bool missionUpdated = false;   // NEW: did we see any enrollment/pool change?
+
                         // enrollments
                         foreach (var ev in peLogs)
                         {
@@ -631,6 +633,7 @@ namespace B6.Indexer
                             var enrolledAtUtc = tsByBlock.TryGetValue(blk, out var t) ? t : DateTime.UtcNow;
 
                             // 1) insert enrollment (idempotent)
+                            int rows;
                             await using (var ins = new NpgsqlCommand(@"
                                 insert into mission_enrollments (mission_address, player_address, enrolled_at, refunded, refund_tx_hash)
                                 values (@a, @p, @ea, false, null)
@@ -639,8 +642,9 @@ namespace B6.Indexer
                                 ins.Parameters.AddWithValue("a",  addr);
                                 ins.Parameters.AddWithValue("p",  p);
                                 ins.Parameters.AddWithValue("ea", enrolledAtUtc);
-                                await ins.ExecuteNonQueryAsync(token);
+                                rows = await ins.ExecuteNonQueryAsync(token);
                             }
+                            if (rows > 0) missionUpdated = true;    // NEW
 
                             // 2) bump CRO balances from the event amount
                             await using (var upCro = new NpgsqlCommand(@"
@@ -652,7 +656,8 @@ namespace B6.Indexer
                             {
                                 upCro.Parameters.AddWithValue("a", addr);
                                 upCro.Parameters.Add("amt", NpgsqlDbType.Numeric).Value = ev.Event.Amount;
-                                await upCro.ExecuteNonQueryAsync(token);
+                                var croRows = await upCro.ExecuteNonQueryAsync(token);
+                                if (croRows > 0) missionUpdated = true;   // NEW
                             }
                         }
 
@@ -672,13 +677,13 @@ namespace B6.Indexer
                         try
                         {
                             foreach (var s in pushStatuses)
-                            {
                                 await NotifyStatusAsync(addr, s, token);
-                                if (s == 7) { try { await TryAutoRefundAsync(addr, token); } catch { /* best-effort */ } }
-                            }
 
                             foreach (var (r, w, a) in pushRounds)
                                 await NotifyRoundAsync(addr, r, w, a, token);
+
+                            if (missionUpdated)
+                                await NotifyMissionUpdatedAsync(addr, token);   // NEW
                         }
                         catch { /* best-effort */ }
                     }
@@ -1077,6 +1082,22 @@ namespace B6.Indexer
             req.Headers.Add("X-Push-Key", _pushKey);
             try { await _http.SendAsync(req, ct); }
             catch (Exception ex) { _log.LogDebug(ex, "push/status failed for {mission}", mission); }
+        }
+
+        private async Task                              NotifyMissionUpdatedAsync   (string mission, CancellationToken ct = default) {
+            if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/mission");
+            req.Content = JsonContent.Create(new { Mission = mission });
+            req.Headers.Add("X-Push-Key", _pushKey);
+            try
+            {
+                var resp = await _http.SendAsync(req, ct);
+                _log.LogInformation("push/mission {mission} -> {code}", mission, (int)resp.StatusCode);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "push/mission failed for {mission}", mission);
+            }
         }
 
         private async Task                              NotifyRoundAsync            (string mission, short round, string winner, string amountWei, CancellationToken ct = default) {

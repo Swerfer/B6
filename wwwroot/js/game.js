@@ -667,6 +667,8 @@ function stateName(s){
         : String(s);
 }
 
+window.stateName = stateName; // Temp for debugging
+
 async function startHub() { // SignalR HUB
   if (!window.signalR) { showAlert("SignalR client script not found.", "error"); return; }
 
@@ -676,8 +678,11 @@ async function startHub() { // SignalR HUB
       .withAutomaticReconnect()
       .build();
 
+    window.hubConnection = hubConnection;
+
     hubConnection.on("ServerPing", (msg) => {
-      showAlert(`Server ping:<br>${msg}`, "info");
+      //showAlert(`Server ping:<br>${msg}`, "info");
+      console.log(msg);
     });
 
     hubConnection.on("RoundResult", (addr, round, winner, amountWei) => {
@@ -731,10 +736,25 @@ async function startHub() { // SignalR HUB
       }
     });
 
-      // on reconnect, re-subscribe to the open mission (if any)
-      hubConnection.onreconnected(async () => {
-        if (currentMissionAddr) await subscribeToMission(currentMissionAddr);
-      });
+    hubConnection.on("MissionUpdated", async (addr) => {
+      console.log(addr);
+      if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
+        try {
+          const data = await apiMission(currentMissionAddr);
+          const m = data.mission || data;
+
+          // Light update: things that change without a status flip
+          buildStageLowerHudForStatus(m);  // Players, Pool, etc.
+          renderStageCtaForStatus(m);      // e.g., "You already joined" gating
+          // (No status image / ring / center timer changes here.)
+        } catch {}
+      }
+    });
+
+    // on reconnect, re-subscribe to the open mission (if any)
+    hubConnection.onreconnected(async () => {
+      if (currentMissionAddr) await subscribeToMission(currentMissionAddr);
+    });
 
   }
 
@@ -885,6 +905,9 @@ async function refreshOpenStageFromServer(retries = 3) {
   try {
     const data = await apiMission(currentMissionAddr);
     const m = data.mission || data;
+
+    buildStageLowerHudForStatus(m);     // pills: Players / Pool, etc.
+    renderStageCtaForStatus(m);         // CTA gating may change (e.g., “You already joined”)
 
     // If status changed, or just to be safe, rebuild the stage pieces
     const newStatus = Number(m.status);
@@ -1231,6 +1254,19 @@ async function  handleEnrollClick(mission){
     await tx.wait();
 
     showAlert("You joined the mission!", "success");
+
+    // OPTIMISTIC UI UPDATE so the player sees the new numbers instantly
+    try {
+      const feeWei = String(mission.enrollment_amount_wei  || "0");
+      const m2 = {
+        ...mission,
+        enrolled_players: Number(mission.enrolled_players  || 0) + 1,
+        cro_start_wei:    (BigInt(mission.cro_start_wei    || "0") + BigInt(feeWei)).toString(),
+        cro_current_wei:  (BigInt(mission.cro_current_wei  || "0") + BigInt(feeWei)).toString(),
+      };
+      buildStageLowerHudForStatus(m2);  // pills: Players / Pool, etc.
+      renderStageCtaForStatus(m2);      // “You already joined” will also show (CTA probes chain)
+    } catch { /* no-op */ }    
 
     // Refresh everything on the open stage
     await refreshOpenStageFromServer(2);
