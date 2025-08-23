@@ -28,6 +28,9 @@ namespace B6.Indexer
 {
     public class MissionIndexer : BackgroundService
     {
+        // Logger on/off ------------------------------------------------------------------------------------------------
+        private const bool                              logRpcCalls   = false;               // ← toggle RPC file logging
+        // --------------------------------------------------------------------------------------------------------------
         private readonly ILogger<MissionIndexer>        _log;
         private readonly string                         _rpc;
         private readonly string                         _factory;
@@ -38,7 +41,6 @@ namespace B6.Indexer
         private int                                     _rpcIndex = 0;
         private const int                               REORG_CUSHION = 3;
         private const int                               MAX_LOG_RANGE = 1800;
-        private const bool                              logRpcCalls   = true;               // ← toggle RPC file logging
         private const bool                              scanMissionStatus = true;           // ← toggle mission-level status logs
         private readonly HttpClient                     _http = new HttpClient();
         private readonly string                         _pushBase;                          // e.g. https://b6missions.com/api

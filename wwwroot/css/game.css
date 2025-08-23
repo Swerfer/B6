@@ -152,8 +152,31 @@ body.scroll-lock{
 
 #stageCtaGroup .cta-note {
   font-family: system-ui, Segoe UI, Arial, sans-serif;
-  font-size: 12px;
+  font-size: 16px;
   fill: #9fd0ff;
   pointer-events: none;
 }
 
+/* Players list — align address + icons */
+#enrollmentsList li .copy-wrap{
+  display:inline-flex;
+  align-items:center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  min-width: 12ch;          /* reserve space so the ↗ icon starts at the same x */
+}
+
+#enrollmentsList li .copy-wrap .copy-icon{
+  margin-left: .35rem;
+}
+
+/* fix width for the external-link icon so all rows line up */
+#enrollmentsList li .copy-wrap + a{
+  display: inline-block;
+  width: 1.25rem;
+  text-align: center;
+}
+
+/* keep the date on one line */
+#enrollmentsList li .text-end.small{
+  white-space: nowrap;
+}

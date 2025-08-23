@@ -76,6 +76,38 @@ let stageReturnTo           = null;   // "stage" when we navigated from stage �
 
 // #region helpers ----------------------
 
+// --- local "I joined" cache (per mission) -------------
+const JOIN_CACHE_KEY = "_b6joined";
+function joinedCacheHas(addr, me){
+  try {
+    const k = (addr||"").toLowerCase();
+    const meL = (me||"").toLowerCase();
+    const all = JSON.parse(localStorage.getItem(JOIN_CACHE_KEY) || "{}");
+    const set = Array.isArray(all[k]) ? all[k] : [];
+    return !!(meL && set.includes(meL));
+  } catch { return false; }
+}
+
+function joinedCacheAdd(addr, me){
+  try {
+    const k = (addr||"").toLowerCase();
+    const meL = (me||"").toLowerCase();
+    if (!k || !meL) return;
+    const all = JSON.parse(localStorage.getItem(JOIN_CACHE_KEY) || "{}");
+    const set = new Set(Array.isArray(all[k]) ? all[k] : []);
+    set.add(meL);
+    all[k] = Array.from(set);
+    localStorage.setItem(JOIN_CACHE_KEY, JSON.stringify(all));
+  } catch {}
+}
+
+function enrichMissionFromApi(data){
+  const m = data?.mission || data || {};
+  if (data && Array.isArray(data.enrollments)) m.enrollments = data.enrollments;
+  if (data && Array.isArray(data.rounds))      m.rounds      = data.rounds;
+  return m;
+}
+
 // map error names → friendly text (some include decoded args)
 function missionErrorToText(name, args = []) {
   switch (name) {
@@ -463,10 +495,10 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
           const m2 = { ...missionObj, status: 3, pause_timestamp: 0 };
 
           // instant front-end flip
-          setStageStatusImage(statusSlug(m2.status));
+          setStageStatusImage(statusSlug(3));
           buildStageLowerHudForStatus(m2);
-          bindRingToMission(m2);
-          bindCenterTimerToMission(m2);
+          await bindRingToMission(m2);
+          await bindCenterTimerToMission(m2);
           renderStageCtaForStatus(m2);
           await renderStageEndedPanelIfNeeded(m2);
           stageCurrentStatus = 3;
@@ -493,10 +525,10 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
           const next = statusByClock(missionObj, now);
           if (typeof next === "number" && next !== Number(missionObj.status)) {
             const m2 = { ...missionObj, status: next };
-            setStageStatusImage(statusSlug(m2.status));
+            setStageStatusImage(statusSlug(next));
             buildStageLowerHudForStatus(m2);
-            bindRingToMission(m2);
-            bindCenterTimerToMission(m2);
+            await bindRingToMission(m2);
+            await bindCenterTimerToMission(m2);
             renderStageCtaForStatus(m2);
             await renderStageEndedPanelIfNeeded(m2);
             stageCurrentStatus = next;
@@ -718,7 +750,7 @@ async function startHub() { // SignalR HUB
         const gameMain = document.getElementById('gameMain');
         try {
           const data = await apiMission(currentMissionAddr);
-          const m = data.mission || data;
+          const m = enrichMissionFromApi(data);
           if (gameMain && gameMain.classList.contains('stage-mode')) {
             if (Number(m.status) === stageCurrentStatus) return;
             setStageStatusImage(statusSlug(m.status));
@@ -736,20 +768,40 @@ async function startHub() { // SignalR HUB
       }
     });
 
-    hubConnection.on("MissionUpdated", async (addr) => {
-      console.log(addr);
-      if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
-        try {
-          const data = await apiMission(currentMissionAddr);
-          const m = data.mission || data;
+hubConnection.on("MissionUpdated", async (addr) => {
+  if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
+    try {
+      const data = await apiMission(currentMissionAddr);
+      const m = enrichMissionFromApi(data);
 
-          // Light update: things that change without a status flip
-          buildStageLowerHudForStatus(m);  // Players, Pool, etc.
-          renderStageCtaForStatus(m);      // e.g., "You already joined" gating
-          // (No status image / ring / center timer changes here.)
-        } catch {}
+      const apiStatus = Number(m.status);
+      const curStatus = Number(stageCurrentStatus ?? -1);
+
+      // If API is behind our locally flipped stage, ignore this push.
+      if (apiStatus < curStatus) {
+        console.debug("[MissionUpdated] stale status from API; ignoring", apiStatus, "<", curStatus);
+        setTimeout(() => refreshOpenStageFromServer(1), 1200); // gentle retry
+        return;
       }
-    });
+
+      // If API moved forward, do a full rebuild now.
+      if (apiStatus !== curStatus) {
+        setStageStatusImage(statusSlug(apiStatus));
+        buildStageLowerHudForStatus(m);
+        await bindRingToMission(m);
+        await bindCenterTimerToMission(m);
+        renderStageCtaForStatus(m);
+        await renderStageEndedPanelIfNeeded(m);
+        stageCurrentStatus = apiStatus;
+        return;
+      }
+
+      // Same status → light refresh only.
+      buildStageLowerHudForStatus(m);
+      renderStageCtaForStatus(m);
+    } catch {}
+  }
+});
 
     // on reconnect, re-subscribe to the open mission (if any)
     hubConnection.onreconnected(async () => {
@@ -903,24 +955,22 @@ async function refreshOpenStageFromServer(retries = 3) {
   if (!currentMissionAddr) return;
 
   try {
-    const data = await apiMission(currentMissionAddr);
-    const m = data.mission || data;
+      const data = await apiMission(currentMissionAddr);
+      const m = enrichMissionFromApi(data);
 
-    buildStageLowerHudForStatus(m);     // pills: Players / Pool, etc.
-    renderStageCtaForStatus(m);         // CTA gating may change (e.g., “You already joined”)
+      // Always refresh light parts (pills + CTA) …
+      buildStageLowerHudForStatus(m);
+      renderStageCtaForStatus(m);
 
-    // If status changed, or just to be safe, rebuild the stage pieces
+    // Rebuild heavy parts only on actual status change
     const newStatus = Number(m.status);
     if (newStatus !== stageCurrentStatus) {
-      setStageStatusImage(statusSlug(m.status));                        // image under title
-      buildStageLowerHudForStatus(m);                                   // pills for this status
-      await bindRingToMission(m);                                       // ring window for this status
-      await bindCenterTimerToMission(m);                                // center countdown for this status
-      renderStageCtaForStatus(m);
+      setStageStatusImage(statusSlug(m.status));
+      await bindRingToMission(m);
+      await bindCenterTimerToMission(m);
       await renderStageEndedPanelIfNeeded(m);
       stageCurrentStatus = newStatus;
     } else if (retries > 0) {
-      // backend might flip a second later; try a couple of times
       setTimeout(() => refreshOpenStageFromServer(retries - 1), 1500);
     }
   } catch { /* ignore transient errors */ }
@@ -986,6 +1036,8 @@ async function showGameStage(mission){
 
   // CTA (status 1 → JOIN MISSION)
   renderStageCtaForStatus(mission);
+
+  setTimeout(() => { refreshStageCtaIfOpen().catch(()=>{}); }, 800);
 
   await renderStageEndedPanelIfNeeded(mission);
 
@@ -1065,7 +1117,7 @@ const PILL_LIBRARY = {
 
 // Which pills to show per status (0..7) — only using fields that exist in your payloads :contentReference[oaicite:0]{index=0}
 const PILL_SETS = {
-  0:        ["joinFrom","joinUntil","missionStartAt","duration","fee","poolStart","playersCap","rounds"],                        // Pending
+  0:        ["joinFrom","joinUntil","missionStartAt","duration","fee","poolStart","playersCap","rounds"],           // Pending
   1:        ["missionType","rounds","fee","poolCurrent","playersAllStats","duration","closesIn","missionStartAt"],  // Enrolling
   2:        ["poolStart","players","rounds","startsIn","duration"],                                                 // Arming
   3:        ["poolCurrent","players","roundsOff","endsIn"],                                                         // Active
@@ -1196,6 +1248,10 @@ function uiStatusFor(mission){
 }
 // #endregion
 
+
+
+
+
 // #region CTA's
 // ── CTA assets & layout (single source of truth) ─────────────────────────
 const CTA_LAYOUT = {
@@ -1253,8 +1309,16 @@ async function  handleEnrollClick(mission){
     const tx  = await c.enrollPlayer({ value: val });
     await tx.wait();
 
-    showAlert("You joined the mission!", "success");
+    // remember locally + instant disable for this wallet
+    try {
+      const me = (await signer.getAddress()).toLowerCase();
+      joinedCacheAdd(mission.mission_address, me);
+    } catch {}
 
+    mission._joinedByMe = true;          // in-memory flag for this session
+    renderStageCtaForStatus(mission);    // repaint CTA immediately
+    showAlert("You joined the mission!", "success");
+    
     // OPTIMISTIC UI UPDATE so the player sees the new numbers instantly
     try {
       const feeWei = String(mission.enrollment_amount_wei  || "0");
@@ -1285,7 +1349,8 @@ async function  handleEnrollClick(mission){
     ctaBusy = false;
     try {
       const data = await apiMission(mission.mission_address);
-      renderStageCtaForStatus(data?.mission || mission);
+      const m2 = enrichMissionFromApi(data);
+      renderStageCtaForStatus(m2);
     } catch {
       renderStageCtaForStatus(mission);
     }
@@ -1322,7 +1387,7 @@ async function  refreshStageCtaIfOpen(){
   if (!currentMissionAddr) return;
   try {
     const data = await apiMission(currentMissionAddr);
-    const m = data.mission || data;
+    const m = enrichMissionFromApi(data);
     renderStageCtaForStatus(m);
   } catch {}
 }
@@ -1355,16 +1420,30 @@ async function  renderCtaEnrolling      (host, mission)   {
   const inWin = now < Number(mission.enrollment_end || 0);
 
   const me = (walletAddress || "").toLowerCase();
-  let already = false, hasSpots = true, canEnrollSoft = true;
+  let hasSpots = true, canEnrollSoft = true;
+
+  // (A) local cache → instant after join & survives reload
+  const alreadyByCache = joinedCacheHas(mission.mission_address, me);
+
+  // (B) API enrollments → spectators / slower confirmation
+  const list = Array.isArray(mission.enrollments) ? mission.enrollments : [];
+  const alreadyByApi = !!list.find(e => {
+    const a = String(e.player_address || e.address || e.player || "").toLowerCase();
+    return a === me;
+  });
+  
+  let already = alreadyByCache || alreadyByApi;
 
   try {
+    // (C) Chain probe → source of truth
     const ro = getReadProvider();
     const mc = new ethers.Contract(mission.mission_address, MISSION_ABI, ro);
     const md = await mc.getMissionData();
     const tuple = md?.[0] || md;
     const players = (tuple?.players || []).map(a => String(a).toLowerCase());
 
-    already = !!(me && players.includes(me));
+    const alreadyByChain = !!(me && players.includes(me));
+    already = already || alreadyByChain;
 
     const maxP = Number(mission.enrollment_max_players ?? 0);
     hasSpots = maxP ? (players.length < maxP) : true;
@@ -1373,15 +1452,25 @@ async function  renderCtaEnrolling      (host, mission)   {
       const fac = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, ro);
       canEnrollSoft = await fac.canEnroll(me);
     }
-  } catch { /* leave permissive defaults */ }
+  } catch (err) {
+    console.warn("[CTA/JOIN] chain probe failed:", err?.message || err);
+  }
+
+  // If the click is in progress, keep it disabled
+  const justJoined = !!mission._joinedByMe;
 
   let disabled = false, note = "";
-  if (!walletAddress) { disabled = true; note = "Connect your wallet to join"; }
-  else if (!inWin)    { disabled = true; note = "Enrollment closed"; }
-  else if (already)   { disabled = true; note = "You already joined"; }
-  else if (!hasSpots) { disabled = true; note = "No spots left"; }
-  else if (!canEnrollSoft) { disabled = true; note = "Weekly/monthly limit reached"; }
-  if (ctaBusy) { disabled = true; note = "Joining…"; }
+  if (!walletAddress)               { disabled = true; note = "Connect your wallet to join"; }
+  else if (!inWin)                  { disabled = true; note = "Enrollment closed"; }
+  else if (already || justJoined)   { disabled = true; note = "You already joined"; }
+  else if (!hasSpots)               { disabled = true; note = "No spots left"; }
+  else if (!canEnrollSoft)          { disabled = true; note = "Weekly/monthly limit reached"; }
+  if (ctaBusy)                      { disabled = true; note = "Joining…"; }
+
+  console.debug("[CTA/JOIN] gating", {
+    me, inWin, alreadyByCache, alreadyByApi, already, hasSpots, canEnrollSoft
+  });
+
 
   const g = document.createElementNS(SVG_NS, "g");
   g.setAttribute("class", "cta-btn" + (disabled ? " cta-disabled" : ""));
@@ -1460,7 +1549,7 @@ function        renderCtaArming         (host, mission)   {
 
   // static label
   const tLabel = document.createElementNS(SVG_NS, "tspan");
-  tLabel.textContent = "Starts in ";
+  tLabel.textContent = "Mission starts in ";
 
   // dynamic value
   const tVal = document.createElementNS(SVG_NS, "tspan");
@@ -2174,12 +2263,13 @@ async function  renderMissionDetail({ mission, enrollments, rounds }){
     actions.appendChild(btn);
     // placeholder: wire up later to the in-mission HUD
     btn.addEventListener("click", async () => {
-      await cleanupMissionDetail();                         // stop timers, unsub, etc.
+      await cleanupMissionDetail();
       currentMissionAddr = String(mission.mission_address).toLowerCase();
-      await startHub();                                     // ensures connection + safeSubscribe()
-      await subscribeToMission(currentMissionAddr);         // idempotent if already subscribed
+      await startHub();
+      await subscribeToMission(currentMissionAddr);
       lockScroll();
-      await showGameStage(mission);                               
+      // pass enrollments/rounds so CTA can gate immediately
+      await showGameStage({ ...mission, enrollments, rounds });
     });
   }
 
@@ -2557,7 +2647,7 @@ async function closeMission(){
     // Re-open the stage for the same mission
     try {
       const data = await apiMission(addr);
-      const m = data?.mission || data;
+      const m = enrichMissionFromApi(data);
       await showGameStage(m);
       await renderStageEndedPanelIfNeeded(m);
       stageReturnTo = null;
