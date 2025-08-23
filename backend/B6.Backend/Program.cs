@@ -15,6 +15,8 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 
+// The base uri is https://b6missions.com/api It is set to 'api' in ISS server.
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Configuration.AddAzureKeyVault(
@@ -535,6 +537,7 @@ app.MapPost("/push/round",              async (HttpRequest req, IConfiguration c
 
     var g = (body.Mission ?? "").ToLowerInvariant();
     await hub.Clients.Group(g).SendAsync("RoundResult", g, body.Round, body.Winner, body.AmountWei);
+    await hub.Clients.Group(g).SendAsync("MissionUpdated", g);
     return Results.Ok(new { pushed = true });
 });
 

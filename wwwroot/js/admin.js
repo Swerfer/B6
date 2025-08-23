@@ -12,6 +12,7 @@ import {
     READ_ONLY_RPC, 
     FACTORY_ABI,
     MISSION_ABI,
+    getReadProvider,
     showAlert, 
     showConfirm,
     setBtnLoading,
@@ -349,6 +350,51 @@ async function triggerRefundModal(address, btnRef, factoryStatus = null) {
     setBtnLoading(btnRef, false);
     showAlert("Unable to refund: " + e.message, "error");
     openMissionModal({ addr: address }, null, factoryStatus);  // ✅ show modal even on setup fail
+  }
+}
+
+async function forceFinalizeMission(address, btnRef, factoryStatus = null) {
+  try {
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const signer   = provider.getSigner();
+    const mc       = new ethers.Contract(address, MISSION_ABI, signer);
+
+    showConfirm(
+      `Force finalize mission <code>${address}</code>?<br>
+       This will call <code>forceFinalizeMission()</code> on the contract.`,
+      async () => {
+        let success = false;
+
+        setBtnLoading(btnRef, true, "Finalizing");
+
+        try {
+          const tx = await mc.forceFinalizeMission();
+          await tx.wait();
+          success = true;
+        } catch (e) {
+          showAlert(`Finalize failed: ${e.message}`, "error");
+        }
+
+        // smooth button un-loading with transition fallback
+        await new Promise(res => {
+          setBtnLoading(btnRef, false);
+          btnRef?.addEventListener("transitionend", res, { once: true });
+          setTimeout(res, 600);
+        });
+
+        if (success) {
+          showAlert("Mission finalized.", "success");
+        }
+
+        // Always reload the modal to reflect the new state
+        openMissionModal({ addr: address }, null, factoryStatus);
+      }
+    );
+  } catch (e) {
+    // signer/provider setup failed, etc.
+    setBtnLoading(btnRef, false);
+    showAlert("Unable to finalize: " + e.message, "error");
+    openMissionModal({ addr: address }, null, factoryStatus);
   }
 }
 
@@ -1183,8 +1229,8 @@ document.getElementById("reloadWrite")?.addEventListener("click", async ()=>{
 });
 
 /* ---------- export public functions for admin.html ---------- */
-window.triggerRefundModal = triggerRefundModal;
-window.openMissionModal   = openMissionModal;
+window.triggerRefundModal         = triggerRefundModal;
+window.openMissionModal           = openMissionModal;
 window.setEnrollmentLimits        = setEnrollmentLimits;
 window.addAuthorizedAddress       = addAuthorizedAddress;
 window.removeAuthorizedAddress    = removeAuthorizedAddress;

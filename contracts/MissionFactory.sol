@@ -1299,11 +1299,17 @@ contract Mission        is Ownable, ReentrancyGuard {
 
         uint256 progress = (nowTs - _missionData.missionStart) * 100                                                    // Calculate the progress percentage of the mission
                         / (_missionData.missionEnd - _missionData.missionStart);
-        uint256 lastAmt = _missionData.playersWon.length > 0                                                            // Get the last payout amount, or 0 if no payouts have been made
-            ? _missionData.playersWon[_missionData.playersWon.length-1].amountWon
-            : 0;                                                                                                        
-        uint256 lastProg = (lastAmt * 100) / _missionData.croStart;                                                     // Calculate the last progress percentage based on the last payout amount
-        uint256 payout   = (progress - lastProg) * _missionData.croStart / 100;                                         // Calculate the payout amount based on the progress and last payout
+
+        uint256 paidSoFar    = _missionData.croStart - _missionData.croCurrent;                                         // total already paid
+        uint256 expectedPaid = (_missionData.croStart * progress) / 100;                                                // what should be paid at this progress
+        require(expectedPaid >= paidSoFar, "Progress regression");
+
+        uint256 payout = expectedPaid - paidSoFar;
+
+        if (payout > _missionData.croCurrent) {                                                                         // Optional belt-and-suspenders clamp (prevents any stray underflow, e.g. rounding edge cases)
+            payout = _missionData.croCurrent;
+        }
+        require(payout > 0, "No incremental payout");                                                                   // optional: avoids zero-payout “wins”
 
         _missionData.croCurrent -= payout;                                                                              // Deduct the payout from the current CRO amount
         _missionData.roundCount++;                                                                                      // Increment the round count

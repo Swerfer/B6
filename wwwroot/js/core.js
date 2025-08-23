@@ -32,7 +32,7 @@ if (res.ok) {
   READ_ONLY_RPC = '/api/rpc';
 
   if (factory) FACTORY_ADDRESS = factory;
-  console.log('[core] /api/config loaded');
+  console.log(`[core] /api/config loaded. Factory: ${FACTORY_ADDRESS}`);
 }
 
 
@@ -109,17 +109,30 @@ export const MISSION_ABI = [
 export const shorten = addr =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
 
-export function weiToCro(weiStr, decimals = 6) {
-  if (!weiStr) return "0";
+export function weiToCro(weiStr, decimals = null) {
+  // decimals === null  → trimmed (old default feel)
+  // decimals is number → fixed to exactly that many fractional digits
+  if (!weiStr) return decimals != null ? (decimals ? `0.${"0".repeat(decimals)}` : "0") : "0";
   try {
     const wei  = BigInt(weiStr);
     const base = 10n ** 18n;
     const i    = wei / base;
     const fraw = (wei % base).toString().padStart(18, "0");
-    const f    = fraw.slice(0, decimals).replace(/0+$/, "");
-    return f ? `${i}.${f}` : `${i}`;
+
+    if (decimals == null) {
+      // keep the classic trimmed look (up to 6 shown, then trimmed)
+      const f = fraw.slice(0, 6).replace(/0+$/, "");
+      return f ? `${i}.${f}` : `${i}`;
+    } else if (decimals === 0) {
+      return `${i}`;
+    } else {
+      const f = fraw.slice(0, decimals).padEnd(decimals, "0");
+      return `${i}.${f}`;
+    }
   } catch {
-    return String(weiStr);
+    const n = Number(weiStr) / 1e18;
+    if (decimals == null) return String(n);
+    return Number.isFinite(n) ? n.toFixed(decimals) : String(weiStr);
   }
 }
 
