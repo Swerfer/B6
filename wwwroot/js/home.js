@@ -12,6 +12,10 @@ const els = {
   factoryAddress:  document.getElementById("factoryAddress"),
   implAddress:     document.getElementById("implAddress"),
   refreshBtn:      document.getElementById("refreshBtn"),
+  btnTutorial:         document.getElementById("btnTutorial"),
+  tutorialOverlay:     document.getElementById("tutorialOverlay"),
+  tutorialClose:       document.getElementById("tutorialClose"),
+  tutorialCloseBottom: document.getElementById("tutorialCloseBottom"),
 };
 
 let ticker = null;
@@ -105,3 +109,87 @@ async function refreshAll(){
 els.refreshBtn?.addEventListener("click", refreshAll);
 refreshAll();
 setInterval(refreshAll, 15000);
+
+// ===== Overlays (Tutorial & FAQ) — unified wiring =====
+
+// helper: lock page scroll while an overlay is open
+function lockScroll(){
+  if (!document.body.dataset.prevOverflow) {
+    document.body.dataset.prevOverflow = document.body.style.overflow || "";
+  }
+  document.body.style.overflow = "hidden";
+}
+
+// helper: open an overlay by id (closes others first)
+function openOverlayById(overlayId){
+  const ov = document.getElementById(overlayId);
+  if (!ov) return;
+
+  // close all other overlays first
+  document.querySelectorAll(".tutorial-overlay,.faq-overlay,.modal-overlay").forEach(el=>{
+    el.classList.remove("open","hidden");
+    el.style.display = "none";
+  });
+
+  // show and mark as open (CSS controls display for .open)
+  ov.style.display = "";
+  ov.classList.add("open");
+  lockScroll();
+}
+
+// map buttons to overlays and close buttons
+const overlayDefs = [
+  { btnId: "btnTutorial",              overlayId: "tutorialOverlay",         closeIds: ["tutorialClose","tutorialCloseBottom"] },
+  { btnId: "btnFaq",                   overlayId: "faqOverlay",              closeIds: ["faqClose"] },
+  { btnId: "btnPrivacyPolicyAndTerms", overlayId: "ptOverlay",               closeIds: ["ptClose"] }
+];
+
+// wire all overlays in one pass
+overlayDefs.forEach(({btnId, overlayId, closeIds})=>{
+  const btn = document.getElementById(btnId);
+  const ov  = document.getElementById(overlayId);
+  if (!ov) return;
+
+  // open
+  btn?.addEventListener("click", () => openOverlayById(overlayId));
+
+  // close via X buttons
+  (closeIds || []).forEach(id => document.getElementById(id)?.addEventListener("click", goHome));
+
+  // close by clicking backdrop
+  ov.addEventListener("click", (e) => { if (e.target === ov) goHome(); });
+});
+
+// close all overlays via Esc
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") goHome(); });
+
+// FAQ collapsibles
+document.getElementById("faqOverlay")?.querySelectorAll(".faq-q").forEach(btn=>{
+  btn.addEventListener("click", (e)=>{
+    e.stopPropagation();
+    btn.closest(".faq-item")?.classList.toggle("open");
+  });
+});
+
+// Home button: close any overlays and reset the homepage
+const btnHome = document.getElementById("btnHome");
+function goHome(){
+  // Close ALL overlays (now includes Privacy & Terms)
+  document.querySelectorAll(".tutorial-overlay,.faq-overlay,.pt-overlay,.modal-overlay").forEach(el=>{
+    el.style.display = "none";
+    el.classList.remove("open","hidden");
+  });
+
+  // Restore page scroll if it was locked
+  if (Object.prototype.hasOwnProperty.call(document.body.dataset, "prevOverflow")) {
+    document.body.style.overflow = document.body.dataset.prevOverflow || "";
+    delete document.body.dataset.prevOverflow;
+  } else {
+    document.body.style.overflow = "";
+  }
+
+  window.scrollTo(0, 0);
+}
+
+btnHome?.addEventListener("click", goHome);
+

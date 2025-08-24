@@ -7,7 +7,12 @@
 
 /* Make room for your fixed footer; core.css handles header but we add extra bottom space */
 /* Ensure page can scroll and respects fixed header/footer */
-html, body { height:auto; min-height:100%; overflow-y:auto; }
+html, body { 
+    height:auto; 
+    min-height:100%; 
+    overflow-y:auto; 
+}
+
 .core-main{
   padding-top: var(--header-h, 64px);
   padding-bottom: calc(var(--footer-h, 64px) + 20px);
@@ -56,57 +61,74 @@ html, body { height:auto; min-height:100%; overflow-y:auto; }
   margin-bottom: 16px;
   letter-spacing:1px;
   font-size: clamp(12px, 2.5vw, 16px);
-  color:#7ad2ff;
-  text-align: left;
+  color: var(--uranian-blue);
+ /* text-align: left; */
 }
 
 /* NEW: three counters inside the hero */
+/* same grid for BOTH rows of pills; equal widths */
 .hero-stats{
   display:grid;
   grid-template-columns: repeat(3, minmax(0,1fr));
-  gap:12px;
-  margin: 14px auto 12px;
+  gap:10px;                         /* tighter gap */
+  margin: 10px auto 8px;            /* less vertical space */
   max-width: 720px;
 }
+.hero-stats + .hero-stats{          /* second row (addresses) sits closer */
+  margin-top: 8px;
+}
 
+/* pill look & equal heights */
 .hero-stats .stat{
   background: rgba(6,29,45,.55);
   border:1px solid rgba(72,221,255,.25);
   border-radius:14px;
-  padding:10px 12px;
+  padding:8px 10px;                 /* a bit tighter for phones */
   text-align:center;
+  display:grid;
+  align-content:center;
+  min-height: 64px;                 /* consistent pill height */
 }
 
-.hero-stats .stat-value{ 
-    font-size: clamp(22px, 5vw, 34px); 
-    font-weight:900; 
+/* long addresses wrap nicely but keep the pill size consistent */
+.hero-stats .stat-value-small{
+  font-size: clamp(10px, 2.2vw, 18px);
+  font-weight:700;
+  word-break: break-all;
+  line-height: 1.15;
+}
+.hero-stats .stat-value-comment{
+  font-size: clamp(9px, 1.8vw, 12px);
+  font-weight:600;
+  color: var(--uranian-blue);
+  line-height: 1.2;
 }
 
-.hero-stats .stat-label{ 
-    color:#7ad2ff; 
-    font-size:12px; 
-    text-transform:uppercase; 
-    letter-spacing:.8px; 
-}
-
+/* phones: still 3 columns; slightly smaller padding/gap for fit */
 @media (max-width: 480px){
-  .hero-stats{ 
-    grid-template-columns: repeat(3, 1fr); 
-    }
+  .hero-stats{
+    grid-template-columns: repeat(3, 1fr);
+    gap:8px;
+    max-width: 100%;                /* allow full width on small screens */
+  }
+  .hero-stats .stat{ padding:7px 8px; min-height: 58px; }
+  .hero-cta{ display:none; }
 }
 
+/* slimmer space below the countdown pill */
 .countdown-pill{
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  gap:12px;
-  padding:12px 18px;
+  gap:10px;
+  padding:10px 16px;
   border-radius:16px;
   backdrop-filter: blur(6px);
   background: rgba(6,29,45,.6);
   border:1px solid rgba(72,221,255,.35);
-  margin: 8px 0 16px;
+  margin: 6px 0 8px;                /* reduced bottom margin */
 }
+
 
 .pill-label{
   font-size:12px;
@@ -146,7 +168,7 @@ html, body { height:auto; min-height:100%; overflow-y:auto; }
 
 .stat .stat-label{
   color:#7ad2ff;
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: .8px;
 }
@@ -160,4 +182,253 @@ html, body { height:auto; min-height:100%; overflow-y:auto; }
   display:flex;
   justify-content:center;
   margin-top:10px;
+}
+
+/* ===== Tutorial Overlay (fullscreen, no scroll) ===== */
+.tutorial-overlay{
+  position: fixed;
+  top: var(--header-h, 64px);
+  bottom: var(--footer-h, 64px);
+  left: 0;
+  right: 0;
+  display: none;
+  z-index: 4000;
+  padding: 0 16px;            /* side breathing room on small screens */
+}
+
+.tutorial-overlay.open{
+  display: grid;               /* center the card */
+  place-items: center;
+}
+
+.tutorial-card{
+  position: relative;
+  width: min(1200px, 100%);                    /* match homeMain max width */
+  height: 100%;
+  margin: 0 auto;                              /* center inside overlay */
+  background: linear-gradient(180deg, rgba(10,28,44,1), rgba(8,22,36,1));
+  border: 1px solid rgba(72,221,255,.25);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 10px;
+  padding: clamp(16px, 2.5vw, 24px);
+  overflow: hidden;
+}
+
+.tutorial-inner{
+  width: min(800px, 100%);
+  margin: 0 auto;               /* center the inner content */
+}
+
+.tutorial-title{
+  margin: 0;
+  font-weight: 800;
+  letter-spacing: .4px;
+  color: #e6f7ff;
+  display: flex; align-items: center;
+  gap: 8px;
+}
+
+.tutorial-grid{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 18px;
+}
+
+@media (max-width: 640px){
+  .tutorial-grid{ grid-template-columns: 1fr; }
+}
+
+.t-item{
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 10px; align-items: start;
+}
+
+.t-item i{ 
+    font-size: 18px; 
+    color: #7ad2ff; 
+    margin-top: 3px; 
+}
+
+.t-item p{ 
+    margin: 0; 
+    line-height: 1.3; 
+    color: #dbe7f5; 
+    font-size: clamp(13px, 2.2vw, 16px); 
+}
+
+.tutorial-actions{
+  display: flex; 
+  justify-content: center; 
+  gap: 10px; 
+  margin-top: 4px;
+}
+
+.tutorial-close{
+  position: absolute; 
+  top: 10px; 
+  right: 12px;
+  background: transparent; 
+  border: 0; 
+  color: #9fdfff;
+  font-size: 20px; 
+  padding: 6px; 
+  cursor: pointer;
+}
+.tutorial-close:hover{ 
+    color: #ffffff; 
+}
+
+/* Prevent page scroll while tutorial is open */
+body.tutorial-open{ 
+    overflow: hidden; 
+}
+
+/* ===== FAQ Overlay (same frame as tutorial) ===== */
+.faq-overlay{
+  position: fixed;
+  top: var(--header-h, 64px);
+  bottom: var(--footer-h, 64px);
+  left: 0; right: 0;
+  display: none;
+  z-index: 4000;
+  padding: 0 16px;                 /* small side padding for tiny screens */
+}
+.faq-overlay.open{
+  display: grid;                   /* center the card */
+  place-items: center;
+}
+
+.faq-card{
+  position: relative;
+  width: min(1200px, 100%);        /* same outer width as homeMain */
+  height: 100%;
+  margin: 0 auto;
+  background: linear-gradient(180deg, rgba(10,28,44,1), rgba(8,22,36,1));
+  border: 1px solid rgba(72,221,255,.25);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 10px;
+  padding: clamp(16px, 2.5vw, 24px);
+  overflow: hidden;                 /* no scroll inside overlay */
+}
+
+.faq-inner{
+  width: min(800px, 100%);         /* inner text column */
+  margin: 0 auto;
+  position: relative;
+}
+
+/* FAQ list */
+.faq-list{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 18px;
+}
+@media (max-width: 768px){
+  .faq-list{ grid-template-columns: 1fr; }
+}
+
+.faq-item{
+  background: rgba(6,29,45,.45);
+  border: 1px solid rgba(72,221,255,.25);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.faq-q{
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  background: transparent;
+  border: 0;
+  color: #e6f7ff;
+  text-align: left;
+  cursor: pointer;
+  font-weight: 700;
+}
+.faq-q .caret{ transition: transform .18s ease; }
+.faq-item.open .faq-q .caret{ transform: rotate(180deg); }
+
+.faq-a{
+  max-height: 0;
+  overflow: hidden;
+  padding: 0 14px;
+  color: #dbe7f5;
+  transition: max-height .22s ease, padding-top .22s ease, padding-bottom .22s ease;
+}
+.faq-item.open .faq-a{
+  max-height: 240px;               /* enough for 2–3 short lines */
+  padding: 6px 14px 12px;
+}
+
+/* ===== Privacy & Terms Overlay (scroll allowed) ===== */
+.pt-overlay{
+  position: fixed;
+  top: var(--header-h, 64px);
+  bottom: var(--footer-h, 64px);
+  left: 0; right: 0;
+  display: none;
+  z-index: 4000;
+  padding: 0 16px;                 /* side padding on tiny screens */
+}
+.pt-overlay.open{
+  display: grid;
+  place-items: center;
+}
+
+.pt-card{
+  position: relative;
+  width: min(1200px, 100%);        /* match homeMain */
+  height: 100%;
+  margin: 0 auto;
+  background: linear-gradient(180deg, rgba(10,28,44,1), rgba(8,22,36,1));
+  border: 1px solid rgba(72,221,255,.25);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+  overflow: hidden;                 /* round the scrollable container */
+  display: grid;
+}
+
+.pt-inner{
+  width: min(800px, 100%);         /* inner column width */
+  margin: 0 auto;
+  padding: clamp(16px, 2.5vw, 24px);
+  height: 100%;
+  overflow: auto;                   /* enable scrolling */
+}
+
+/* Section styles (reusing tutorial look) */
+.pt-h3{
+  margin: 0 0 8px;
+  font-weight: 800;
+  display: flex; align-items: center;
+  gap: 8px;
+  color: #e6f7ff;
+}
+
+.pt-section{ 
+    margin-bottom: 16px; 
+}
+
+.pt-list{
+  margin: 0 0 8px 0;
+  padding-left: 18px;
+}
+
+.pt-list li{ 
+    margin-bottom: 6px; 
+}
+
+.pt-note{
+  color: #9fbcd8;
+  font-size: 0.9rem;
 }
