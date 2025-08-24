@@ -71,7 +71,9 @@ let   ringTimer             = null;
 let   stageTicker           = null;
 let   stageCurrentStatus    = null;
 let   ctaBusy               = false;
-let stageReturnTo           = null;   // "stage" when we navigated from stage → detail
+let   stageReturnTo         = null;   // "stage" when we navigated from stage → detail
+let   stageRefreshTimer     = null;
+let   stageRefreshBusy      = false;
 // #endregion
 
 // --- DEBUG + group tracking ---
@@ -161,6 +163,11 @@ function isCooldownError(err){
     const parsed = __missionErrIface.parseError(hex);
     return parsed?.name === "Cooldown";
   } catch { return false; }
+}
+
+function updateConnectText(){
+  const span = document.getElementById("connectBtnText");
+  if (span) span.textContent = walletAddress ? shorten(walletAddress) : "Connect Wallet";
 }
 
 // Flip the open stage to Paused immediately; reconcile from API afterwards
@@ -308,6 +315,32 @@ function statusSlug(s){
 }
 
 // ---- bank-now & cooldown helpers ----
+
+function waitForMyRoundWin(meAddrLc, missionAddrLc, timeoutMs = 25000){
+  return new Promise((resolve, reject) => {
+    if (!hubConnection) { reject(new Error("hub not started")); return; }
+
+    const onRR = (addr, round, winner, amountWei) => {
+      try {
+        const a = String(addr||"").toLowerCase();
+        const w = String(winner||"").toLowerCase();
+        if (a === missionAddrLc && w === meAddrLc) {
+          cleanup();
+          resolve({ round: Number(round), amountWei: String(amountWei || "0") });
+        }
+      } catch { /* ignore parse errors */ }
+    };
+
+    const cleanup = () => {
+      try { hubConnection.off("RoundResult", onRR); } catch {}
+      clearTimeout(to);
+    };
+
+    const to = setTimeout(() => { cleanup(); reject(new Error("timeout")); }, timeoutMs);
+    hubConnection.on("RoundResult", onRR);
+  });
+}
+
 function getLastBankTs(mission, rounds){
   const t0 = Number(mission?.mission_start || 0);
   let last = t0;
@@ -362,7 +395,7 @@ function formatMMSS(s){
   return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
 }
 
-async function getMissionCreationTs(mission){
+async function getMissionCreationTs(mission){ // Used for circle timer if mission creation is used for start time timer.
   const inline = Number(mission.mission_created ?? 0);
   if (inline > 0) return inline;           // skip log scan when API provides it
   const addr = mission.mission_address;
@@ -497,6 +530,9 @@ function stageUnitFor(leftSec){
 function ringWindowForUnit(unit, phaseStart, endTs){
   if (!endTs) return [0,0];
 
+  const now = Math.floor(Date.now()/1000);
+
+  /*
   const H36 = 36 * 3600;
   const M90 = 90 * 60;
   const S90 = 90;
@@ -519,6 +555,8 @@ function ringWindowForUnit(unit, phaseStart, endTs){
   }
   // seconds unit stays a fixed trailing window
   return [endTs - S90, endTs];
+  */
+  return [now, endTs];
 }
 
 async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
@@ -596,7 +634,9 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
     const unit = stageUnitFor(left);
     if (unit !== currentUnit) {
       const [S, E] = ringWindowForUnit(unit, phaseStartTs, endTs);
-      if (S && E && E > S) bindRingToWindow(S, E); else setRingProgress(0);
+      // seconds unit → 0.1 s ticks, otherwise 1 s
+      const tickMs = 100; //(unit === "s") ? 100 : 1000;
+      if (S && E && E > S) bindRingToWindow(S, E, tickMs); else setRingProgress(0);
       currentUnit = unit;
     }
 
@@ -660,7 +700,11 @@ function statusByClock(m, now = Math.floor(Date.now()/1000)) {
 
 async function bindCenterTimerToMission(mission){
   const endTs = nextDeadlineFor(mission);
-  const st    = Number(mission?.status);
+  const startTs = Math.floor(Date.now()/1000);    // start windows from NOW
+
+  // Below is for start from 'start' times. See also function ringWindowForUnit
+
+  /* const st    = Number(mission?.status);
 
   let startTs = 0;
   if (st === 0) {
@@ -676,6 +720,7 @@ async function bindCenterTimerToMission(mission){
   }
 
   // pass mission to enable front-end flip at 0s
+  */
   startStageTimer(endTs, startTs, mission);
 }
 
@@ -700,28 +745,52 @@ function setRingProgress(pct){
   cover.setAttribute("stroke-dashoffset", String(coverLen)); // clockwise
 }
 
-function bindRingToWindow(startSec, endSec){
+function bindRingToWindow(startSec, endSec, tickMs = 1000){
   unbindRing();
   const cover = document.getElementById("ringCover");
   if (!cover) return;
   if (!startSec || !endSec || endSec <= startSec) return;
 
   const tick = () => {
-    const now = Math.floor(Date.now()/1000);
+    const nowMs  = Date.now();
+    const nowSec = nowMs / 1000; // high-resolution seconds
     let pct; // revealed percent 0..100
-    if (now <= startSec) pct = 0;                         // not started → all covered
-    else if (now >= endSec) pct = 100;                    // finished → fully revealed
-    else pct = ((now - startSec) / (endSec - startSec)) * 100;
+    if (nowSec <= startSec) pct = 0;
+    else if (nowSec >= endSec) pct = 100;
+    else pct = ((nowSec - startSec) / (endSec - startSec)) * 100;
     setRingProgress(pct);
   };
 
-  tick();                             // draw immediately
-  ringTimer = setInterval(tick, 1000);
+  tick(); // draw immediately
+  ringTimer = setInterval(tick, Math.max(16, tickMs)); // clamp to ~60fps minimum spacing
 }
 
 /* Map mission.status to the correct time window */
 async function bindRingToMission(m){
   const st = Number(m?.status ?? -1);
+  const now = Math.floor(Date.now()/1000);
+  let   E   = 0;
+
+  if (st === 0) {                       // Pending
+    E = Number(m.enrollment_start || m.mission_start || 0);
+  } else if (st === 1) {                // Enrolling
+    E = Number(m.enrollment_end || 0);
+  } else if (st === 2) {                // Arming
+    E = Number(m.mission_start || 0);
+  } else if (st === 3 || st === 4) {    // Active / Paused
+    E = Number(m.mission_end || 0);
+  } else {
+    setRingProgress(100);
+    return;
+  }
+
+  if (E && E > now) {
+    bindRingToWindow(now, E);           // ring window: NOW → deadline
+  } else {
+    setRingProgress(st >= 5 ? 100 : 0);
+  }
+
+  /*
   let S = 0, E = 0;
 
   if (st === 0) {                         // Pending: MissionCreated → enrollment_start
@@ -754,6 +823,7 @@ async function bindRingToMission(m){
   } else {
     setRingProgress(st >= 5 ? 100 : 0);
   }
+    */
 }
 
 /* ----- page scroll lock (for gameplay stage) ----- */
@@ -805,7 +875,14 @@ async function startHub() { // SignalR HUB
     hubConnection.on("RoundResult", async (addr, round, winner, amountWei) => {
       console.log("StartHub hubConnection RoundResult - Current address: " + currentMissionAddr);
       dbg("RoundResult PUSH", { addr, round, winner, amountWei, currentMissionAddr, groups: Array.from(subscribedGroups) });
-      showAlert(`Round ${round} – ${winner}<br/>Amount (wei): ${amountWei}<br/>Mission: ${addr}`, "success");
+      const me  = (walletAddress || "").toLowerCase();
+      const win = String(winner || "").toLowerCase();
+      const cro = weiToCro(String(amountWei));
+      if (win === me) {
+        showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${round}!`, "success");
+      } else {
+        showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
+      }
 
       if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
         console.log("1 " + currentMissionAddr);
@@ -815,7 +892,10 @@ async function startHub() { // SignalR HUB
       // refresh the detail view (used for the auto-dismiss timer, etc.)
       try {
         const data = await apiMission(currentMissionAddr);
-        renderMissionDetail(data);
+
+        // Only refresh the detail panel if the user is not on the stage
+        const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
+        if (!onStage) renderMissionDetail(data);
 
         const mission = data?.mission || data;
         const { pauseEnd } = cooldownInfo(mission);
@@ -832,9 +912,14 @@ async function startHub() { // SignalR HUB
       // show inline “Round N banked by …” on the stage + rebuild the stage
       const gameMain = document.getElementById('gameMain');
       if (gameMain && gameMain.classList.contains('stage-mode')) {
-        renderRoundBankedNotice(Number(round), String(winner || ""));
+        const me  = (walletAddress || "").toLowerCase();
+        const win = String(winner || "").toLowerCase();
+        if (win !== me) {
+          renderRoundBankedNotice(Number(round), String(winner || ""), String(amountWei || "0"));
+        }
         await refreshOpenStageFromServer(2);
       }
+
     });
 
     hubConnection.on("StatusChanged", async (addr, newStatus) => {
@@ -903,14 +988,14 @@ async function startHub() { // SignalR HUB
             stageCurrentStatus = apiStatus;
 
             // One extra pass after DB fields (pause_timestamp/rounds) settle
-            setTimeout(() => refreshOpenStageFromServer(10), 1600);
+            setTimeout(() => refreshOpenStageFromServer(2), 1600);
             return;
           }
 
           // Same status → light refresh + delayed reconcile so spectators flip to Paused.
           buildStageLowerHudForStatus(m);
           renderStageCtaForStatus(m);
-          setTimeout(() => refreshOpenStageFromServer(10), 1600);
+          setTimeout(() => refreshOpenStageFromServer(2), 1600);
         } catch (err) {console.log("startHub MissionUpdated error: " + err)}
       }
     });
@@ -1082,35 +1167,57 @@ async function apiMission(addr){
 async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
-  if (!currentMissionAddr) {
-        console.log("6 " + currentMissionAddr);
-        return;
-      }
+  if (!currentMissionAddr) { console.log("6 " + currentMissionAddr); return; }
+
+  // serialize: only one in-flight refresh
+  if (stageRefreshBusy) return;
+  stageRefreshBusy = true;
+
+  const scheduleRetry = (n) => {
+    clearTimeout(stageRefreshTimer);
+    if (n > 0) {
+      stageRefreshTimer = setTimeout(() => refreshOpenStageFromServer(n - 1, delay), delay);
+    }
+  };
 
   try {
     const data = await apiMission(currentMissionAddr);
     const m = enrichMissionFromApi(data);
 
-    // Always refresh light parts (pills + CTA)
+    // Always refresh pills (safe)
     buildStageLowerHudForStatus(m);
-    renderStageCtaForStatus(m);
 
     const newStatus = Number(m.status);
     dbg("refreshOpenStageFromServer", { newStatus, stageCurrentStatus, retries });
 
-    // Rebuild heavy parts only on actual status change
+    // NO-REGRESS GUARD: ignore stale snapshots from API/indexer
+    if (typeof stageCurrentStatus === "number") {
+      const toggle34 = (newStatus === 3 && stageCurrentStatus === 4) || (newStatus === 4 && stageCurrentStatus === 3);
+      if (newStatus < stageCurrentStatus && !toggle34) {
+        scheduleRetry(retries);
+        return;
+      }
+    }
+
     if (newStatus !== stageCurrentStatus) {
       setStageStatusImage(statusSlug(m.status));
       await bindRingToMission(m);
       await bindCenterTimerToMission(m);
+      renderStageCtaForStatus(m);
       await renderStageEndedPanelIfNeeded(m);
       stageCurrentStatus = newStatus;
       dbg("refreshOpenStageFromServer APPLIED status", { stageCurrentStatus });
-    } else if (retries > 0) {
-      setTimeout(() => refreshOpenStageFromServer(retries - 1), delay);
+
+      // one gentle reconcile after DB denorms settle
+      scheduleRetry(Math.min(retries, 1));
+    } else {
+      scheduleRetry(retries);
     }
   } catch (e) {
-    dbg("refreshOpenStageFromServer FAILED", e?.message||e);
+    dbg("refreshOpenStageFromServer FAILED", e?.message || e);
+    scheduleRetry(retries);
+  } finally {
+    stageRefreshBusy = false;
   }
 }
 
@@ -1516,8 +1623,23 @@ async function handleBankItClick(mission){
     const tx = await c.callRound();
     await tx.wait();
 
-    showAlert("Round called. Good luck!", "success");
+    // Phase 1: immediate feedback
+    showAlert("Round called. Waiting for result…", "info");
+
+    // Phase 2: if *you* win, show the amount as soon as the push arrives
+    try {
+      const me = (await signer.getAddress()).toLowerCase();
+      const missionLc = String(mission.mission_address || "").toLowerCase();
+      const res = await waitForMyRoundWin(me, missionLc, 25000);
+      const cro = weiToCro(String(res.amountWei));
+      showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${res.round}!`, "success");
+    } catch {
+      // no win / no push within the window → keep the generic info alert
+    }
+
+    // keep the regular reconcile
     await refreshOpenStageFromServer(2);
+
   } catch (err) {
     if (err?.code === 4001 || err?.code === "ACTION_REJECTED") {
       showAlert("Banking canceled.", "warning");
@@ -1550,18 +1672,27 @@ async function  refreshStageCtaIfOpen(){
 }
 
 // #region Render functions
-async function  renderStageCtaForStatus (mission)         {
+async function  renderStageCtaForStatus (mission) {
   const host = document.getElementById("stageCtaGroup");
   if (!host) return;
-  host.innerHTML = "";
 
   const st = uiStatusFor(mission);
-  if (st === 1) return renderCtaEnrolling(host, mission); // JOIN
-  if (st === 2) return renderCtaArming(host, mission);    // ENROLLMENT / CLOSED (disabled)
-  if (st === 3) return renderCtaActive(host, mission);    // Active → BANK IT!
-  if (st === 4) return renderCtaPaused(host, mission);    // Paused → Cooldown
 
-  // no CTA for other statuses (4,5,6,7) for now
+  // Ignore stale snapshots that would repaint an older CTA (prevents JOIN flicker)
+  if (typeof stageCurrentStatus === "number") {
+    const toggle34 = (st === 3 && stageCurrentStatus === 4) || (st === 4 && stageCurrentStatus === 3);
+    if (st < stageCurrentStatus && !toggle34) {
+      console.debug("[CTA] stale snapshot ignored", { st, stageCurrentStatus });
+      return;
+    }
+  }
+
+  host.innerHTML = "";
+
+  if (st === 1) return renderCtaEnrolling (host, mission);  // JOIN
+  if (st === 2) return renderCtaArming    (host, mission);  // ENROLLMENT / CLOSED (disabled)
+  if (st === 3) return renderCtaActive    (host, mission);  // Active → BANK IT!
+  if (st === 4) return renderCtaPaused    (host, mission);  // Paused → Cooldown
 }
 
 async function  renderCtaEnrolling      (host, mission)   {
@@ -1906,18 +2037,21 @@ function        renderCtaPaused         (host, mission)   {
   host.appendChild(bank);
 }
 
-function        renderRoundBankedNotice (roundNo, winner) {
+function        renderRoundBankedNotice (roundNo, winner, amountWei) {
   const host = document.getElementById("stageNoticeGroup");
   if (!host) return;
 
   // Clear any previous notice
   host.innerHTML = "";
 
-  // Simple centered capsule just above the CTA button
-  const { xCenter, topY } = CTA_LAYOUT;
-  const W = 360, H = 26;
+  // Capsule positioned between the prize line and the top HUD pills
+  // (just above the first pill row)
+  const { xCenter } = CTA_LAYOUT;
+  const { yFirst }  = HUD;
+  const W = 360;
+  const H = 26;
   const x = xCenter - Math.round(W/2);
-  const y = Math.max(0, topY - 12 - H);
+  const y = Math.max(0, yFirst - H - 6);     // <-- new position (above pills)
 
   const g = document.createElementNS(SVG_NS, "g");
 
@@ -1929,48 +2063,50 @@ function        renderRoundBankedNotice (roundNo, winner) {
   bg.setAttribute("height", String(H));
   bg.setAttribute("rx", "12");
   bg.setAttribute("ry", "12");
-  bg.setAttribute("fill", "rgba(6,29,45,.85)");
-  bg.setAttribute("stroke", "rgba(72,221,255,.35)");
+  bg.setAttribute("fill", "rgba(6,29,45,85)");
+  bg.setAttribute("stroke", "rgba(72,221,255,35)");
   g.appendChild(bg);
 
-  // Main text
+  // Main text: "Round N banked by 0x1234...1234 for ## CRO!"
+  const cro = weiToCro(String(amountWei || "0"), 2);
   const txt = document.createElementNS(SVG_NS, "text");
   txt.setAttribute("x", String(x + 12));
   txt.setAttribute("y", String(y + 17));
   txt.setAttribute("class", "notice-text");
   const short = winner ? shorten(winner) : "";
-  txt.textContent = `Round ${roundNo} banked by ${short}`;
+  txt.textContent = `Round ${roundNo} banked by ${short} for ${cro} CRO!`;
   g.appendChild(txt);
 
-  // [copy] action
+  // Clickable icons (copy address + open on Cronoscan)
   if (winner){
-    const tCopy = document.createElementNS(SVG_NS, "text");
-    tCopy.setAttribute("x", String(x + W - 74));
-    tCopy.setAttribute("y", String(y + 17));
-    tCopy.setAttribute("class", "notice-text");
-    tCopy.setAttribute("role", "button");
-    tCopy.setAttribute("tabindex", "0");
-    tCopy.style.cursor = "pointer";
-    tCopy.textContent = "[copy]";
-    tCopy.addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(winner); } catch {}
-    });
-    g.appendChild(tCopy);
+    // Copy icon (inline vector)
+    const icoCopy = document.createElementNS(SVG_NS, "g");
+    icoCopy.setAttribute("transform", `translate(${x + W - 56},${y + 6})`);
+    icoCopy.setAttribute("role", "button");
+    icoCopy.setAttribute("tabindex", "0");
+    icoCopy.style.cursor = "pointer";
+    // two overlapped rectangles → "copy" glyph
+    const r1 = document.createElementNS(SVG_NS, "rect");
+    r1.setAttribute("x", "3"); r1.setAttribute("y", "3");
+    r1.setAttribute("width", "12"); r1.setAttribute("height", "12");
+    r1.setAttribute("fill", "none"); r1.setAttribute("stroke", "#bfefff"); r1.setAttribute("stroke-width", "1.2");
+    const r2 = document.createElementNS(SVG_NS, "rect");
+    r2.setAttribute("x", "7"); r2.setAttribute("y", "7");
+    r2.setAttribute("width", "12"); r2.setAttribute("height", "12");
+    r2.setAttribute("fill", "none"); r2.setAttribute("stroke", "#bfefff"); r2.setAttribute("stroke-width", "1.2");
+    icoCopy.appendChild(r1); icoCopy.appendChild(r2);
+    icoCopy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(winner); } catch {} });
+    g.appendChild(icoCopy);
 
-    // [↗︎] external link
-    const tLink = document.createElementNS(SVG_NS, "text");
-    tLink.setAttribute("x", String(x + W - 42));
-    tLink.setAttribute("y", String(y + 17));
-    tLink.setAttribute("class", "notice-text");
-    tLink.setAttribute("role", "button");
-    tLink.setAttribute("tabindex", "0");
-    tLink.style.cursor = "pointer";
-    tLink.textContent = "[↗︎]";
-    tLink.addEventListener("click", () => {
-      const url = `https://cronoscan.com/address/${winner}`;
-      try { window.open(url, "_blank", "noopener"); } catch {}
+    // External link icon (re-use addrLinkIcon from core.js)
+    const icoLink = svgImage(addrLinkIcon, x + W - 36, y + 5, 14, 14);
+    icoLink.setAttribute("role", "button");
+    icoLink.setAttribute("tabindex", "0");
+    icoLink.style.cursor = "pointer";
+    icoLink.addEventListener("click", () => {
+      try { window.open(`https://cronoscan.com/address/${winner}`, "_blank", "noopener"); } catch {}
     });
-    g.appendChild(tLink);
+    g.appendChild(icoLink);
   }
 
   // Close ×
@@ -2183,7 +2319,6 @@ function        renderAllMissions       (missions = []) {
     li.innerHTML = `
       <div class="mission-head d-flex justify-content-between align-items-center">
         <div class="mission-title">
-          <i class="fa-regular fa-calendar me-2 text-info"></i>
           <span class="title-text">${m.name || m.mission_address}</span>
         </div>
         <span class="status-pill ${stClass}">${stText}</span>
@@ -2268,7 +2403,6 @@ function        renderJoinable          (items){
     li.innerHTML = `
       <div class="mission-head">
         <div class="mission-title">
-          <i class="fa-regular fa-calendar text-cyan"></i>
           <span class="title-text">${title}</span>
         </div>
         <div class="mission-rounds">${rounds ? `${rounds} Rounds` : ""}</div>
@@ -2342,7 +2476,6 @@ function        renderMyMissions        (items){
     li.innerHTML = `
       <div class="mission-head">
         <div class="mission-title">
-          <i class="fa-regular fa-calendar text-cyan"></i>
           <span class="title-text">${title}</span>
         </div>
         <div class="mission-rounds">${rounds} Rounds</div>
@@ -2955,6 +3088,15 @@ async function init(){
  // Fallback if those custom events aren’t emitted:
   if (window.ethereum) {
     window.ethereum.on("accountsChanged", () => setTimeout(refreshStageCtaIfOpen, 0));
+  }
+
+  window.addEventListener("wallet:connected",    updateConnectText);
+  window.addEventListener("wallet:changed",      updateConnectText);
+  window.addEventListener("wallet:disconnected", updateConnectText);
+
+  // keep your existing CTA refreshers; add this fallback too:
+  if (window.ethereum) {
+    window.ethereum.on("accountsChanged", () => setTimeout(updateConnectText, 0));
   }
 
   // Tiny poll as last resort (stops once it detects a change)
