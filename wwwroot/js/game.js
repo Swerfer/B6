@@ -2372,8 +2372,8 @@ function        renderAllMissions       (missions = []) {
       <div class="progress-slim"><i style="--w:${playersPct}%"></i></div>
     `;
 
-    li.querySelector('.mission-title .title-text').title = title;
-    
+    li.querySelector('.mission-title .title-text').title = m.name || m.mission_address;
+
     // clicking opens detail
     li.addEventListener("click", () => openMission(m.mission_address));
 
