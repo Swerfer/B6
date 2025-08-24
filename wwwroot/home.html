@@ -3,51 +3,110 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>B6 - Game | Be Brave Be Bold Be Banked - The ultimate competitive blockchain game</title>
+  <title>B6 – Be Brave. Be Bold. Be Banked.</title>
 
   <!-- CSS -->
   <link rel="stylesheet" href="css/core.css?">
-  <link rel="stylesheet" href="css/game.css?v452">      
+  <link rel="stylesheet" href="css/home.css?v2">
 
+  <!-- Icons & Bootstrap (same pattern as your other pages) -->
   <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet';">
   <noscript>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
   </noscript>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/css/bootstrap.min.css">
 
-  <!-- Ethers + Web3Modal (lokale kopieën) -->
-  <script src="js/ethers.umd.min.js"></script> 
-  <script src="js/web3modal.js"></script>
+  <!-- Ethers UMD -->
+  <script src="js/ethers.umd.min.js"></script>
+  <!-- Page logic -->
+  <script type="module" src="js/home.js?v3"></script>
 
   <!-- SignalR client (CDN) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
 </head>
-  <body>
+<body class="home-body">
 
-    <header class="app-header">
-      <div class="inner">
-          <h1 class="brand-line">BE BRAVE&nbsp;&nbsp;BE BOLD&nbsp;&nbsp;BE BANKED</h1>
-          <span class="subtitle">THE ULTIMATE COMPETITIVE BLOCKCHAIN GAME</span>
-      </div>
-    </header>
+  <!-- Header (unchanged from your pages) -->
+  <header class="app-header">
+    <div class="inner">
+      <h1 class="brand-line">BE BRAVE&nbsp;&nbsp;BE BOLD&nbsp;&nbsp;BE BANKED</h1>
+      <span class="subtitle">THE ULTIMATE COMPETITIVE BLOCKCHAIN GAME</span>
+    </div>
+  </header>
 
-    <main      id="homeMain"      class="app-main core-main">
+  <main id="homeMain" class="app-main core-main">
 
-      <div class="row g-4 w-100">
+    <!-- HERO -->
+    <section class="hero section-box">
+      <picture class="hero-art">
+        <img src="assets/images/Vault_bg_squared.png" alt="B6 Vault" loading="eager">
+      </picture>
 
-        <section id="allMissionsSection" class="col-12 section-box">
-          <div class="text-center">
-            <h2 class="section-title m-0 mb-4">Welcome to B6</h2>
-                <p>Heads up! This feature is still being built. Joining missions now could cause you to lose your CRO.</p>
-                <p>If you decide to go ahead, just know it's entirely at your own risk.</p>
+      <div class="hero-overlay">
+        <h2 class="hero-title">Welcome to Be Brave Be Bold Be Banked!</h2>
+        <p class="hero-sub">
+              Compete in time-boxed blockchain missions where every second counts. 
+              Enroll with CRO, race through rounds and bank at the perfect moment to claim your share. 
+              Fair, transparent, and on-chain — no gimmicks. Outsmart opponents, manage cooldowns and win real rewards. Ready to play bold & be banked?
+        </p>
+
+        <!-- Live countdown pill -->
+        <!-- Live countdown pill -->
+        <div class="countdown-pill">
+          <div class="pill-label">NEXT MISSION STARTS IN</div>
+          <div id="nextStart" class="pill-timer">—</div>
+        </div>
+
+        <!-- NEW: three live counters in the hero -->
+        <div class="hero-stats mb-3">
+          <div class="stat">
+            <div class="stat-value" id="statJoinable">0</div>
+            <div class="stat-label">Joinable</div>
           </div>
-        </section>
+          <div class="stat">
+            <div class="stat-value" id="statActive">0</div>
+            <div class="stat-label">Active</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="statTotal">0</div>
+            <div class="stat-label">Total Missions</div>
+          </div>
+        </div>
+
+        <div class="hero-cta">
+          <a href="game.html" class="btn btn-cyan btn-lg">
+            <i class="fa-solid fa-right-to-bracket me-2"></i> Enter B6
+          </a>
+        </div>
 
       </div>
+    </section>
 
-    </main>
+    <!-- LIVE STATS / TRANSPARENCY -->
+    <section class="stats section-box">
+      <div class="stats-grid">
 
+        <div class="card addr">
+          <div class="addr-label">Factory</div>
+          <div class="addr-value" id="factoryAddress">—</div>
+        </div>
+        <div class="card addr">
+          <div class="addr-label">Mission Implementation</div>
+          <div class="addr-value" id="implAddress">—</div>
+        </div>
+      </div>
+
+      <div class="stats-actions">
+        <button id="refreshBtn" class="btn btn-sm btn-outline-info">
+          <i class="fa-solid fa-rotate"></i> Refresh
+        </button>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer (unchanged from your pages) -->
     <footer class="app-footer">
         <div class="inner gap-2">
 
@@ -73,23 +132,22 @@
         </div>
     </footer>
 
-    <div       id="modalOverlay"  class="modal-overlay">
-
-        <div id="confirmModal" class="modal-box hidden">
-            <p id="modalMessage" class="mb-4"></p>
-            <div class="d-flex gap-3 justify-content-center">
-                <button id="modalConfirm" class="btn btn-cyan px-4">Yes</button>
-                <button id="modalCancel"  class="btn btn-outline-cyan px-4">Cancel</button>
-            </div>
-        </div>
-
-        <div id="alertModal" class="modal-box hidden">
-            <h3 id="alertModalTitle" class="modal-title mb-3"></h3>
-            <p  id="alertModalText"  class="mb-4"></p>
-            <button id="alertModalCloseBtn" class="btn btn-cyan px-4">Close</button>
-        </div>
-
+  <!-- Shared modals -->
+  <div id="modalOverlay" class="modal-overlay">
+    <div id="confirmModal" class="modal-box hidden">
+      <p id="modalMessage" class="mb-4"></p>
+      <div class="d-flex gap-3 justify-content-center">
+        <button id="modalConfirm" class="btn btn-cyan px-4">Yes</button>
+        <button id="modalCancel"  class="btn btn-outline-cyan px-4">Cancel</button>
+      </div>
     </div>
 
-  </body>
+    <div id="alertModal" class="modal-box hidden">
+      <h3 id="alertModalTitle" class="modal-title mb-3"></h3>
+      <p  id="alertModalText"  class="mb-4"></p>
+      <button id="alertModalCloseBtn" class="btn btn-cyan px-4">Close</button>
+    </div>
+  </div>
+
+</body>
 </html>

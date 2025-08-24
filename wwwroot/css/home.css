@@ -1,0 +1,163 @@
+/* css/home.css — homepage-only styling (core.css stays the source of truth) */
+
+.home-body{
+  background: radial-gradient(1200px 600px at 50% 0%, #0b1923 0%, #07131b 60%, #050f16 100%);
+  color:#e6f7ff;
+}
+
+/* Make room for your fixed footer; core.css handles header but we add extra bottom space */
+/* Ensure page can scroll and respects fixed header/footer */
+html, body { height:auto; min-height:100%; overflow-y:auto; }
+.core-main{
+  padding-top: var(--header-h, 64px);
+  padding-bottom: calc(var(--footer-h, 64px) + 20px);
+}
+
+/* HERO */
+.hero{
+  position:relative;
+  overflow:hidden;
+  min-height: calc(100vh - var(--header-h, 64px) - var(--footer-h, 64px));
+  display:grid;
+  place-items:center;
+  padding:0px 16px;
+}
+
+.hero-art img{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  opacity:.35;
+  filter:saturate(130%) contrast(120%);
+}
+
+.hero-overlay{
+  position:relative;
+  z-index:1;
+  text-align:center;
+  max-width: 960px;
+}
+
+.hero-title{
+  margin:0 0 8px;
+  line-height:.95;
+  font-weight: 600;
+  letter-spacing:.5px;
+  font-size: clamp(14px, 3vw, 36px);
+}
+
+.hero-title span{ 
+    display:block; 
+}
+
+.hero-sub{
+  margin-bottom: 16px;
+  letter-spacing:1px;
+  font-size: clamp(12px, 2.5vw, 16px);
+  color:#7ad2ff;
+  text-align: left;
+}
+
+/* NEW: three counters inside the hero */
+.hero-stats{
+  display:grid;
+  grid-template-columns: repeat(3, minmax(0,1fr));
+  gap:12px;
+  margin: 14px auto 12px;
+  max-width: 720px;
+}
+
+.hero-stats .stat{
+  background: rgba(6,29,45,.55);
+  border:1px solid rgba(72,221,255,.25);
+  border-radius:14px;
+  padding:10px 12px;
+  text-align:center;
+}
+
+.hero-stats .stat-value{ 
+    font-size: clamp(22px, 5vw, 34px); 
+    font-weight:900; 
+}
+
+.hero-stats .stat-label{ 
+    color:#7ad2ff; 
+    font-size:12px; 
+    text-transform:uppercase; 
+    letter-spacing:.8px; 
+}
+
+@media (max-width: 480px){
+  .hero-stats{ 
+    grid-template-columns: repeat(3, 1fr); 
+    }
+}
+
+.countdown-pill{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:12px;
+  padding:12px 18px;
+  border-radius:16px;
+  backdrop-filter: blur(6px);
+  background: rgba(6,29,45,.6);
+  border:1px solid rgba(72,221,255,.35);
+  margin: 8px 0 16px;
+}
+
+.pill-label{
+  font-size:12px;
+  color:#7ad2ff;
+  letter-spacing:.8px;
+}
+
+.pill-timer{
+  min-width: 160px;
+  text-align:center;
+  font-weight:800;
+  font-size: clamp(20px, 5vw, 36px);
+}
+
+/* STATS */
+.stats{ 
+    padding: 24px 16px 32px; 
+}
+
+.stats-grid{
+  display:grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap:12px;
+}
+
+.card{
+  background: rgba(6,29,45,.5);
+  border:1px solid rgba(72,221,255,.25);
+  border-radius:16px;
+  padding:16px;
+}
+
+.stat .stat-value{
+  font-size: clamp(28px, 5vw, 42px);
+  font-weight: 900;
+}
+
+.stat .stat-label{
+  color:#7ad2ff;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+}
+
+.addr .addr-value{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  opacity:.95;
+}
+
+.stats-actions{
+  display:flex;
+  justify-content:center;
+  margin-top:10px;
+}
