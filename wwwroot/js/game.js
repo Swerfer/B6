@@ -1317,6 +1317,14 @@ function layoutStage(){
 
 }
 
+function stageTextFill(){
+  // Try to reuse the CTA note color; fall back to white
+  const sample = document.querySelector('#stageCtaGroup .cta-note');
+  const cs = sample ? getComputedStyle(sample) : null;
+  const val = cs?.fill || cs?.color || "";
+  return val && val !== "none" ? val : "#00c0f0";
+}
+
 // --- Lower HUD (pills) builder --------------------------------------------
 const SVG_NS = "http://www.w3.org/2000/svg";
 const HUD = {
@@ -2047,13 +2055,14 @@ function        renderRoundBankedNotice (roundNo, winner, amountWei) {
   // Capsule positioned between the prize line and the top HUD pills
   // (just above the first pill row)
   const { xCenter } = CTA_LAYOUT;
-  const { yFirst }  = HUD;
+  const { yFirst, rectH, gapY }  = HUD;
   const W = 360;
   const H = 26;
   const x = xCenter - Math.round(W/2);
-  const y = Math.max(0, yFirst - H - 6);     // <-- new position (above pills)
+  const y = Math.max(0, yFirst + (2 * (rectH + gapY)) - H - 12);     // <-- new position (above 2 lines of pills)
 
   const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("fill", stageTextFill());
 
   // Background capsule
   const bg = document.createElementNS(SVG_NS, "rect");
@@ -2088,18 +2097,18 @@ function        renderRoundBankedNotice (roundNo, winner, amountWei) {
     // two overlapped rectangles → "copy" glyph
     const r1 = document.createElementNS(SVG_NS, "rect");
     r1.setAttribute("x", "3"); r1.setAttribute("y", "3");
-    r1.setAttribute("width", "12"); r1.setAttribute("height", "12");
+    r1.setAttribute("width", "10"); r1.setAttribute("height", "10");
     r1.setAttribute("fill", "none"); r1.setAttribute("stroke", "#bfefff"); r1.setAttribute("stroke-width", "1.2");
     const r2 = document.createElementNS(SVG_NS, "rect");
     r2.setAttribute("x", "7"); r2.setAttribute("y", "7");
-    r2.setAttribute("width", "12"); r2.setAttribute("height", "12");
+    r2.setAttribute("width", "10"); r2.setAttribute("height", "10");
     r2.setAttribute("fill", "none"); r2.setAttribute("stroke", "#bfefff"); r2.setAttribute("stroke-width", "1.2");
     icoCopy.appendChild(r1); icoCopy.appendChild(r2);
     icoCopy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(winner); } catch {} });
     g.appendChild(icoCopy);
 
     // External link icon (re-use addrLinkIcon from core.js)
-    const icoLink = svgImage(addrLinkIcon, x + W - 36, y + 5, 14, 14);
+    const icoLink = svgImage(addrLinkIcon(winner), x + W - 36, y + 5, 14, 14);
     icoLink.setAttribute("role", "button");
     icoLink.setAttribute("tabindex", "0");
     icoLink.style.cursor = "pointer";
@@ -2134,7 +2143,7 @@ async function  renderStageEndedPanelIfNeeded(mission){
 
   // NEW — Failed (status 7): render reason + refund line and exit
   if (st === 7) {
-    const x = 500, y = 520;
+    const x = 500, y = 585;
     const g = document.createElementNS("http://www.w3.org/2000/svg","g");
 
     const title = document.createElementNS("http://www.w3.org/2000/svg","text");
@@ -2180,8 +2189,9 @@ async function  renderStageEndedPanelIfNeeded(mission){
 
   const winners = topWinners(enrollments, rounds, 3);
 
-  const x = 500, y = 520, lineH = 16;
+  const x = 500, y = 585, lineH = 16;
   const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+  g.setAttribute("fill", stageTextFill());
 
   // Title
   const t = document.createElementNS("http://www.w3.org/2000/svg","text");
