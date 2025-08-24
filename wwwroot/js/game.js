@@ -2372,6 +2372,8 @@ function        renderAllMissions       (missions = []) {
       <div class="progress-slim"><i style="--w:${playersPct}%"></i></div>
     `;
 
+    li.querySelector('.mission-title .title-text').title = title;
+    
     // clicking opens detail
     li.addEventListener("click", () => openMission(m.mission_address));
 
@@ -2449,6 +2451,8 @@ function        renderJoinable          (items){
       <div class="progress-slim"><i style="--w:${pct}%;"></i></div>
     `;
 
+    li.querySelector('.mission-title .title-text').title = title;
+
     const open = () => openMission(m.mission_address);
     li.addEventListener("click", open);
     li.addEventListener("keypress", e => { if (e.key === "Enter") open(); });
@@ -2525,6 +2529,8 @@ function        renderMyMissions        (items){
           </span>
         </div>` : ""}
     `;
+
+    li.querySelector('.mission-title .title-text').title = title;
 
     const open = () => openMission(m.mission_address);
     li.addEventListener("click", (e) => {

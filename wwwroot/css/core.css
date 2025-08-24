@@ -462,14 +462,26 @@ body::before {
 
 /* top row: title on the left, rounds on the right */
 .mission-head{
-  display:flex; align-items:center; justify-content:space-between; gap:.75rem;
+  display:flex; 
+  align-items:center; 
+  justify-content:space-between; 
+  gap:.75rem;
+  min-width: 0
 }
+
 .mission-title{
-  display:flex; align-items:center; gap:.5rem;
+  display:flex; 
+  align-items:center; 
+  gap:.5rem;
   font-weight:700;
   font-size: clamp(16px, 4.5vw, 20px);
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;  /* title ≤ 24 chars fits */
+  white-space:nowrap; 
+  overflow:hidden; 
+  text-overflow:ellipsis;  /* title ≤ 24 chars fits */
+  flex: 1 1 auto;          
+  min-width: 0; 
 }
+
 .mission-rounds{
   font-weight:600;
   white-space:nowrap;
@@ -477,8 +489,17 @@ body::before {
 }
 
 /* “small rows” under the title */
-.mini-row{ margin-top:.35rem; display:flex; gap:.5rem; align-items:baseline; }
-.mini-row .label{ color: var(--text-muted-2); font-size:.92rem; }
+.mini-row{ 
+  margin-top:.35rem; 
+  display:flex; 
+  gap:.5rem; 
+  align-items:baseline; 
+}
+
+.mini-row .label{ 
+  color: var(--text-muted-2); 
+  font-size:.92rem; 
+}
 
 /* two facts side-by-side (Fee + Duration) */
 .fact-row{
