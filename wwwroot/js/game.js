@@ -100,6 +100,16 @@ window.debugPing = (addr) => fetch(`/api/debug/push/${(addr||window.currentMissi
 // #region helpers ----------------------
 
 // --- local "I joined" cache (per mission) -------------
+function withTimeout(promise, ms = 12000){
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("timeout")), ms);
+    promise.then(
+      v => { clearTimeout(t); resolve(v); },
+      e => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
 const JOIN_CACHE_KEY = "_b6joined";
 function joinedCacheHas(addr, me){
   try {
@@ -297,7 +307,6 @@ async function cleanupMissionDetail(){
     subscribedGroups.clear();
   }
   subscribedAddr = null;
-  console.log("cleanUpMissionDetail");
   currentMissionAddr = null;
 }
 
@@ -873,7 +882,6 @@ async function startHub() { // SignalR HUB
     });
 
     hubConnection.on("RoundResult", async (addr, round, winner, amountWei) => {
-      console.log("StartHub hubConnection RoundResult - Current address: " + currentMissionAddr);
       dbg("RoundResult PUSH", { addr, round, winner, amountWei, currentMissionAddr, groups: Array.from(subscribedGroups) });
       const me  = (walletAddress || "").toLowerCase();
       const win = String(winner || "").toLowerCase();
@@ -885,7 +893,6 @@ async function startHub() { // SignalR HUB
       }
 
       if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
-        console.log("1 " + currentMissionAddr);
         return;
       }
 
@@ -923,10 +930,8 @@ async function startHub() { // SignalR HUB
     });
 
     hubConnection.on("StatusChanged", async (addr, newStatus) => {
-      console.log("StartHub hubConnection StatusChanged - Current address: " + currentMissionAddr);
       dbg("StatusChanged PUSH", { addr, newStatus, currentMissionAddr, groups: Array.from(subscribedGroups) });
       if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
-        console.log("2 " + currentMissionAddr);
         return;
       }
 
@@ -960,7 +965,6 @@ async function startHub() { // SignalR HUB
     });
 
     hubConnection.on("MissionUpdated", async (addr) => {
-      console.log("StartHub hubConnection MissionUpdated - Current address: " + currentMissionAddr);
       dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
         try {
@@ -1048,7 +1052,6 @@ async function safeSubscribe(){
   const H = signalR.HubConnectionState;
   if (hubConnection?.state !== H.Connected) return;
   if (!currentMissionAddr) {
-        console.log("3 " + currentMissionAddr);
         return;
       }
   try {
@@ -1070,7 +1073,6 @@ function clearDetailRefresh(){
 
 function scheduleDetailRefresh(reset=false){ 
   if (els.missionDetail.style.display === "none" || !currentMissionAddr) {
-        console.log("4 " + currentMissionAddr);
         return;
       }
 
@@ -1078,7 +1080,6 @@ function scheduleDetailRefresh(reset=false){
   clearDetailRefresh();
   detailRefreshTimer = setTimeout(async () => {
     if (els.missionDetail.style.display === "none" || !currentMissionAddr) {
-        console.log("5 " + currentMissionAddr);
         return;
       }
     try {
@@ -1135,7 +1136,7 @@ async function fetchAndRenderAllMissions(){
 
     renderAllMissions(missions);
 
-    startJoinableTicker();                       // update any data-start/data-end timers
+    startJoinableTicker();                            // update any data-start/data-end timers
     hydrateAllMissionsRealtime(els.allMissionsList);  // NEW: live status (concurrency 4)
   } catch (e) {
     console.error(e);
@@ -1167,7 +1168,6 @@ async function apiMission(addr){
 async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
-  if (!currentMissionAddr) { console.log("6 " + currentMissionAddr); return; }
 
   // serialize: only one in-flight refresh
   if (stageRefreshBusy) return;
@@ -1669,7 +1669,6 @@ async function  refreshStageCtaIfOpen(){
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
   if (!currentMissionAddr) {
-        console.log("7 " + currentMissionAddr);
         return;
       }
   try {
@@ -2571,7 +2570,6 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
     btn.addEventListener("click", async () => {
       await cleanupMissionDetail();
       currentMissionAddr = String(mission.mission_address).toLowerCase();
-      console.log("renderMissionDetail currentMissionAddr: " + currentMissionAddr);
       await startHub();
       await subscribeToMission(currentMissionAddr);
       lockScroll();
@@ -2807,6 +2805,9 @@ btnAllMissions?.addEventListener("click", async () => {
 btnJoinable?.addEventListener("click", async () => {
   await cleanupMissionDetail();
   showOnlySection("joinableSection");
+  const joinable = await apiJoinable();
+  renderJoinable(joinable);
+  startJoinableTicker();
 });
 
 btnMyMissions?.addEventListener("click", async () => {
@@ -2928,7 +2929,6 @@ async function hydrateAllMissionsRealtime(listEl){
 async function openMission(addr){
   try {
     currentMissionAddr = addr.toLowerCase();
-    console.log("openMission currentMissionAddr: " + currentMissionAddr);
     await subscribeToMission(currentMissionAddr);
     const data = await apiMission(currentMissionAddr);
     renderMissionDetail(data);
@@ -2965,7 +2965,6 @@ async function closeMission(){
   }
 
   stageReturnTo = null;
-  console.log("closeMission");
   currentMissionAddr = null;
   showOnlySection(lastListShownId);
 }
@@ -3043,7 +3042,14 @@ async function init(){
   // 0) show only the Joinable list on first load
   showOnlySection("allMissionsSection");
   // 1) get all missions
-  await fetchAndRenderAllMissions();
+    try {
+      await withTimeout(fetchAndRenderAllMissions(), 12000);
+    } catch (e) {
+      console.warn("Initial All Missions load timed out.", e);
+      // Leave the page interactive; user can tap Refresh
+      showAlert("Loading All Missions is slow. Tap Refresh to retry.", "warning");
+    }
+
   // 2) refresh button
   els.refreshJoinableBtn?.addEventListener("click", async () => {
     try {
@@ -3064,7 +3070,6 @@ async function init(){
   // 4) Manual reload button
   els.reloadMissionBtn?.addEventListener("click", async () => {
     if (!currentMissionAddr) {
-        console.log("8 " + currentMissionAddr);
         return;
       }
     try {
@@ -3076,26 +3081,10 @@ async function init(){
     } 
   });
 
-  // 5) auto-load My Missions when wallet connects (event-based if available, else fallback poll)
-  const loadMy = async () => {
-    if (!walletAddress) return;
-    try {
-      const mine = await apiPlayerMissions(walletAddress.toLowerCase());
-      renderMyMissions(mine);
-    } catch(e){ console.error(e); }
-  };
-
   // event-based (if we add wallet events in walletConnect.js, see 1D)
   window.addEventListener("wallet:connected", loadMy);
   window.addEventListener("wallet:changed", loadMy);
   window.addEventListener("wallet:disconnected", () => renderMyMissions([]));
-
-  // fallback: small poll in case events are not wired yet
-  let tried = 0;
-  const t = setInterval(() => {
-    if (walletAddress){ loadMy(); clearInterval(t); }
-    if (++tried > 20) clearInterval(t);
-  }, 500);
 
   window.addEventListener("wallet:connected",    refreshStageCtaIfOpen);
   window.addEventListener("wallet:changed",      refreshStageCtaIfOpen);

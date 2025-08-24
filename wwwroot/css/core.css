@@ -474,7 +474,7 @@ body::before {
   align-items:center; 
   gap:.5rem;
   font-weight:700;
-  font-size: clamp(16px, 4.5vw, 20px);
+  font-size: clamp(15px, 4.2vw, 19px);
   white-space:nowrap; 
   overflow:hidden; 
   text-overflow:ellipsis;  /* title ≤ 24 chars fits */
