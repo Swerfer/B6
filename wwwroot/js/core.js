@@ -203,14 +203,14 @@ export const formatDurationShort = (seconds) => {
   const h = Math.floor(s / 3600);  s -= h * 3600;
   const m = Math.floor(s / 60);
 
-  if (d >= 30) return "1 mo";        // coarse label for very long
-  if (d >= 7)  return `${Math.round(d/7)} w`;
-  if (d > 0 && h > 0) return `${d} d ${h} h`;
-  if (d > 0)  return `${d} d`;
-  if (h > 0 && m > 0) return `${h} h ${m} m`;
-  if (h > 0)  return `${h} h`;
-  if (m > 0)  return `${m} m`;
-  return "0 m";
+  if (d >= 30) return "1mo";        // coarse label for very long
+  if (d >= 7)  return `${Math.round(d/7)}w`;
+  if (d > 0 && h > 0) return `${d}d ${h}h`;
+  if (d > 0)  return `${d}d`;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0)  return `${h}h`;
+  if (m > 0)  return `${m}m`;
+  return "0m";
 };
 
 document.addEventListener("click", e=>{

@@ -74,6 +74,11 @@ let   ctaBusy               = false;
 let   stageReturnTo         = null;   // "stage" when we navigated from stage → detail
 let   stageRefreshTimer     = null;
 let   stageRefreshBusy      = false;
+// ---- All Missions filters ----
+let   __allMissionsCache    = [];     // last fetched list (raw objects)
+let   __allFilterOpen       = false;
+let   __allSelected         = null;   // null  → all statuses; otherwise Set<number> of allowed statuses
+
 // #endregion
 
 // --- DEBUG + group tracking ---
@@ -98,6 +103,110 @@ window.debugPing = (addr) => fetch(`/api/debug/push/${(addr||window.currentMissi
   .then(r=>r.text()).then(t=>console.log("debug/push →", t)).catch(console.error);
 
 // #region helpers ----------------------
+
+// Group order: Active bucket (2/3/4), then Enrolling(1), Pending(0), Ended(5/6/7)
+function bucketOfStatus(s){
+  s = Number(s);
+  if (s === 1)  return 1; // Enrolling
+  if (s === 0)  return 2; // Pending
+  if (s >= 5)   return 3; // Ended
+                return 0; // Active bucket: 2 (Arming), 3 (Active), 4 (Paused)
+}
+
+function sortAllMissions(list){
+  return list.slice().sort((a, b) => {
+    const sa = Number(a.status), sb = Number(b.status);
+    const ba = bucketOfStatus(sa), bb = bucketOfStatus(sb);
+    if (ba !== bb) return ba - bb;
+
+    // same bucket → per-bucket sort
+    if (ba === 0){ // Active bucket
+      // prefer “oldest mission end” first; Arming (2) has no end yet → use mission_start
+      const ea = sa === 2 ? Number(a.mission_start||0) : Number(a.mission_end||0);
+      const eb = sb === 2 ? Number(b.mission_start||0) : Number(b.mission_end||0);
+      return (ea||0) - (eb||0); // ascending (oldest first)
+    }
+    if (ba === 1){ // Enrolling
+      const ea = Number(a.enrollment_end||0), eb = Number(b.enrollment_end||0);
+      return (ea||0) - (eb||0); // ascending (oldest first)
+    }
+    if (ba === 2){ // Pending
+      const sa_ = Number(a.enrollment_start||0), sb_ = Number(b.enrollment_start||0);
+      return (sa_||0) - (sb_||0); // ascending (oldest first)
+    }
+    // Ended → latest first by mission_end
+    const ea = Number(a.mission_end||0), eb = Number(b.mission_end||0);
+    return (eb||0) - (ea||0); // descending (latest first)
+  });
+}
+
+function applyAllMissionFiltersAndRender(){
+  let list = __allMissionsCache || [];
+  // selection → Set of explicit statuses; Active includes 2/3/4
+  if (__allSelected instanceof Set){
+    list = list.filter(m => {
+      const s = Number(m.status);
+      // If “Active” was selected we store 2,3,4 in the set
+      return __allSelected.has(s);
+    });
+  }
+  list = sortAllMissions(list);
+  renderAllMissions(list);              // uses the list as-is
+  startJoinableTicker();
+  hydrateAllMissionsRealtime(els.allMissionsList);
+}
+
+function buildAllFiltersUI(){
+  const host = document.getElementById("allFilters");
+  const btn  = document.getElementById("filterAllBtn");
+  if (!host || !btn) return;
+
+  const pop = host.querySelector(".filter-pop");
+
+  // Toggle popover
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    __allFilterOpen = !__allFilterOpen;
+    pop.style.display = __allFilterOpen ? "block" : "none";
+  });
+
+  // Close only when clicking *outside* the button + popover
+  const closeFilters = () => { __allFilterOpen = false; pop.style.display = "none"; };
+
+  document.addEventListener("click", (e) => {
+    if (!__allFilterOpen) return;
+    const target = e.target;
+    // Keep open if the click is on the funnel button or anywhere inside the popover container
+    if (target === btn || host.contains(target)) return;
+    closeFilters();
+  });
+
+  // Also prevent clicks inside the pop from bubbling to document
+  pop.addEventListener("click", (e) => e.stopPropagation());
+
+  // Reset = all statuses (including Partly Success implicitly)
+  host.querySelector("#fltReset").addEventListener("click", () => {
+    __allSelected = null;  // all
+    // uncheck boxes in UI
+    pop.querySelectorAll("input[type=checkbox]").forEach(i => i.checked = false);
+    __allFilterOpen = false;
+    pop.style.display = "none";
+    applyAllMissionFiltersAndRender();
+  });
+
+  // Apply → gather checks into a Set of statuses
+  host.querySelector("#fltApply").addEventListener("click", () => {
+    const picked = new Set();
+    pop.querySelectorAll("input[type=checkbox]:checked").forEach(i => {
+      const vals = String(i.dataset.status || "").split(",").map(s => Number(s.trim())).filter(n => !isNaN(n));
+      vals.forEach(v => picked.add(v));
+    });
+    __allSelected = picked.size ? picked : null; // none checked → all
+    __allFilterOpen = false;
+    pop.style.display = "none";
+    applyAllMissionFiltersAndRender();
+  });
+}
 
 // --- local "I joined" cache (per mission) -------------
 function withTimeout(promise, ms = 12000){
@@ -1105,7 +1214,7 @@ async function fetchAndRenderAllMissions(){
     // 1) Factory call (chain): get the full mission index
     const provider = getReadProvider();
     const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
-    const [addrs, statuses, names] = await factory.getAllMissions();
+    const [addrs, statuses, names] = await withTimeout(factory.getAllMissions(), 10000);
 
     // 2) Map and reverse (NEWEST FIRST)
     const rows = addrs.map((a, i) => ({
@@ -1134,7 +1243,14 @@ async function fetchAndRenderAllMissions(){
       return m;
     });
 
-    renderAllMissions(missions);
+    // if you use the filtered cache path:
+    if (typeof __allMissionsCache !== "undefined") {
+      __allMissionsCache = missions;
+      applyAllMissionFiltersAndRender();
+    } else {
+      renderAllMissions(missions);
+    }
+    applyAllMissionFiltersAndRender();
 
     startJoinableTicker();                            // update any data-start/data-end timers
     hydrateAllMissionsRealtime(els.allMissionsList);  // NEW: live status (concurrency 4)
@@ -2260,7 +2376,7 @@ function        renderAllMissions       (missions = []) {
 
   // newest first (factory returns oldest→newest; we also reversed at fetch time, but
   // keep this guard so we never regress)
-  const list = missions.slice().reverse();
+  const list = missions;
 
   for (const m of list) {
     const li = document.createElement("li");
@@ -3039,18 +3155,10 @@ async function triggerRoundCurrentMission(mission){
 
 /* ---------- page init ---------- */
 async function init(){
-  // 0) show only the Joinable list on first load
+  // 0) show list immediately
   showOnlySection("allMissionsSection");
-  // 1) get all missions
-    try {
-      await withTimeout(fetchAndRenderAllMissions(), 12000);
-    } catch (e) {
-      console.warn("Initial All Missions load timed out.", e);
-      // Leave the page interactive; user can tap Refresh
-      showAlert("Loading All Missions is slow. Tap Refresh to retry.", "warning");
-    }
 
-  // 2) refresh button
+  // 1) wire buttons BEFORE any awaited network work
   els.refreshJoinableBtn?.addEventListener("click", async () => {
     try {
       const joinable = await apiJoinable();
@@ -3059,13 +3167,40 @@ async function init(){
     } catch(e){ console.error(e); }
   });
 
+  // guard to avoid overlapping loads
+  let allLoadBusy = false;
   els.refreshAllBtn?.addEventListener("click", async () => {
-    // stay on the same section; just refetch
-    await fetchAndRenderAllMissions();
+    if (allLoadBusy) return;
+    allLoadBusy = true;
+    try {
+      await withTimeout(fetchAndRenderAllMissions(), 12000);
+    } catch (e) {
+      console.warn("Refresh All Missions timed out/failed:", e);
+      showAlert("Loading All Missions timed out. Please try again.", "warning");
+    } finally {
+      allLoadBusy = false;
+    }
   });
 
-  // 3) close mission detail
+  // 2) other existing listeners (unchanged)
   els.closeMissionBtn?.addEventListener("click", closeMission);
+  els.reloadMissionBtn?.addEventListener("click", async () => {
+    if (!currentMissionAddr) return;
+    try {
+      const data = await apiMission(currentMissionAddr);
+      renderMissionDetail(data);
+    } catch (e) {
+      showAlert("Reload failed. Please check your connection.", "error");
+    }
+  });
+
+  // 3) kick off first load with a timeout so init never “hangs”
+  try {
+    await withTimeout(fetchAndRenderAllMissions(), 12000);
+  } catch (e) {
+    console.warn("Initial All Missions load timed out/failed:", e);
+    showAlert("Loading All Missions timed out. Tap Refresh to retry.", "warning");
+  }
 
   // 4) Manual reload button
   els.reloadMissionBtn?.addEventListener("click", async () => {
@@ -3081,27 +3216,29 @@ async function init(){
     } 
   });
 
+  buildAllFiltersUI();
+  
   // event-based (if we add wallet events in walletConnect.js, see 1D)
-  window.addEventListener("wallet:connected", loadMy);
-  window.addEventListener("wallet:changed", loadMy);
-  window.addEventListener("wallet:disconnected", () => renderMyMissions([]));
+  window.addEventListener("wallet:connected",               fetchAndRenderAllMissions);
+  window.addEventListener("wallet:changed",                 fetchAndRenderAllMissions);
+  window.addEventListener("wallet:disconnected", () =>      renderAllMissions([]));
 
-  window.addEventListener("wallet:connected",    refreshStageCtaIfOpen);
-  window.addEventListener("wallet:changed",      refreshStageCtaIfOpen);
-  window.addEventListener("wallet:disconnected", refreshStageCtaIfOpen);
+  window.addEventListener("wallet:connected",               refreshStageCtaIfOpen);
+  window.addEventListener("wallet:changed",                 refreshStageCtaIfOpen);
+  window.addEventListener("wallet:disconnected",            refreshStageCtaIfOpen);
 
  // Fallback if those custom events aren’t emitted:
   if (window.ethereum) {
-    window.ethereum.on("accountsChanged", () => setTimeout(refreshStageCtaIfOpen, 0));
+    window.ethereum.on("accountsChanged", () => setTimeout( refreshStageCtaIfOpen, 0));
   }
 
-  window.addEventListener("wallet:connected",    updateConnectText);
-  window.addEventListener("wallet:changed",      updateConnectText);
-  window.addEventListener("wallet:disconnected", updateConnectText);
+  window.addEventListener("wallet:connected",               updateConnectText);
+  window.addEventListener("wallet:changed",                 updateConnectText);
+  window.addEventListener("wallet:disconnected",            updateConnectText);
 
   // keep your existing CTA refreshers; add this fallback too:
   if (window.ethereum) {
-    window.ethereum.on("accountsChanged", () => setTimeout(updateConnectText, 0));
+    window.ethereum.on("accountsChanged", () => setTimeout( updateConnectText, 0));
   }
 
   // Tiny poll as last resort (stops once it detects a change)

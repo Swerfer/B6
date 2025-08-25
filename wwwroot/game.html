@@ -7,7 +7,7 @@
 
   <!-- CSS -->
   <link rel="stylesheet" href="css/core.css?">
-  <link rel="stylesheet" href="css/game.css?v452">      
+  <link rel="stylesheet" href="css/game.css?v455">      
 
   <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet';">
   <noscript>
@@ -169,8 +169,40 @@
               <i class="fa-solid fa-list me-2"></i>All Missions
             </h2>
             <div>
+              <button id="filterAllBtn" class="btn btn-sm btn-outline-info" title="Filter">
+                <i class="fa-solid fa-filter"></i>
+              </button>
               <button id="refreshAllBtn" class="btn btn-sm btn-outline-info">Refresh</button>
-              <div id="allFilters" class="d-flex gap-2"></div>
+              <div id="allFilters" class="d-flex gap-2">
+                <div class="filter-pop" style="display:none">
+                  <h6 class="m-0">Filter statuses</h6>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="fltPending"  data-status="0">
+                    <label class="form-check-label" for="fltPending">Pending</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="fltEnrolling" data-status="1">
+                    <label class="form-check-label" for="fltEnrolling">Enrolling</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="fltActive"    data-status="2,3,4">
+                    <label class="form-check-label" for="fltActive">Active</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="fltSuccess"   data-status="6">
+                    <label class="form-check-label" for="fltSuccess">Success</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="fltFailed"    data-status="7">
+                    <label class="form-check-label" for="fltFailed">Failed</label>
+                  </div>
+
+                  <div class="filter-actions">
+                    <button type="button" class="btn btn-sm btn-outline-info" id="fltReset">Reset</button>
+                    <button type="button" class="btn btn-sm btn-cyan" id="fltApply">Apply</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
           <ul id="allMissionsList" class="list-unstyled mt-3 mb-0"></ul>
