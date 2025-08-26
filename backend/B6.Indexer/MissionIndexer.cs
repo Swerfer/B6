@@ -965,27 +965,34 @@ namespace B6.Indexer
         }
 
         private void                                    RpcFileLog                  (string kind, string line) {
-            var nowUtc = DateTime.UtcNow;
-            var dayUtc = nowUtc.Date;
-
-            lock (_rpcLogLock)
+            try
             {
-                // rotate per UTC day
-                if (dayUtc != _rpcLogDay)
+                var nowUtc = DateTime.UtcNow;
+                var dayUtc = nowUtc.Date;
+
+                lock (_rpcLogLock)
                 {
-                    _rpcLogDay  = dayUtc;
-                    _rpcCounts.Clear();
-                    var dir = Path.Combine(AppContext.BaseDirectory, "logs");
-                    Directory.CreateDirectory(dir);
-                    _rpcLogPath = Path.Combine(dir, $"rpc-{dayUtc:yyyyMMdd}.log");
-                    File.AppendAllText(_rpcLogPath, $"===== NEW DAY {dayUtc:yyyy-MM-dd} UTC ====={Environment.NewLine}");
+                    // rotate per UTC day
+                    if (dayUtc != _rpcLogDay)
+                    {
+                        _rpcLogDay  = dayUtc;
+                        _rpcCounts.Clear();
+                        var dir = Path.Combine(AppContext.BaseDirectory, "logs");
+                        Directory.CreateDirectory(dir);
+                        _rpcLogPath = Path.Combine(dir, $"rpc-{dayUtc:yyyyMMdd}.log");
+                        File.AppendAllText(_rpcLogPath, $"===== NEW DAY {dayUtc:yyyy-MM-dd} UTC ====={Environment.NewLine}");
+                    }
+
+                    var next = _rpcCounts.TryGetValue(kind, out var n) ? n + 1 : 1;
+                    _rpcCounts[kind] = next;
+
+                    var ts = nowUtc.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+                    File.AppendAllText(_rpcLogPath, $"{ts} [{kind}] #{next} {line}{Environment.NewLine}");
                 }
-
-                var next = _rpcCounts.TryGetValue(kind, out var n) ? n + 1 : 1;
-                _rpcCounts[kind] = next;
-
-                var ts = nowUtc.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
-                File.AppendAllText(_rpcLogPath, $"{ts} [{kind}] #{next} {line}{Environment.NewLine}");
+            }
+            catch
+            {
+                // Best-effort logging: never let IO errors affect the caller.
             }
         }
 
@@ -1020,25 +1027,38 @@ namespace B6.Indexer
             {
                 var res = await fn(_web3);
                 sw.Stop();
-                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw.ElapsedMilliseconds} ms");     // ← guard
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw.ElapsedMilliseconds} ms");
                 return res;
             }
-            catch (Exception ex) when (IsTransient(ex) && SwitchRpc())
+            catch (Exception ex) when (IsTransient(ex))
             {
                 sw.Stop();
-                RpcFileLog(kind, $"{context} ↻ retry after switch ({sw.ElapsedMilliseconds} ms) — {ex.GetType().Name}: {ex.Message}");
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ↻ transient: {ex.GetType().Name}: {ex.Message} (attempting switch)");
+
+                var switched = false;
+                try
+                {
+                    switched = SwitchRpc();
+                }
+                catch (Exception sx)
+                {
+                    _log.LogWarning(sx, "SwitchRpc() failed while handling transient error for {ctx}", context);
+                }
+
+                if (!switched) throw; // bubble to the final catch
+
                 _log.LogWarning(ex, "{ctx} failed; switched RPC and retrying", context);
 
                 var sw2 = Stopwatch.StartNew();
                 var res2 = await fn(_web3);
                 sw2.Stop();
-                RpcFileLog(kind, $"{context} ✓ in {sw2.ElapsedMilliseconds} ms (after switch)"); // ← guard
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw2.ElapsedMilliseconds} ms (after switch)");
                 return res2;
             }
             catch (Exception ex)
             {
                 sw.Stop();
-                RpcFileLog(kind, $"{context} ✗ in {sw.ElapsedMilliseconds} ms — {ex.GetType().Name}: {ex.Message}"); // ← guard
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ✗ in {sw.ElapsedMilliseconds} ms — {ex.GetType().Name}: {ex.Message}");
                 throw;
             }
         }
@@ -1270,7 +1290,17 @@ namespace B6.Indexer
             }
 
             // Quick idempotency guard: if DB already has any refund rows, skip.
-            if (await HasAnyRefundsRecordedAsync(mission, token)) {
+            bool hasRefunds;
+            try
+            {
+                hasRefunds = await HasAnyRefundsRecordedAsync(mission, token);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Auto-refund precheck failed for {mission}; skipping this round", mission);
+                return;
+            }
+            if (hasRefunds) {
                 _log.LogInformation("Auto-refund skipped for {mission}: refunds already recorded", mission);
                 return;
             }
@@ -1288,13 +1318,13 @@ namespace B6.Indexer
             catch (Exception ex)
             {
                 _log.LogError(ex, "refundPlayers() failed for {mission}", mission);
-                // Best-effort: the scanner loop will not spam because we only fire on new status rows.
+                // Best-effort: the scanner loop / RT poll will retry later.
             }
         }
 
         // ---- Auto-finalize (new) --------------------------------------------------
 
-        private async Task<bool>                        NeedsAutoFinalizeAsync(string mission, CancellationToken token) {
+        private async Task<bool>                        NeedsAutoFinalizeAsync      (string mission, CancellationToken token) {
             // 1) Quick DB guard: only while “not ended” in DB (your API defines not-ended as status < 5)
             await using (var c = new NpgsqlConnection(_pg))
             {
@@ -1322,7 +1352,18 @@ namespace B6.Indexer
                 _log.LogDebug("Auto-finalize skipped for {mission}: missing Owner--PK/Owner:PK", mission);
                 return;
             }
-            if (!await NeedsAutoFinalizeAsync(mission, token)) return;
+
+            bool shouldFinalize;
+            try
+            {
+                shouldFinalize = await NeedsAutoFinalizeAsync(mission, token);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Auto-finalize precheck failed for {mission}; skipping this round", mission);
+                return;
+            }
+            if (!shouldFinalize) return;
 
             var w3 = BuildSignerWeb3();
             if (w3 == null) return;
@@ -1337,7 +1378,7 @@ namespace B6.Indexer
             catch (Exception ex)
             {
                 _log.LogError(ex, "forceFinalizeMission() failed for {mission}", mission);
-                // best-effort; loop will check again next cycle
+                // best-effort; loop/RT poll will retry later.
             }
         }
 
