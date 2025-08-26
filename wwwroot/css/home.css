@@ -218,8 +218,10 @@ html, body {
 }
 
 .tutorial-inner{
-  width: min(800px, 100%);
-  margin: 0 auto;               /* center the inner content */
+  width: min(800px, 100%);         /* inner column width */
+  margin: 0 auto;
+  height: 100%;
+  overflow: auto;                   /* enable scrolling */
 }
 
 .tutorial-title{
@@ -282,11 +284,6 @@ html, body {
     color: #ffffff; 
 }
 
-/* Prevent page scroll while tutorial is open */
-body.tutorial-open{ 
-    overflow: hidden; 
-}
-
 /* ===== FAQ Overlay (same frame as tutorial) ===== */
 .faq-overlay{
   position: fixed;
@@ -319,9 +316,10 @@ body.tutorial-open{
 }
 
 .faq-inner{
-  width: min(800px, 100%);         /* inner text column */
+  width: min(800px, 100%);         /* inner column width */
   margin: 0 auto;
-  position: relative;
+  height: 100%;
+  overflow: auto;                   /* enable scrolling */
 }
 
 /* FAQ list */

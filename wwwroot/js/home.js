@@ -126,7 +126,7 @@ function openOverlayById(overlayId){
   if (!ov) return;
 
   // close all other overlays first
-  document.querySelectorAll(".tutorial-overlay,.faq-overlay,.modal-overlay").forEach(el=>{
+  document.querySelectorAll(".tutorial-overlay,.faq-overlay,.pt-overlay,.modal-overlay").forEach(el=>{
     el.classList.remove("open","hidden");
     el.style.display = "none";
   });
@@ -139,7 +139,7 @@ function openOverlayById(overlayId){
 
 // map buttons to overlays and close buttons
 const overlayDefs = [
-  { btnId: "btnTutorial",              overlayId: "tutorialOverlay",         closeIds: ["tutorialClose","tutorialCloseBottom"] },
+  { btnId: "btnTutorial",              overlayId: "tutorialOverlay",         closeIds: ["tutorialClose"] },
   { btnId: "btnFaq",                   overlayId: "faqOverlay",              closeIds: ["faqClose"] },
   { btnId: "btnPrivacyPolicyAndTerms", overlayId: "ptOverlay",               closeIds: ["ptClose"] }
 ];
@@ -162,14 +162,6 @@ overlayDefs.forEach(({btnId, overlayId, closeIds})=>{
 
 // close all overlays via Esc
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") goHome(); });
-
-// FAQ collapsibles
-document.getElementById("faqOverlay")?.querySelectorAll(".faq-q").forEach(btn=>{
-  btn.addEventListener("click", (e)=>{
-    e.stopPropagation();
-    btn.closest(".faq-item")?.classList.toggle("open");
-  });
-});
 
 // Home button: close any overlays and reset the homepage
 const btnHome = document.getElementById("btnHome");
