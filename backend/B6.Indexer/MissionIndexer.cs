@@ -1,3 +1,4 @@
+// #region
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -23,19 +24,21 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using B6.Contracts;
+// #endregion
 
 namespace B6.Indexer
 {
     public class MissionIndexer : BackgroundService
     {
+        // #region Variables
         // Logger on/off ------------------------------------------------------------------------------------------------
-        private const bool                              logRpcCalls   = false;               // ← toggle RPC file logging
+        private static readonly bool                    logRpcCalls = false;                // ← toggle RPC file logging
         // --------------------------------------------------------------------------------------------------------------
         private readonly ILogger<MissionIndexer>        _log;
         private readonly string                         _rpc;
         private readonly string                         _factory;
         private readonly string                         _pg;
-        private Web3                                    _web3;
+        private Web3                                    _web3 = default!;
         private readonly long                           _factoryDeployBlock;
         private readonly List<string>                   _rpcEndpoints = new();
         private int                                     _rpcIndex = 0;
@@ -53,10 +56,24 @@ namespace B6.Indexer
         private readonly int                            _maxWinPerMission;
         private readonly int                            _maxWinTotal;
         private readonly string                         _ownerPk;                           // from Key Vault / config
+        // ---- Realtime poll schedule -----------------------------------------------
+        private static readonly TimeSpan                _rtPollPeriod = TimeSpan.FromMinutes(5);
+        private DateTime                                _nextRtPollUtc = DateTime.MinValue;
+        // #endregion
 
         [Function("refundPlayers")]
         public class RefundPlayersFunction : FunctionMessage {
-            // no args; add properties if your function signature differs
+            // no args
+        }
+
+        [Function("getRealtimeStatus", "uint8")]
+        public class GetRealtimeStatusFunction : FunctionMessage {
+            // no args
+        }
+
+        [Function("forceFinalizeMission")]
+        public class ForceFinalizeMissionFunction : FunctionMessage {
+            // no args
         }
 
         public                                          MissionIndexer              (ILogger<MissionIndexer> log, IConfiguration cfg) {
@@ -95,12 +112,106 @@ namespace B6.Indexer
             // --- push config (optional; if empty, pushing is disabled) ---
             _pushBase = cfg["Push:BaseUrl"] ?? "";
             _pushKey  = cfg["Push:Key"]     ?? "";
-
+            _ownerPk  = cfg["Owner:PK"] ?? cfg["Owner--PK"] ?? string.Empty;
         }
 
         private async Task<long>                        GetLatestBlockAsync         () {
             var val = await RunRpc(async w => await w.Eth.Blocks.GetBlockNumber.SendRequestAsync(), "GetBlockNumber");
             return (long)val.Value;
+        }
+
+        private async Task                              PollRealtimeStatusesAsync   (CancellationToken token) {
+            // 0) (Optional) Ensure DB columns exist – comment out if you run DDL yourself
+            await EnsureRealtimeColumnsAsync(token);
+
+            // 1) Load missions that are "not ended" per DB (status < 5)
+            var missions = new List<string>();
+            await using (var c = new NpgsqlConnection(_pg))
+            {
+                await c.OpenAsync(token);
+                await using var cmd = new NpgsqlCommand(
+                    "select mission_address from missions where coalesce(status,0) < 5 order by mission_address;", c);
+                await using var rd = await cmd.ExecuteReaderAsync(token);
+                while (await rd.ReadAsync(token))
+                    missions.Add((rd["mission_address"] as string ?? "").ToLowerInvariant());
+            }
+            if (missions.Count == 0) return;
+
+            foreach (var a in missions)
+            {
+                byte rt;
+                try
+                {
+                    // 2) Ask chain: getRealtimeStatus()
+                    rt = await RunRpc(
+                        w => w.Eth.GetContractQueryHandler<GetRealtimeStatusFunction>()
+                                .QueryAsync<byte>(a, new GetRealtimeStatusFunction()),
+                        "Call.getRealtimeStatus");
+                }
+                catch
+                {
+                    continue; // skip this mission this round
+                }
+
+                // 3) Upsert realtime_status (optional)
+                try
+                {
+                    await using var c = new NpgsqlConnection(_pg);
+                    await c.OpenAsync(token);
+                    await using var up = new NpgsqlCommand(@"
+                        update missions
+                        set realtime_status     = @rt,
+                            realtime_checked_at = now(),
+                            updated_at          = now()
+                        where mission_address     = @a;", c);
+                    up.Parameters.AddWithValue("a", a);
+                    up.Parameters.AddWithValue("rt", (short)rt);
+                    await up.ExecuteNonQueryAsync(token);
+                }
+                catch { /* ignore schema issues if you skipped the DDL */ }
+
+                // 4) Triggers — rely on existing idempotent guards
+                try
+                {
+                    if (rt == 5)
+                    {
+                        // Will re-check DB<5 and RT==5 inside NeedsAutoFinalizeAsync
+                        await TryAutoFinalizeAsync(a, token);      // uses ForceFinalizeMissionFunction
+                    }
+                    else if (rt == 7 && !await HasAnyRefundsRecordedAsync(a, token))
+                    {
+                        await TryAutoRefundAsync(a, token);        // uses RefundPlayersFunction
+                    }
+                }
+                catch { /* best-effort; next poll will retry */ }
+            }
+        }
+
+        private async Task                              EnsureRealtimeColumnsAsync  (CancellationToken token) {
+            try
+            {
+                await using var c = new NpgsqlConnection(_pg);
+                await c.OpenAsync(token);
+                await using var cmd = new NpgsqlCommand(@"
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name='missions' AND column_name='realtime_status'
+                        ) THEN
+                            ALTER TABLE missions ADD COLUMN realtime_status SMALLINT;
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name='missions' AND column_name='realtime_checked_at'
+                        ) THEN
+                            ALTER TABLE missions ADD COLUMN realtime_checked_at TIMESTAMPTZ;
+                        END IF;
+                    END$$;", c);
+                await cmd.ExecuteNonQueryAsync(token);
+            }
+            catch { /* optional; ignore if insufficient perms */ }
         }
 
         private async Task                              ScanFactoryEventsAsync      (CancellationToken token, long? latestOverride = null) {
@@ -347,33 +458,30 @@ namespace B6.Indexer
                     if (inserted > 0) pushStatuses.Add((mission, toS));
                 }
 
-                bool retried = false;
-
-                retry_window:
-                try
+                // ======= CHANGED: retry logic without goto =======
+                for (var attempt = 0; attempt < 2; attempt++)
                 {
-                    // ... create from/to, fetch logs, compute tsByBlock, write DB ...
-                    await tx.CommitAsync(token);
-
-                    foreach (var (a, s) in pushStatuses)
+                    try
                     {
-                        try { await NotifyStatusAsync(a, s, token); } catch { /* best-effort */ }
+                        await tx.CommitAsync(token);
 
-                        // NEW: auto-refund exactly when we see a NEW Failed transition
-                        if (s == 7) { try { await TryAutoRefundAsync(a, token); } catch { /* best-effort */ } }
+                        foreach (var (a, s) in pushStatuses)
+                        {
+                            try { await NotifyStatusAsync(a, s, token); } catch { /* best-effort */ }
+                            if (s == 7) { try { await TryAutoRefundAsync(a, token); } catch { /* best-effort */ } }
+                        }
+                        pushStatuses.Clear();
+
+                        await SetCursorAsync("factory", windowTo, token);
+                        windowFrom = windowTo + 1;
+                        break; // success
                     }
-                    pushStatuses.Clear();
-
-                    // advance cursor per window and continue
-                    await SetCursorAsync("factory", windowTo, token);
-                    windowFrom = windowTo + 1;
-                }
-                catch (Exception ex) when (IsTransient(ex) && !retried && SwitchRpc())
-                {
-                    retried = true;
-                    _log.LogWarning(ex, "Factory window {from}-{to} failed; switched RPC, retrying once", windowFrom, windowTo);
-                    goto retry_window;
-                }
+                    catch (Exception ex) when (IsTransient(ex) && attempt == 0 && SwitchRpc())
+                    {
+                        _log.LogWarning(ex, "Factory window {from}-{to} failed; switched RPC, retrying once", windowFrom, windowTo);
+                        continue; // retry once after switching RPC
+                    }
+                }          
             }
         }
 
@@ -416,202 +524,183 @@ namespace B6.Indexer
                 {
                     long windowTo = Math.Min(windowFrom + MAX_LOG_RANGE, tipSafe);
 
-                    bool retried = false;
-
                     // collectors to push AFTER commit
                     var pushRounds   = new List<(short round, string winner, string amountWei)>();
                     var pushStatuses = new List<short>(); // mission-level status changes for this address
 
-                    retry_window:
-                    try
+                    bool windowSucceeded = false; // track if we completed this window
+
+                    // retry once on transient RPC errors (replacing goto retry_window)
+                    for (var attempt = 0; attempt < 2; attempt++)
                     {
-                        var from = new BlockParameter(new HexBigInteger(windowFrom));
-                        var to   = new BlockParameter(new HexBigInteger(windowTo));
-
-                        var statusEvt = _web3.Eth.GetEvent<MissionStatusChangedEventDTO>(addr);
-                        var roundEvt  = _web3.Eth.GetEvent<RoundCalledEventDTO>         (addr);
-                        var prEvt     = _web3.Eth.GetEvent<PlayerRefundedEventDTO>      (addr);
-                        var mrEvt     = _web3.Eth.GetEvent<MissionRefundedEventDTO>     (addr);
-                        var peEvt     = _web3.Eth.GetEvent<PlayerEnrolledEventDTO>      (addr);
-
-                        List<EventLog<MissionStatusChangedEventDTO>> statusLogs = new(); 
-
-                        var roundLogs = await RunRpc(
-                            w => {
-                                var e = w.Eth.GetEvent<RoundCalledEventDTO>(addr);
-                                return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                            },
-                            "GetLogs.Mission.RoundCalled");
-
-                        var prLogs = await RunRpc(
-                            w => {
-                                var e = w.Eth.GetEvent<PlayerRefundedEventDTO>(addr);
-                                return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                            },
-                            "GetLogs.Mission.PlayerRefunded");
-
-                        var peLogs = await RunRpc(
-                            w => {
-                                var e = w.Eth.GetEvent<PlayerEnrolledEventDTO>(addr);
-                                return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                            },
-                            "GetLogs.Mission.PlayerEnrolled");
-
-                        // optional mission-level status logs (factory status is canonical)
-                        // flip 'scanMissionStatus' const at the top to enable/disable this query
-                        if (scanMissionStatus)
-                        {
-                            statusLogs = await RunRpc(
-                                w => {
-                                    var e = w.Eth.GetEvent<MissionStatusChangedEventDTO>(addr);
-                                    return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                                },
-                                "GetLogs.Mission.StatusChanged");
-                        }
-
-                        // MissionRefunded is optional in your current code; keep the try/catch
-                        List<EventLog<MissionRefundedEventDTO>> mrLogs = new();
                         try
                         {
-                            mrLogs = await RunRpc(
+                            var from = new BlockParameter(new HexBigInteger(windowFrom));
+                            var to   = new BlockParameter(new HexBigInteger(windowTo));
+
+                            var statusEvt = _web3.Eth.GetEvent<MissionStatusChangedEventDTO>(addr);
+                            var roundEvt  = _web3.Eth.GetEvent<RoundCalledEventDTO>         (addr);
+                            var prEvt     = _web3.Eth.GetEvent<PlayerRefundedEventDTO>      (addr);
+                            var mrEvt     = _web3.Eth.GetEvent<MissionRefundedEventDTO>     (addr);
+                            var peEvt     = _web3.Eth.GetEvent<PlayerEnrolledEventDTO>      (addr);
+
+                            List<EventLog<MissionStatusChangedEventDTO>> statusLogs = new(); 
+
+                            var roundLogs = await RunRpc(
                                 w => {
-                                    var e = w.Eth.GetEvent<MissionRefundedEventDTO>(addr);
+                                    var e = w.Eth.GetEvent<RoundCalledEventDTO>(addr);
                                     return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
                                 },
-                                "GetLogs.Mission.MissionRefunded");
-                        }
-                        catch (Exception ex) { _log.LogWarning(ex, "MissionRefunded decode failed for {addr}", addr); }
+                                "GetLogs.Mission.RoundCalled");
 
-                        // Collect unique block numbers across this window’s logs
-                        var blockNums = new HashSet<long>();
-                        foreach (var ev in peLogs)     blockNums.Add((long)ev.Log.BlockNumber.Value);
-                        foreach (var ev in roundLogs)  blockNums.Add((long)ev.Log.BlockNumber.Value);
-                        foreach (var ev in statusLogs) blockNums.Add((long)ev.Log.BlockNumber.Value);
-                        var tsByBlock = await GetBlockTimestampsAsync(blockNums);
+                            var prLogs = await RunRpc(
+                                w => {
+                                    var e = w.Eth.GetEvent<PlayerRefundedEventDTO>(addr);
+                                    return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                                },
+                                "GetLogs.Mission.PlayerRefunded");
 
-                        await using var conn = new NpgsqlConnection(_pg);
-                        await conn.OpenAsync(token);
-                        await using var tx = await conn.BeginTransactionAsync(token);
+                            var peLogs = await RunRpc(
+                                w => {
+                                    var e = w.Eth.GetEvent<PlayerEnrolledEventDTO>(addr);
+                                    return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                                },
+                                "GetLogs.Mission.PlayerEnrolled");
 
-                        // status history (mission-level; factory is canonical but we also keep these)
-                        foreach (var ev in statusLogs)
-                        {
-                            short prev = ev.Event.PreviousStatus;
-                            short next = ev.Event.NewStatus;
-                            long  blk  = (long)ev.Log.BlockNumber.Value;
-
-                            int inserted;
-                            await using var h = new NpgsqlCommand(@"
-                                insert into mission_status_history (mission_address, from_status, to_status, changed_at, block_number)
-                                values (@a,@f,@t,@ca,@b)
-                                on conflict do nothing;", conn, tx);
-                            h.Parameters.AddWithValue("a", addr);
-                            h.Parameters.AddWithValue("f", prev);
-                            h.Parameters.AddWithValue("t", next);
-                            h.Parameters.AddWithValue("b", blk);
-                            h.Parameters.AddWithValue("ca", tsByBlock.TryGetValue(blk, out var ca) ? ca : DateTime.UtcNow);
-                            inserted = await h.ExecuteNonQueryAsync(token);
-
-                            await using var up = new NpgsqlCommand(@"
-                                update missions set status = @s, updated_at = now()
-                                where mission_address = @a;", conn, tx);
-                            up.Parameters.AddWithValue("a", addr);
-                            up.Parameters.AddWithValue("s", next);
-                            await up.ExecuteNonQueryAsync(token);
-                            if (inserted > 0) pushStatuses.Add(next);
-                        }
-
-                        // rounds
-                        short maxRound = 0;
-                        foreach (var ev in roundLogs)
-                        {
-                            var r   = (short)ev.Event.RoundNumber;
-                            var w   = (ev.Event.Player ?? "").ToLower(CultureInfo.InvariantCulture);
-                            var blk = (long)ev.Log.BlockNumber.Value;
-                            var txh = ev.Log.TransactionHash ?? "";
-                            var amt = ev.Event.Payout;
-
-                            await using var rr = new NpgsqlCommand(@"
-                                insert into mission_rounds (
-                                    mission_address, round_number, winner_address, payout_wei, block_number, tx_hash, created_at
-                                ) values (@a,@no,@w,@amt,@b,@tx,@ca)
-                                on conflict (mission_address, round_number) do nothing;", conn, tx);
-                            rr.Parameters.AddWithValue("a",  addr);
-                            rr.Parameters.AddWithValue("no", r);
-                            rr.Parameters.AddWithValue("w",  w);
-                            rr.Parameters.Add("amt", NpgsqlDbType.Numeric).Value = amt;
-                            rr.Parameters.AddWithValue("b",  blk);
-                            rr.Parameters.AddWithValue("tx", string.IsNullOrEmpty(txh) ? (object)DBNull.Value : txh);
-                            rr.Parameters.AddWithValue("ca", tsByBlock.TryGetValue(blk, out var cra) ? cra : DateTime.UtcNow);
-                            var rows = await rr.ExecuteNonQueryAsync(token);
-
-                            if (r > maxRound) maxRound = r;
-
-                            // only push if this was a *new* DB row (avoid dup pushes on re-scan)
-                            if (rows > 0)
+                            // optional mission-level status logs (factory status is canonical)
+                            // flip 'scanMissionStatus' const at the top to enable/disable this query
+                            if (scanMissionStatus)
                             {
-                                pushRounds.Add((r, w, amt.ToString()));
-
-                                // NEW: stamp pause_timestamp to the block time of this round
-                                var pauseUnix = tsByBlock.TryGetValue(blk, out var t)
-                                    ? new DateTimeOffset(t).ToUnixTimeSeconds()
-                                    : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-                                await using var upP = new NpgsqlCommand(@"
-                                    update missions
-                                    set pause_timestamp = @pt, updated_at = now()
-                                    where mission_address = @a;", conn, tx);
-                                upP.Parameters.AddWithValue("a",  addr);
-                                upP.Parameters.AddWithValue("pt", pauseUnix);
-                                await upP.ExecuteNonQueryAsync(token);
+                                statusLogs = await RunRpc(
+                                    w => {
+                                        var e = w.Eth.GetEvent<MissionStatusChangedEventDTO>(addr);
+                                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                                    },
+                                    "GetLogs.Mission.StatusChanged");
                             }
 
-                            // keep cro_current_wei in sync using croRemaining
-                            await using var upC = new NpgsqlCommand(@"
-                                update missions set cro_current_wei = @c, updated_at = now()
-                                where mission_address = @a;", conn, tx);
-                            upC.Parameters.Add("c", NpgsqlDbType.Numeric).Value = ev.Event.CroRemaining;
-                            upC.Parameters.AddWithValue("a", addr);
-                            await upC.ExecuteNonQueryAsync(token);
-                        }
-
-                        if (maxRound > 0)
-                        {
-                            await using var upR = new NpgsqlCommand(@"
-                                update missions set round_count = greatest(round_count, @rc), updated_at = now()
-                                where mission_address = @a;", conn, tx);
-                            upR.Parameters.AddWithValue("a", addr);
-                            upR.Parameters.AddWithValue("rc", maxRound);
-                            await upR.ExecuteNonQueryAsync(token);
-                        }
-
-                        // refunds (single)
-                        foreach (var ev in prLogs)
-                        {
-                            var p   = (ev.Event.Player ?? "").ToLower(CultureInfo.InvariantCulture);
-                            var txh = ev.Log.TransactionHash ?? "";
-
-                            await using var u = new NpgsqlCommand(@"
-                                insert into mission_enrollments (mission_address, player_address, refunded, refund_tx_hash)
-                                values (@a,@p, true, @tx)
-                                on conflict (mission_address, player_address) do update set
-                                    refunded = true,
-                                    refund_tx_hash = excluded.refund_tx_hash;", conn, tx);
-                            u.Parameters.AddWithValue("a",  addr);
-                            u.Parameters.AddWithValue("p",  p);
-                            u.Parameters.AddWithValue("tx", txh);
-                            await u.ExecuteNonQueryAsync(token);
-                        }
-
-                        // refunds (batch)
-                        foreach (var ev in mrLogs)
-                        {
-                            var txh = ev.Log.TransactionHash ?? "";
-                            if (ev.Event.Players == null) continue;
-
-                            foreach (var raw in ev.Event.Players)
+                            // MissionRefunded is optional in your current code; keep the try/catch
+                            List<EventLog<MissionRefundedEventDTO>> mrLogs = new();
+                            try
                             {
-                                var p = (raw ?? "").ToLower(CultureInfo.InvariantCulture);
+                                mrLogs = await RunRpc(
+                                    w => {
+                                        var e = w.Eth.GetEvent<MissionRefundedEventDTO>(addr);
+                                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                                    },
+                                    "GetLogs.Mission.MissionRefunded");
+                            }
+                            catch (Exception ex) { _log.LogWarning(ex, "MissionRefunded decode failed for {addr}", addr); }
+
+                            // Collect unique block numbers across this window’s logs
+                            var blockNums = new HashSet<long>();
+                            foreach (var ev in peLogs)     blockNums.Add((long)ev.Log.BlockNumber.Value);
+                            foreach (var ev in roundLogs)  blockNums.Add((long)ev.Log.BlockNumber.Value);
+                            foreach (var ev in statusLogs) blockNums.Add((long)ev.Log.BlockNumber.Value);
+                            var tsByBlock = await GetBlockTimestampsAsync(blockNums);
+
+                            await using var conn = new NpgsqlConnection(_pg);
+                            await conn.OpenAsync(token);
+                            await using var tx = await conn.BeginTransactionAsync(token);
+
+                            // status history (mission-level; factory is canonical but we also keep these)
+                            foreach (var ev in statusLogs)
+                            {
+                                short prev = ev.Event.PreviousStatus;
+                                short next = ev.Event.NewStatus;
+                                long  blk  = (long)ev.Log.BlockNumber.Value;
+
+                                int inserted;
+                                await using var h = new NpgsqlCommand(@"
+                                    insert into mission_status_history (mission_address, from_status, to_status, changed_at, block_number)
+                                    values (@a,@f,@t,@ca,@b)
+                                    on conflict do nothing;", conn, tx);
+                                h.Parameters.AddWithValue("a", addr);
+                                h.Parameters.AddWithValue("f", prev);
+                                h.Parameters.AddWithValue("t", next);
+                                h.Parameters.AddWithValue("b", blk);
+                                h.Parameters.AddWithValue("ca", tsByBlock.TryGetValue(blk, out var ca) ? ca : DateTime.UtcNow);
+                                inserted = await h.ExecuteNonQueryAsync(token);
+
+                                await using var up = new NpgsqlCommand(@"
+                                    update missions set status = @s, updated_at = now()
+                                    where mission_address = @a;", conn, tx);
+                                up.Parameters.AddWithValue("a", addr);
+                                up.Parameters.AddWithValue("s", next);
+                                await up.ExecuteNonQueryAsync(token);
+                                if (inserted > 0) pushStatuses.Add(next);
+                            }
+
+                            // rounds
+                            short maxRound = 0;
+                            foreach (var ev in roundLogs)
+                            {
+                                var r   = (short)ev.Event.RoundNumber;
+                                var w   = (ev.Event.Player ?? "").ToLower(CultureInfo.InvariantCulture);
+                                var blk = (long)ev.Log.BlockNumber.Value;
+                                var txh = ev.Log.TransactionHash ?? "";
+                                var amt = ev.Event.Payout;
+
+                                await using var rr = new NpgsqlCommand(@"
+                                    insert into mission_rounds (
+                                        mission_address, round_number, winner_address, payout_wei, block_number, tx_hash, created_at
+                                    ) values (@a,@no,@w,@amt,@b,@tx,@ca)
+                                    on conflict (mission_address, round_number) do nothing;", conn, tx);
+                                rr.Parameters.AddWithValue("a",  addr);
+                                rr.Parameters.AddWithValue("no", r);
+                                rr.Parameters.AddWithValue("w",  w);
+                                rr.Parameters.Add("amt", NpgsqlDbType.Numeric).Value = amt;
+                                rr.Parameters.AddWithValue("b",  blk);
+                                rr.Parameters.AddWithValue("tx", string.IsNullOrEmpty(txh) ? (object)DBNull.Value : txh);
+                                rr.Parameters.AddWithValue("ca", tsByBlock.TryGetValue(blk, out var cra) ? cra : DateTime.UtcNow);
+                                var rows = await rr.ExecuteNonQueryAsync(token);
+
+                                if (r > maxRound) maxRound = r;
+
+                                // only push if this was a *new* DB row (avoid dup pushes on re-scan)
+                                if (rows > 0)
+                                {
+                                    pushRounds.Add((r, w, amt.ToString()));
+
+                                    // NEW: stamp pause_timestamp to the block time of this round
+                                    var pauseUnix = tsByBlock.TryGetValue(blk, out var t)
+                                        ? new DateTimeOffset(t).ToUnixTimeSeconds()
+                                        : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+                                    await using var upP = new NpgsqlCommand(@"
+                                        update missions
+                                        set pause_timestamp = @pt, updated_at = now()
+                                        where mission_address = @a;", conn, tx);
+                                    upP.Parameters.AddWithValue("a",  addr);
+                                    upP.Parameters.AddWithValue("pt", pauseUnix);
+                                    await upP.ExecuteNonQueryAsync(token);
+                                }
+
+                                // keep cro_current_wei in sync using croRemaining
+                                await using var upC = new NpgsqlCommand(@"
+                                    update missions set cro_current_wei = @c, updated_at = now()
+                                    where mission_address = @a;", conn, tx);
+                                upC.Parameters.Add("c", NpgsqlDbType.Numeric).Value = ev.Event.CroRemaining;
+                                upC.Parameters.AddWithValue("a", addr);
+                                await upC.ExecuteNonQueryAsync(token);
+                            }
+
+                            if (maxRound > 0)
+                            {
+                                await using var upR = new NpgsqlCommand(@"
+                                    update missions set round_count = greatest(round_count, @rc), updated_at = now()
+                                    where mission_address = @a;", conn, tx);
+                                upR.Parameters.AddWithValue("a", addr);
+                                upR.Parameters.AddWithValue("rc", maxRound);
+                                await upR.ExecuteNonQueryAsync(token);
+                            }
+
+                            // refunds (single)
+                            foreach (var ev in prLogs)
+                            {
+                                var p   = (ev.Event.Player ?? "").ToLower(CultureInfo.InvariantCulture);
+                                var txh = ev.Log.TransactionHash ?? "";
+
                                 await using var u = new NpgsqlCommand(@"
                                     insert into mission_enrollments (mission_address, player_address, refunded, refund_tx_hash)
                                     values (@a,@p, true, @tx)
@@ -623,83 +712,112 @@ namespace B6.Indexer
                                 u.Parameters.AddWithValue("tx", txh);
                                 await u.ExecuteNonQueryAsync(token);
                             }
-                        }
 
-                        bool missionUpdated = false;   // NEW: did we see any enrollment/pool change?
-
-                        // enrollments
-                        foreach (var ev in peLogs)
-                        {
-                            var p   = (ev.Event.Player ?? "").ToLower(CultureInfo.InvariantCulture);
-                            var blk = (long)ev.Log.BlockNumber.Value;
-                            var enrolledAtUtc = tsByBlock.TryGetValue(blk, out var t) ? t : DateTime.UtcNow;
-
-                            // 1) insert enrollment (idempotent)
-                            int rows;
-                            await using (var ins = new NpgsqlCommand(@"
-                                insert into mission_enrollments (mission_address, player_address, enrolled_at, refunded, refund_tx_hash)
-                                values (@a, @p, @ea, false, null)
-                                on conflict (mission_address, player_address) do nothing;", conn, tx))
+                            // refunds (batch)
+                            foreach (var ev in mrLogs)
                             {
-                                ins.Parameters.AddWithValue("a",  addr);
-                                ins.Parameters.AddWithValue("p",  p);
-                                ins.Parameters.AddWithValue("ea", enrolledAtUtc);
-                                rows = await ins.ExecuteNonQueryAsync(token);
-                            }
-                            if (rows > 0) missionUpdated = true;    // NEW
+                                var txh = ev.Log.TransactionHash ?? "";
+                                if (ev.Event.Players == null) continue;
 
-                            // 2) bump CRO balances from the event amount
-                            await using (var upCro = new NpgsqlCommand(@"
-                                update missions
-                                set cro_start_wei   = cro_start_wei   + @amt,
-                                    cro_current_wei = cro_current_wei + @amt,
-                                    updated_at      = now()
+                                foreach (var raw in ev.Event.Players)
+                                {
+                                    var p = (raw ?? "").ToLower(CultureInfo.InvariantCulture);
+                                    await using var u = new NpgsqlCommand(@"
+                                        insert into mission_enrollments (mission_address, player_address, refunded, refund_tx_hash)
+                                        values (@a,@p, true, @tx)
+                                        on conflict (mission_address, player_address) do update set
+                                            refunded = true,
+                                            refund_tx_hash = excluded.refund_tx_hash;", conn, tx);
+                                    u.Parameters.AddWithValue("a",  addr);
+                                    u.Parameters.AddWithValue("p",  p);
+                                    u.Parameters.AddWithValue("tx", txh);
+                                    await u.ExecuteNonQueryAsync(token);
+                                }
+                            }
+
+                            bool missionUpdated = false;   // NEW: did we see any enrollment/pool change?
+
+                            // enrollments
+                            foreach (var ev in peLogs)
+                            {
+                                var p   = (ev.Event.Player ?? "").ToLower(CultureInfo.InvariantCulture);
+                                var blk = (long)ev.Log.BlockNumber.Value;
+                                var enrolledAtUtc = tsByBlock.TryGetValue(blk, out var t) ? t : DateTime.UtcNow;
+
+                                // 1) insert enrollment (idempotent)
+                                int rows;
+                                await using (var ins = new NpgsqlCommand(@"
+                                    insert into mission_enrollments (mission_address, player_address, enrolled_at, refunded, refund_tx_hash)
+                                    values (@a, @p, @ea, false, null)
+                                    on conflict (mission_address, player_address) do nothing;", conn, tx))
+                                {
+                                    ins.Parameters.AddWithValue("a",  addr);
+                                    ins.Parameters.AddWithValue("p",  p);
+                                    ins.Parameters.AddWithValue("ea", enrolledAtUtc);
+                                    rows = await ins.ExecuteNonQueryAsync(token);
+                                }
+                                if (rows > 0) missionUpdated = true;    // NEW
+
+                                // 2) bump CRO balances from the event amount
+                                await using (var upCro = new NpgsqlCommand(@"
+                                    update missions
+                                    set cro_start_wei   = cro_start_wei   + @amt,
+                                        cro_current_wei = cro_current_wei + @amt,
+                                        updated_at      = now()
+                                    where mission_address = @a;", conn, tx))
+                                {
+                                    upCro.Parameters.AddWithValue("a", addr);
+                                    upCro.Parameters.Add("amt", NpgsqlDbType.Numeric).Value = ev.Event.Amount;
+                                    var croRows = await upCro.ExecuteNonQueryAsync(token);
+                                    if (croRows > 0) missionUpdated = true;   // NEW
+                                }
+                            }
+
+                            // advance mission cursor to the end of this window
+                            await using (var c = new NpgsqlCommand(@"
+                                update missions set last_seen_block = @blk, updated_at = now()
                                 where mission_address = @a;", conn, tx))
                             {
-                                upCro.Parameters.AddWithValue("a", addr);
-                                upCro.Parameters.Add("amt", NpgsqlDbType.Numeric).Value = ev.Event.Amount;
-                                var croRows = await upCro.ExecuteNonQueryAsync(token);
-                                if (croRows > 0) missionUpdated = true;   // NEW
+                                c.Parameters.AddWithValue("a", addr);
+                                c.Parameters.AddWithValue("blk", windowTo);
+                                await c.ExecuteNonQueryAsync(token);
                             }
-                        }
 
-                        // advance mission cursor to the end of this window
-                        await using (var c = new NpgsqlCommand(@"
-                            update missions set last_seen_block = @blk, updated_at = now()
-                            where mission_address = @a;", conn, tx))
+                            await tx.CommitAsync(token);
+
+                            // publish after DB commit
+                            try
+                            {
+                                foreach (var s in pushStatuses)
+                                    await NotifyStatusAsync(addr, s, token);
+
+                                foreach (var (r, w, a) in pushRounds)
+                                    await NotifyRoundAsync(addr, r, w, a, token);
+
+                                if (missionUpdated)
+                                    await NotifyMissionUpdatedAsync(addr, token);   // NEW
+                            }
+                            catch { /* best-effort */ }
+
+                            try { await TryAutoFinalizeAsync(addr, token); } catch { /* best-effort */ }
+
+                            windowSucceeded = true;
+                            break; // success for this window
+                        }
+                        catch (Exception ex) when (IsTransient(ex) && attempt == 0 && SwitchRpc())
                         {
-                            c.Parameters.AddWithValue("a", addr);
-                            c.Parameters.AddWithValue("blk", windowTo);
-                            await c.ExecuteNonQueryAsync(token);
+                            _log.LogWarning(ex, "Mission {addr} window {from}-{to} failed; switched RPC, retrying once", addr, windowFrom, windowTo);
+                            continue; // retry once after switching RPC
                         }
-
-                        await tx.CommitAsync(token);
-
-                        // publish after DB commit
-                        try
+                        catch (Exception ex)
                         {
-                            foreach (var s in pushStatuses)
-                                await NotifyStatusAsync(addr, s, token);
-
-                            foreach (var (r, w, a) in pushRounds)
-                                await NotifyRoundAsync(addr, r, w, a, token);
-
-                            if (missionUpdated)
-                                await NotifyMissionUpdatedAsync(addr, token);   // NEW
+                            _log.LogError(ex, "ScanMissionEvents failed for {addr} in window {from}-{to}", addr, windowFrom, windowTo);
+                            break; // stop retrying this window
                         }
-                        catch { /* best-effort */ }
                     }
-                    catch (Exception ex) when (IsTransient(ex) && !retried && SwitchRpc())
-                    {
-                        retried = true;
-                        _log.LogWarning(ex, "Mission {addr} window {from}-{to} failed; switched RPC, retrying once", addr, windowFrom, windowTo);
-                        goto retry_window;
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.LogError(ex, "ScanMissionEvents failed for {addr} in window {from}-{to}", addr, windowFrom, windowTo);
+
+                    if (!windowSucceeded)
                         break; // stop this mission, continue with others
-                    }
 
                     windowFrom = windowTo + 1;
                     windowsDone++; 
@@ -908,19 +1026,19 @@ namespace B6.Indexer
             catch (Exception ex) when (IsTransient(ex) && SwitchRpc())
             {
                 sw.Stop();
-                if (logRpcCalls) RpcFileLog(kind, $"{context} ↻ retry after switch ({sw.ElapsedMilliseconds} ms) — {ex.GetType().Name}: {ex.Message}");
+                RpcFileLog(kind, $"{context} ↻ retry after switch ({sw.ElapsedMilliseconds} ms) — {ex.GetType().Name}: {ex.Message}");
                 _log.LogWarning(ex, "{ctx} failed; switched RPC and retrying", context);
 
                 var sw2 = Stopwatch.StartNew();
                 var res2 = await fn(_web3);
                 sw2.Stop();
-                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw2.ElapsedMilliseconds} ms (after switch)"); // ← guard
+                RpcFileLog(kind, $"{context} ✓ in {sw2.ElapsedMilliseconds} ms (after switch)"); // ← guard
                 return res2;
             }
             catch (Exception ex)
             {
                 sw.Stop();
-                if (logRpcCalls) RpcFileLog(kind, $"{context} ✗ in {sw.ElapsedMilliseconds} ms — {ex.GetType().Name}: {ex.Message}"); // ← guard
+                RpcFileLog(kind, $"{context} ✗ in {sw.ElapsedMilliseconds} ms — {ex.GetType().Name}: {ex.Message}"); // ← guard
                 throw;
             }
         }
@@ -1028,6 +1146,20 @@ namespace B6.Indexer
                     _log.LogError(ex, "Sync cycle failed");
                 }
 
+                try
+                {
+                    var nowUtc = DateTime.UtcNow;
+                    if (nowUtc >= _nextRtPollUtc)
+                    {
+                        await PollRealtimeStatusesAsync(token);
+                        _nextRtPollUtc = nowUtc + _rtPollPeriod;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Realtime status poll failed");
+                }
+
                 try { await Task.Delay(TimeSpan.FromSeconds(15), token); }
                 catch { /* cancelled */ }
             }
@@ -1113,7 +1245,7 @@ namespace B6.Indexer
             catch (Exception ex) { _log.LogDebug(ex, "push/round failed for {mission} r{round}", mission, round); }
         }
 
-        private Web3                                    BuildSignerWeb3             () {
+        private Web3?                                   BuildSignerWeb3             () {
             if (string.IsNullOrWhiteSpace(_ownerPk)) return null;
             var url = _rpcEndpoints[_rpcIndex];  // current active RPC
             var acct = new Account(_ownerPk);
@@ -1131,6 +1263,7 @@ namespace B6.Indexer
         }
 
         private async Task                              TryAutoRefundAsync          (string mission, CancellationToken token) {
+            _log.LogInformation("TryAutoRefundAsync - {mission}", mission);
             if (string.IsNullOrWhiteSpace(_ownerPk)) {
                 _log.LogWarning("Auto-refund skipped for {mission}: missing Owner--PK/Owner:PK in configuration", mission);
                 return;
@@ -1156,6 +1289,55 @@ namespace B6.Indexer
             {
                 _log.LogError(ex, "refundPlayers() failed for {mission}", mission);
                 // Best-effort: the scanner loop will not spam because we only fire on new status rows.
+            }
+        }
+
+        // ---- Auto-finalize (new) --------------------------------------------------
+
+        private async Task<bool>                        NeedsAutoFinalizeAsync(string mission, CancellationToken token) {
+            // 1) Quick DB guard: only while “not ended” in DB (your API defines not-ended as status < 5)
+            await using (var c = new NpgsqlConnection(_pg))
+            {
+                await c.OpenAsync(token);
+                const string sql = @"select 1 from missions where mission_address=@a and status < 5 limit 1;";
+                await using var cmd = new NpgsqlCommand(sql, c);
+                cmd.Parameters.AddWithValue("a", mission);
+                var notEnded = await cmd.ExecuteScalarAsync(token) != null;
+                if (!notEnded) return false;
+            }
+
+            // 2) On-chain realtime view is authoritative for the condition:
+            //    finalize iff getRealtimeStatus() reports PartlySuccess (5).
+            var rt = await RunRpc(
+                w => w.Eth.GetContractQueryHandler<GetRealtimeStatusFunction>()
+                        .QueryAsync<byte>(mission, new GetRealtimeStatusFunction()),
+                "Call.getRealtimeStatus");
+
+            return rt == 5; // PartlySuccess
+        }
+
+        private async Task                              TryAutoFinalizeAsync        (string mission, CancellationToken token) {
+            _log.LogInformation("TryAutoFinalizeAsync - {mission}", mission);
+            if (string.IsNullOrWhiteSpace(_ownerPk)) {
+                _log.LogDebug("Auto-finalize skipped for {mission}: missing Owner--PK/Owner:PK", mission);
+                return;
+            }
+            if (!await NeedsAutoFinalizeAsync(mission, token)) return;
+
+            var w3 = BuildSignerWeb3();
+            if (w3 == null) return;
+
+            try
+            {
+                var handler = w3.Eth.GetContractTransactionHandler<ForceFinalizeMissionFunction>();
+                var receipt = await handler.SendRequestAndWaitForReceiptAsync(mission, new ForceFinalizeMissionFunction());
+                _log.LogInformation("forceFinalizeMission() sent for {mission}. Tx: {tx} Status: {st}",
+                    mission, receipt?.TransactionHash, receipt?.Status?.Value);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "forceFinalizeMission() failed for {mission}", mission);
+                // best-effort; loop will check again next cycle
             }
         }
 
