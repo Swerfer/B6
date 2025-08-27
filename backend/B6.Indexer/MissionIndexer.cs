@@ -356,7 +356,7 @@ namespace B6.Indexer
                         @es,@ee,@amt,
                         @min,@max,
                         @ms,@me,@rt,0,
-                        0,0,null,@mc,@blkMinus1, now()
+                        @cs,@cc,null,@mc,@blkMinus1, now()
                         )
                         on conflict (mission_address) do update set
                         name                    = coalesce(nullif(excluded.name,''), missions.name),
@@ -369,27 +369,39 @@ namespace B6.Indexer
                         mission_start           = excluded.mission_start,
                         mission_end             = excluded.mission_end,
                         mission_rounds_total    = excluded.mission_rounds_total,
+
+                        -- take chain values at creation; keep existing if already nonzero
+                        cro_start_wei           = CASE WHEN coalesce(missions.cro_start_wei,0)=0 THEN excluded.cro_start_wei ELSE missions.cro_start_wei END,
+                        cro_current_wei         = CASE WHEN coalesce(missions.cro_current_wei,0)=0 THEN excluded.cro_current_wei ELSE missions.cro_current_wei END,
+
                         mission_created         = excluded.mission_created,
                         last_seen_block         = greatest(coalesce(missions.last_seen_block,0), excluded.last_seen_block),
                         updated_at              = now();
                     ", conn, tx);
-                    up.Parameters.AddWithValue("a",  a);
-                    up.Parameters.AddWithValue("n",  ev.Event.Name ?? string.Empty);
-                    up.Parameters.AddWithValue("ty", (short)ev.Event.MissionType);
+
+                    up.Parameters.AddWithValue("a",     a);
+                    up.Parameters.AddWithValue("n",     ev.Event.Name ?? string.Empty);
+                    up.Parameters.AddWithValue("ty",    (short)ev.Event.MissionType);
                     up.Parameters.AddWithValue("st", 0);
-                    up.Parameters.AddWithValue("es", (long)ev.Event.EnrollmentStart);
-                    up.Parameters.AddWithValue("ee", (long)ev.Event.EnrollmentEnd);
+                    up.Parameters.AddWithValue("es",    (long)ev.Event.EnrollmentStart);
+                    up.Parameters.AddWithValue("ee",    (long)ev.Event.EnrollmentEnd);
                     up.Parameters.Add("amt", NpgsqlDbType.Numeric).Value = ev.Event.EnrollmentAmount;
-                    up.Parameters.AddWithValue("min", (short)ev.Event.MinPlayers);
-                    up.Parameters.AddWithValue("max", (short)ev.Event.MaxPlayers);
-                    up.Parameters.AddWithValue("ms", (long)ev.Event.MissionStart);
-                    up.Parameters.AddWithValue("me", (long)ev.Event.MissionEnd);
-                    up.Parameters.AddWithValue("rt", (short)ev.Event.MissionRounds);
+                    up.Parameters.AddWithValue("min",   (short)ev.Event.MinPlayers);
+                    up.Parameters.AddWithValue("max",   (short)ev.Event.MaxPlayers);
+                    up.Parameters.AddWithValue("ms",    (long)ev.Event.MissionStart);
+                    up.Parameters.AddWithValue("me",    (long)ev.Event.MissionEnd);
+                    up.Parameters.AddWithValue("rt",    (short)ev.Event.MissionRounds);
+
+                    // pull initial pool directly from getMissionData() we already queried above
+                    up.Parameters.Add("cs", NpgsqlDbType.Numeric).Value = md.EthStart;
+                    up.Parameters.Add("cc", NpgsqlDbType.Numeric).Value = md.EthCurrent;
+
                     var createdUnix = tsByBlock.TryGetValue(blk, out var cr)
                         ? new DateTimeOffset(cr).ToUnixTimeSeconds()
                         : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                    up.Parameters.AddWithValue("mc", createdUnix);
+                    up.Parameters.AddWithValue("mc",        createdUnix);
                     up.Parameters.AddWithValue("blkMinus1", blk - 1);
+
                     await up.ExecuteNonQueryAsync(token);
                 }
 
