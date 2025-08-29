@@ -684,6 +684,7 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
 
   let zeroFired = false;
   let currentUnit = null;
+  let pillFlipDone = false; // NEW: debounce single front-end flip at the deadline
 
   const paint = async () => {
     const now  = Math.floor(Date.now()/1000);
@@ -763,13 +764,16 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
       if (!zeroFired) {
         zeroFired = true;
 
-        // (1) Instant front-end flip using immutable times
-        if (missionObj) {
-          const next = statusByClock(missionObj, now);
-          if (typeof next === "number" && next !== Number(missionObj.status)) {
+        // NEW: universal instant pills/status flip at any stage deadline
+        if (missionObj && !pillFlipDone) {
+          const next = statusByClock(missionObj, now); // Pending→Enrolling, Enrolling→Arming/Failed, Arming→Active, Active→Ended
+          const cur  = Number(missionObj.status);
+          if (typeof next === "number" && next !== cur) {
+            pillFlipDone = true;
             const m2 = { ...missionObj, status: next };
+
             setStageStatusImage(statusSlug(next));
-            buildStageLowerHudForStatus(m2);
+            buildStageLowerHudForStatus(m2);         // <-- pills rebuild immediately for ALL stage changes
             await bindRingToMission(m2);
             await bindCenterTimerToMission(m2);
             renderStageCtaForStatus(m2);
@@ -778,10 +782,11 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
           }
         }
 
-        // (2) One server refresh (sync with backend / ended subtype)
-        refreshOpenStageFromServer(1);
+        // Keep the quick reconcile so DB fields (players, rounds, pause flag) catch up safely
+        refreshOpenStageFromServer(2);
       }
     }
+
   };
 
   paint();

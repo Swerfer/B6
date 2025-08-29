@@ -91,16 +91,16 @@
           <!-- NEW: three live counters in the hero -->
           <div class="hero-stats mb-3">
             <div class="stat">
+              <div class="stat-value" id="statTotal">0</div>
+              <div class="stat-label">Missions</div>
+            </div>            
+            <div class="stat">
               <div class="stat-value" id="statJoinable">0</div>
               <div class="stat-label">Joinable</div>
             </div>
             <div class="stat">
               <div class="stat-value" id="statActive">0</div>
               <div class="stat-label">Active</div>
-            </div>
-            <div class="stat">
-              <div class="stat-value" id="statTotal">0</div>
-              <div class="stat-label">Total Missions</div>
             </div>
           </div>
 
@@ -184,7 +184,23 @@
           <h2 id="tutorialTitle" class="tutorial-title mb-4">
             <i class="fa-solid fa-gamepad me-2"></i> How B6 Works
           </h2>
+          <div class="mb-4">
+            <h3 class="pt-h3"><i class="fa-solid fa-circle-info me-2"></i> Introduction</h3>
+            <p><i class="fa-solid fa-book-open me-2"></i><strong>Welcome to B6.</strong> Missions are short, on-chain games where timing and nerve decide who wins. 
+              You join with CRO, then try to bank at the right moment to claim a share of the pool.
+            </p> 
+            <p><i class="fa-solid fa-wallet me-2"></i><strong>Bring a wallet.</strong> Use a Cronos-compatible wallet and a little CRO for gas and entry. 
+              You stay in full control—smart contracts handle funds and results transparently.
+            </p> 
+            <p><i class="fa-solid fa-stopwatch me-2"></i><strong>Beat the clock.</strong> Enroll before the countdown ends. When a mission starts, rounds play out fast. 
+              Watch the timer and bank during a window to lock your payout. After banking, a short cooldown applies.
+            </p> 
+            <p><i class="fa-solid fa-trophy me-2"></i><strong>Win with judgment.</strong> This isn’t random—read the flow, track the pot, anticipate others, and act with confidence. 
+              Every action is recorded on-chain, so victories are provable and fair.
+            </p>
+          </div>
 
+          <h3 class="pt-h3"><i class="fa-solid fa-circle-question me-2"></i>Step by step</h3>
           <div class="tutorial-grid">
             <div class="t-item">
               <i class="fa-solid fa-wallet"></i>
@@ -281,11 +297,111 @@
 
             <article class="faq-item">
               <button class="faq-q">
-                <i class="fa-solid fa-flag-checkered me-2"></i><span>How can we contact B6?</span>
+                <i class="fa-solid fa-flag-checkered me-2"></i><span>How can I contact B6?</span>
                 <i class="fa-solid fa-chevron-down caret"></i>
               </button>
               <div class="faq-a">
                 You can contact B6 on X via the handle @B6_Game.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-network-wired me-2"></i><span>Which network and token does B6 use?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                B6 runs on the Cronos network and uses CRO for entry fees, gas, and rewards. You’ll need a Cronos-compatible wallet.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-clock me-2"></i><span>What happens if I refresh or disconnect during a mission?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                All state lives on-chain. You can reconnect and continue—timers and results remain accurate and verifiable.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-users me-2"></i><span>What if the minimum players isn’t reached?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                The mission fails and refunds are issued on-chain. The dApp's server can trigger the refund call automatically once failure is detected.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-hourglass-half me-2"></i><span>What if the mission ends with rounds left unclaimed?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                The mission is finalized based on the rules. Unclaimed rounds don’t pay out after the end; finalized results are immutable on-chain.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-link me-2"></i><span>Where can I verify contracts and transactions?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                Factory and Mission implementation addresses are shown on the homepage. Use a Cronos block explorer to inspect mission and player transactions.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-money-bill-wave me-2"></i><span>How are fees and rewards handled?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                Each mission displays its entry fee. Gas is paid to the network. Rewards are distributed by the contract when you bank a round or when the mission settles.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-triangle-exclamation me-2"></i><span>Why did my transaction fail or stay pending?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                Network congestion, low gas, or a race condition can cause this. Check your wallet, then resubmit with a higher gas setting or try again after a moment.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-shield-halved me-2"></i><span>Is B6 custodial?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                No. You control your wallet and keys at all times. Contracts move funds according to the rules; results are transparent and permanent.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-layer-group me-2"></i><span>Can I join multiple missions?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                Yes, as long as you have enough CRO for entry and gas. Cooldowns apply per mission—manage timing across missions strategically.
+              </div>
+            </article>
+
+            <article class="faq-item">
+              <button class="faq-q">
+                <i class="fa-solid fa-bug me-2"></i><span>How do I report a bug or get help?</span>
+                <i class="fa-solid fa-chevron-down caret"></i>
+              </button>
+              <div class="faq-a">
+                Use the official contact/support links shown in the dApp. Include your wallet address and the mission address or transaction hash for faster support.
               </div>
             </article>
 

@@ -164,7 +164,23 @@ overlayDefs.forEach(({btnId, overlayId, closeIds})=>{
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") goHome(); });
 
 // Home button: close any overlays and reset the homepage
-const btnHome = document.getElementById("btnHome");
+btnHome?.addEventListener("click", goHome);
+
+// --- FAQ collapsibles ---
+(function wireFaqToggles(){
+  const container = document.getElementById("faqOverlay");
+  if (!container) return;
+  container.querySelectorAll(".faq-q").forEach(btn=>{
+    btn.addEventListener("click", (e)=>{
+      e.preventDefault();
+      e.stopPropagation();
+      const item = btn.closest(".faq-item");
+      item?.classList.toggle("open");
+    });
+  });
+})();
+
+
 function goHome(){
   // Close ALL overlays (now includes Privacy & Terms)
   document.querySelectorAll(".tutorial-overlay,.faq-overlay,.pt-overlay,.modal-overlay").forEach(el=>{
