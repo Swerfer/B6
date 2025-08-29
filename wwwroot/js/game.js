@@ -78,7 +78,8 @@ let   stageRefreshBusy      = false;
 let   __allMissionsCache    = [];     // last fetched list (raw objects)
 let   __allFilterOpen       = false;
 let   __allSelected         = null;   // null  → all statuses; otherwise Set<number> of allowed statuses
-
+let   __lastPushTs          = 0;      // updated on any hub push we care about
+let   __enrollingPulseTo    = null;   // timer handle
 // #endregion
 
 // --- DEBUG + group tracking ---
@@ -243,6 +244,28 @@ function joinedCacheAdd(addr, me){
   } catch {}
 }
 
+function __stopEnrollingPulse(){
+  if (__enrollingPulseTo){ clearTimeout(__enrollingPulseTo); __enrollingPulseTo = null; }
+}
+
+function __startEnrollingPulse(){
+  __stopEnrollingPulse();
+  const tick = () => {
+    // Only when stage is visible and status is Enrolling (1)
+    const gameMain = document.getElementById('gameMain');
+    if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
+    if (Number(window.stageCurrentStatus) !== 1) return; // not Enrolling
+
+    // If we haven’t seen a push in a while, do a gentle pills refresh
+    if (Date.now() - __lastPushTs > 8000) {
+      // single, light refresh: pulls denorms and rebuilds pills
+      refreshOpenStageFromServer(1).catch(()=>{});
+    }
+    __enrollingPulseTo = setTimeout(tick, 5000);
+  };
+  tick();
+}
+
 function enrichMissionFromApi(data){
   const m = data?.mission || data || {};
   if (data && Array.isArray(data.enrollments)) m.enrollments = data.enrollments;
@@ -403,6 +426,7 @@ function showOnlySection(sectionId) {
 }
 
 async function cleanupMissionDetail(){
+  __stopEnrollingPulse();
   stopCountdown();
   stopStageTimer();
   unbindRing();
@@ -779,6 +803,7 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
             renderStageCtaForStatus(m2);
             await renderStageEndedPanelIfNeeded(m2);
             stageCurrentStatus = next;
+            if (next === 1) { __startEnrollingPulse(); } else { __stopEnrollingPulse(); }
           }
         }
 
@@ -996,6 +1021,7 @@ async function startHub() { // SignalR HUB
     });
 
     hubConnection.on("RoundResult", async (addr, round, winner, amountWei) => {
+      __lastPushTs = Date.now();
       dbg("RoundResult PUSH", { addr, round, winner, amountWei, currentMissionAddr, groups: Array.from(subscribedGroups) });
       const me  = (walletAddress || "").toLowerCase();
       const win = String(winner || "").toLowerCase();
@@ -1044,6 +1070,7 @@ async function startHub() { // SignalR HUB
     });
 
     hubConnection.on("StatusChanged", async (addr, newStatus) => {
+      __lastPushTs = Date.now();
       dbg("StatusChanged PUSH", { addr, newStatus, currentMissionAddr, groups: Array.from(subscribedGroups) });
       if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
         return;
@@ -1079,6 +1106,7 @@ async function startHub() { // SignalR HUB
     });
 
     hubConnection.on("MissionUpdated", async (addr) => {
+      __lastPushTs = Date.now();
       dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
         try {
@@ -1305,7 +1333,20 @@ async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
     const data = await apiMission(currentMissionAddr);
     const m = enrichMissionFromApi(data);
 
-    // Always refresh pills (safe)
+    // Merge optimism for a short window so API can't regress the UI
+    if (Date.now() < (optimisticGuard?.untilMs || 0)) {
+      try {
+        const apiPlayers = Number(m.enrolled_players || (Array.isArray(m.enrollments) ? m.enrollments.length : 0) || 0);
+        const apiCro     = BigInt(String(m.cro_current_wei || m.cro_start_wei || "0"));
+        const optPlayers = Number(optimisticGuard.players || 0);
+        const optCro     = BigInt(String(optimisticGuard.croNow || "0"));
+
+        if (optPlayers > apiPlayers) m.enrolled_players = optPlayers;
+        if (optCro     > apiCro)     m.cro_current_wei  = optCro.toString();
+      } catch {}
+    }
+
+    // Now (safely) rebuild pills
     buildStageLowerHudForStatus(m);
 
     const newStatus = Number(m.status);
@@ -1389,6 +1430,12 @@ async function showGameStage(missionRaw){
   setStageStatusImage(statusSlug(mission.status));
 
   stageCurrentStatus = Number(mission?.status ?? -1);
+  __lastPushTs = Date.now();
+  if (stageCurrentStatus === 1) { 
+    __startEnrollingPulse(); 
+  } else { 
+    __stopEnrollingPulse(); 
+  }
 
   // Scale image + overlay, then place everything from the vault center
   layoutStage();
@@ -1493,7 +1540,7 @@ const PILL_LIBRARY = {
   players:        { label: "Players",          value: m => Number(m?.enrolled_players ?? (Array.isArray(m?.enrollments) ? m.enrollments.length : 0)) },     
   rounds:         { label: "Rounds",           value: m => Number(m?.mission_rounds_total ?? 0) },
   roundsOff:      { label: "Rounds",           value: m => `${Number(m?.round_count ?? 0)}/${Number(m?.mission_rounds_total ?? 0)}` },
-  playersAllStats:{ label: "Players",          value: m => `${m?.enrollment_min_players ?? "—"}/${Number(mission?.enrolled_players ?? (Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0))}/${m?.enrollment_max_players ?? "—"}`},
+  playersAllStats:{ label: "Players",          value: m => `${m?.enrollment_min_players ?? "—"}/${Number(m?.enrolled_players ?? (Array.isArray(m?.enrollments) ? m.enrollments.length : 0))}/${m?.enrollment_max_players ?? "—"}`},
   closesIn:       { label: "Closes In",        countdown: m => Number(m?.enrollment_end  || 0) },
   startsIn:       { label: "Starts In",        countdown: m => Number(m?.mission_start   || 0) },
   endsIn:         { label: "Ends In",          countdown: m => Number(m?.mission_end     || 0) },
@@ -1705,19 +1752,29 @@ async function  handleEnrollClick       (mission){
     
     // OPTIMISTIC UI UPDATE so the player sees the new numbers instantly
     try {
-      const feeWei = String(mission.enrollment_amount_wei  || "0");
+      const feeWei = String(mission.enrollment_amount_wei || "0");
+
+      // remember optimistic values for the next couple seconds
+      optimisticGuard = {
+        untilMs: Date.now() + 4000,                              // 4s guard window
+        players: Number(mission.enrolled_players || 0) + 1,
+        croNow:  (BigInt(mission.cro_current_wei || mission.cro_start_wei || "0") + BigInt(feeWei)).toString()
+      };
+
       const m2 = {
         ...mission,
-        enrolled_players: Number(mission.enrolled_players  || 0) + 1,
-        cro_start_wei:    (BigInt(mission.cro_start_wei    || "0") + BigInt(feeWei)).toString(),
-        cro_current_wei:  (BigInt(mission.cro_current_wei  || "0") + BigInt(feeWei)).toString(),
+        enrolled_players: optimisticGuard.players,
+        // NOTE: do NOT bump cro_start_wei (start pool is fixed)
+        cro_current_wei:  optimisticGuard.croNow,
       };
-      buildStageLowerHudForStatus(m2);  // pills: Players / Pool, etc.
-      renderStageCtaForStatus(m2);      // “You already joined” will also show (CTA probes chain)
-    } catch { /* no-op */ }    
 
-    // Refresh everything on the open stage
-    await refreshOpenStageFromServer(2);
+      buildStageLowerHudForStatus(m2);
+      renderStageCtaForStatus(m2);
+    } catch { /* no-op */ }
+
+    // Let indexer catch up, then reconcile (no await, slight delay)
+    setTimeout(() => { refreshOpenStageFromServer(2).catch(()=>{}); }, 1200);
+
   } catch (err) {
     // wallet cancel → warning, no “stuck” UI
     if (err?.code === 4001 || err?.code === "ACTION_REJECTED") {
