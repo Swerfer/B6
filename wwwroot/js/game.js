@@ -80,6 +80,7 @@ let   __allFilterOpen       = false;
 let   __allSelected         = null;   // null  → all statuses; otherwise Set<number> of allowed statuses
 let   __lastPushTs          = 0;      // updated on any hub push we care about
 let   __enrollingPulseTo    = null;   // timer handle
+let   optimisticGuard       = { untilMs: 0, players: 0, croNow: "0" };
 // #endregion
 
 // --- DEBUG + group tracking ---
@@ -1140,7 +1141,7 @@ async function startHub() { // SignalR HUB
 
           // Same status → light refresh + delayed reconcile so spectators flip to Paused.
           buildStageLowerHudForStatus(m);
-          renderStageCtaForStatus(m);
+          if (walletAddress) renderStageCtaForStatus(m);
           setTimeout(() => refreshOpenStageFromServer(2), 1600);
         } catch (err) {console.log("startHub MissionUpdated error: " + err)}
       }
