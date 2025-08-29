@@ -214,3 +214,11 @@ body.scroll-lock{
   gap: .5rem;
   justify-content: flex-end;
 }
+
+/* When the game stage is visible, let the stage viewport fill the window
+   so the vault image can show under the fixed header and footer. */
+#gameMain.stage-mode #stageViewport{
+  position: fixed;
+  inset: 0;            /* top/right/bottom/left = 0 */
+  z-index: 50;         /* under header/footer (100), above body bg (-1) */
+}

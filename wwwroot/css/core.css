@@ -58,7 +58,7 @@ html,body {
   left: 0;
   right: 0;
   height: var(--header-h);        /* ← this is the key */
-  background: var(--abyss-navy-deep);
+  background: transparent;
   z-index: 100;
   display: flex;
   align-items: center;            /* vertically center text */
@@ -389,7 +389,7 @@ button:disabled{
   left: 0;
   right: 0;
   height: var(--footer-h);
-  background: var(--abyss-navy-deep);
+  background: transparent;
   z-index: 100;
   display: flex;
   align-items: center;

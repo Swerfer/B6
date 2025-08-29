@@ -1469,13 +1469,19 @@ const visibleRectangle  = { x:566, y:420, w:914, h:1238 }; // visibleRectangle w
                                                            // screen width on the vault bg image. This rectangle is always visible on every screen
 function layoutStage(){
   if (!stage || !stageViewport || !stageImg) return;
-  const availW = stageViewport.clientWidth;
-  const availH = stageViewport.clientHeight;
 
-  const scale = Math.min(availH / visibleRectangle .h, availW / visibleRectangle .w);
+  // Keep scale tied to the "visible rectangle" between header & footer
+  const headerH = (document.querySelector(".app-header")?.offsetHeight) || 0;
+  const footerH = (document.querySelector(".app-footer")?.offsetHeight) || 0;
+
+  const availW  = window.innerWidth;
+  const availH  = Math.max(0, window.innerHeight - headerH - footerH);
+
+  const scale = Math.min(availH / visibleRectangle.h, availW / visibleRectangle.w);
 
   const w = Math.round(IMG_W * scale);
   const h = Math.round(IMG_H * scale);
+
   stageImg.style.width  = w + "px";
   stageImg.style.height = h + "px";
 
@@ -1483,7 +1489,6 @@ function layoutStage(){
     ringOverlay.style.width  = w + "px";
     ringOverlay.style.height = h + "px";
   }
-
 }
 
 function stageTextFill(){
