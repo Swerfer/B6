@@ -1,8 +1,6 @@
 /**********************************************************************
  game.js – home page bootstrap, re-uses core.js & walletConnect.js
 **********************************************************************/
-
-// #region Imports
 import { 
   connectWallet, 
   disconnectWallet, 
@@ -32,13 +30,8 @@ import {
   getReadProvider,
   shorten,
 } from "./core.js";
-// #endregion
 
-
-
-
-
-// #region Config, int.face&DOM
+// #region Variables
 const MISSION_ERROR_ABI = [
   "error EnrollmentNotStarted(uint256 nowTs, uint256 startTs)",
   "error EnrollmentClosed(uint256 nowTs, uint256 endTs)",
@@ -56,84 +49,64 @@ const MISSION_ERROR_ABI = [
   "error PayoutFailed(address winner, uint256 amount, bytes data)",
   "error ContractsNotAllowed()",
 ];
+
 const __missionErrIface = new ethers.utils.Interface(MISSION_ERROR_ABI);
+const connectBtn          = document.getElementById("connectWalletBtn");
+const sectionBoxes        = document.querySelectorAll(".section-box");
+const __missionCreatedCache = new Map();
 const __mcIface = new ethers.utils.Interface([
   "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)"
 ]);
-const connectBtn          = document.getElementById("connectWalletBtn");
-const sectionBoxes        = document.querySelectorAll(".section-box");
-// #endregion
 
-
-
-
-
-// #region Runtime state&caches
-
-// List & view:
 let   lastListShownId       = "joinableSection";
-// Hub:
 let   hubConnection         = null;
 let   hubStartPromise       = null;   // prevent concurrent starts
 let   currentMissionAddr    = null;
 let   subscribedAddr        = null;
-let   subscribedGroups      = new Set();
-// Detail refresh:
 let   detailRefreshTimer    = null;
 let   detailBackoffMs       = 15000;
 let   detailFailures        = 0;
-// Stage:
+let   staleWarningShown     = false;
 let   ringTimer             = null;
 let   stageTicker           = null;
 let   stageCurrentStatus    = null;
+let   ctaBusy               = false;
 let   stageReturnTo         = null;   // "stage" when we navigated from stage → detail
 let   stageRefreshTimer     = null;
 let   stageRefreshBusy      = false;
-// All missions cache & filters:
 let   __allMissionsCache    = [];     // last fetched list (raw objects)
 let   __allFilterOpen       = false;
 let   __allSelected         = null;   // null  → all statuses; otherwise Set<number> of allowed statuses
-// Realtime:
 let   __lastPushTs          = 0;      // updated on any hub push we care about
-// Optimistic:
 let   optimisticGuard       = { untilMs: 0, players: 0, croNow: "0" };
-// Cache:
-const __missionCreatedCache = new Map();
-const JOIN_CACHE_KEY        = "_b6joined";
 
-// miscellaneous 
-let   staleWarningShown     = false;
-let   ctaBusy               = false;
-
-let __pillsHydrateBusy      = false;
-let __pillsHydrateLast      = 0;
-let __lastChainPlayers      = 0;
-let __lastChainCroWei       = "0";
 // #endregion
 
-
-
-
-
-// #region Degug helpers
-
+// --- DEBUG + group tracking ---
 window.__B6_DEBUG = true;
 function dbg(...args){ if (window.__B6_DEBUG) console.debug("[B6]", ...args); }
+
+// Track all mission group names we’re subscribed to (lowercase + checksum)
+let subscribedGroups = new Set();
+
+// Quick helpers you can run from DevTools:
+window.hubState = () => {
+  try {
+    const st = window.hubConnection?.state;
+    console.log("Hub state:", st, "(", window.stateName?.(st) ,")");
+    console.log("currentMissionAddr:", currentMissionAddr);
+    console.log("subscribedGroups:", Array.from(subscribedGroups));
+    console.log("stageCurrentStatus:", window.stageCurrentStatus);
+  } catch (e) { console.log(e); }
+};
 
 window.debugPing = (addr) => fetch(`/api/debug/push/${(addr||window.currentMissionAddr)||""}`)
   .then(r=>r.text()).then(t=>console.log("debug/push →", t)).catch(console.error);
 
-// #endregion
+// #region helpers ----------------------
 
-
-
-
-
-// #region Pure helpers
-
-// Bucketing/sort/filter:
-
-function bucketOfStatus(s){ // Group order: Active bucket (2/3/4), then Enrolling(1), Pending(0), Ended(5/6/7)
+// Group order: Active bucket (2/3/4), then Enrolling(1), Pending(0), Ended(5/6/7)
+function bucketOfStatus(s){
   s = Number(s);
   if (s === 1)  return 1; // Enrolling
   if (s === 0)  return 2; // Pending
@@ -236,8 +209,7 @@ function buildAllFiltersUI(){
   });
 }
 
-// Promises/local storage:
-
+// --- local "I joined" cache (per mission) -------------
 function withTimeout(promise, ms = 12000){
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("timeout")), ms);
@@ -248,6 +220,7 @@ function withTimeout(promise, ms = 12000){
   });
 }
 
+const JOIN_CACHE_KEY = "_b6joined";
 function joinedCacheHas(addr, me){
   try {
     const k = (addr||"").toLowerCase();
@@ -270,8 +243,6 @@ function joinedCacheAdd(addr, me){
     localStorage.setItem(JOIN_CACHE_KEY, JSON.stringify(all));
   } catch {}
 }
-
-// Enrichment:
 
 function enrichMissionFromApi(data){
   const m = data?.mission || data || {};
@@ -297,8 +268,64 @@ function enrichMissionFromApi(data){
   return m;
 }
 
-// Mission error decoding:
+let __pillsHydrateBusy = false;
+let __pillsHydrateLast = 0;
+let __lastChainPlayers = 0;
+let __lastChainCroWei  = "0";
 
+async function rehydratePillsFromChain(missionOverride = null, why = "") {
+  try {
+    if (!currentMissionAddr) return;
+
+    // throttle to ~1 call per 2.5s
+    const now = Date.now();
+    if (__pillsHydrateBusy || (now - __pillsHydrateLast) < 2500) return;
+    __pillsHydrateBusy = true;
+
+    // 1) Read players from chain (source of truth)
+    const ro = getReadProvider();
+    const mc = new ethers.Contract(currentMissionAddr, MISSION_ABI, ro);
+    const md = await mc.getMissionData();
+    const tuple = md?.[0] || md;
+    const playersArr = Array.isArray(tuple?.players) ? tuple.players : [];
+    const playersCnt = playersArr.length;
+
+    // 2) Get immutable amounts from the API snapshot (or use the passed mission)
+    let mSnap = missionOverride;
+    if (!mSnap) {
+      const data = await apiMission(currentMissionAddr);
+      mSnap = enrichMissionFromApi(data);
+    }
+
+    // 3) Pool: prefer chain truth, else derive
+    const chainNow = tuple?.ethCurrent != null ? String(tuple.ethCurrent) : "";
+    const feeWei   = BigInt(String(mSnap.enrollment_amount_wei || "0"));
+    const startWei = BigInt(String(mSnap.cro_start_wei        || "0"));
+    const derived  = (startWei + feeWei * BigInt(playersCnt)).toString();
+    const croNow   = chainNow || derived;
+
+    // NEW: keep a cache of the last chain-truth so UI never regresses
+    try {
+      if (playersCnt > __lastChainPlayers) __lastChainPlayers = playersCnt;
+      if (BigInt(croNow) > BigInt(__lastChainCroWei || "0")) __lastChainCroWei = croNow;
+    } catch { /* ignore BigInt issues */ }
+
+    // 4) Paint
+    buildStageLowerHudForStatus({
+      ...mSnap,
+      enrolled_players: playersCnt,
+      cro_current_wei:  croNow
+    });
+
+  } catch (e) {
+    console.warn("[pills/rehydrate] failed:", e?.message || e);
+  } finally {
+    __pillsHydrateLast = Date.now();
+    __pillsHydrateBusy = false;
+  }
+}
+
+// Detect Mission custom error name === "Cooldown"
 function isCooldownError(err){
   const hex =
     err?.error?.data ||
@@ -315,6 +342,31 @@ function isCooldownError(err){
   } catch { return false; }
 }
 
+function updateConnectText(){
+  const span = document.getElementById("connectBtnText");
+  if (span) span.textContent = walletAddress ? shorten(walletAddress) : "Connect Wallet";
+}
+
+// Flip the open stage to Paused immediately; reconcile from API afterwards
+async function flipStageToPausedOptimistic(mission){
+  const gameMain = document.getElementById('gameMain');
+  if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
+
+  const m2 = { ...mission, status: 4 };     // Paused now (UI only)
+
+  setStageStatusImage(statusSlug(4));
+  buildStageLowerHudForStatus(m2);
+  await bindRingToMission(m2);
+  await bindCenterTimerToMission(m2);
+  renderStageCtaForStatus(m2);
+  await renderStageEndedPanelIfNeeded(m2);
+  stageCurrentStatus = 4;
+
+  // Pick up real pause_timestamp on the next API tick
+  refreshOpenStageFromServer(2);
+}
+
+// map error names → friendly text (some include decoded args)
 function missionErrorToText(name, args = []) {
   switch (name) {
     case "EnrollmentNotStarted": {
@@ -367,7 +419,8 @@ function missionErrorToText(name, args = []) {
   }
 }
 
-function __revertHex(err) { // extract revert data from common provider error shapes
+// extract revert data from common provider error shapes
+function __revertHex(err) {
   return (
     err?.error?.data ||
     err?.data?.originalError?.data ||
@@ -376,7 +429,8 @@ function __revertHex(err) { // extract revert data from common provider error sh
   );
 }
 
-function missionCustomErrorMessage(err) { // decode a Mission custom error if present; otherwise return null
+// decode a Mission custom error if present; otherwise return null
+function missionCustomErrorMessage(err) {
   const hex = __revertHex(err);
   if (!hex || typeof hex !== "string" || !hex.startsWith("0x")) return null;
 
@@ -393,8 +447,6 @@ function missionCustomErrorMessage(err) { // decode a Mission custom error if pr
   }
 }
 
-// Section switcher:
-
 function showOnlySection(sectionId) {
   sectionBoxes.forEach(sec => {
     sec.style.display = (sec.id === sectionId) ? "" : "none";
@@ -407,8 +459,6 @@ function showOnlySection(sectionId) {
     lastListShownId = sectionId;
   }
 }
-
-// Cleanup:
 
 async function cleanupMissionDetail(){
   stopCountdown();
@@ -427,8 +477,6 @@ async function cleanupMissionDetail(){
   currentMissionAddr = null;
 }
 
-// Status→slug:
-
 function statusSlug(s){
   switch (Number(s)) {
     case 0: return "pending";
@@ -442,7 +490,7 @@ function statusSlug(s){
   }
 }
 
-// Round helpers:
+// ---- bank-now & cooldown helpers ----
 
 function waitForMyRoundWin(meAddrLc, missionAddrLc, timeoutMs = 25000){
   return new Promise((resolve, reject) => {
@@ -523,8 +571,6 @@ function formatMMSS(s){
   return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
 }
 
-// Chain timestamp:
-
 async function getMissionCreationTs(mission){ // Used for circle timer if mission creation is used for start time timer.
   const inline = Number(mission.mission_created ?? 0);
   if (inline > 0) return inline;           // skip log scan when API provides it
@@ -581,8 +627,6 @@ async function getMissionCreationTs(mission){ // Used for circle timer if missio
   }
 }
 
-// Winners/Failure:
-
 function topWinners(enrollments = [], rounds = [], n = 5){
   // Totals by address (BigInt)
   const totals = new Map();
@@ -631,21 +675,13 @@ function failureReasonFor(mission){
 
 // #endregion
 
-
-
-
-
-// #region Stage layout primitive
-
-// Statusimage:
-
-function setStageStatusImage(slug){ /* Load + size the status word image and center it under the title */
+/* Load + size the status word image and center it under the title */
+function setStageStatusImage(slug){
   if (!stageStatusImgSvg || !slug) return;
   stageStatusImgSvg.setAttribute("href", `assets/images/statuses/${slug}.png`);
 }
 
-// Center timer core:
-
+// ---- center timer (short form) ----
 function stopStageTimer(){ 
   if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } 
 }
@@ -658,7 +694,8 @@ function formatStageShort(leftSec){
   return s + "S";                                      // ≤ 90s → seconds
 }
 
-function stageUnitFor(leftSec){ // Unit classifier used by the center text and the ring "reset" windows
+// Unit classifier used by the center text and the ring "reset" windows
+function stageUnitFor(leftSec){
   const s = Math.max(0, Math.floor(leftSec));
   if (s > 36*3600) return "d";
   if (s > 90*60)   return "h";
@@ -832,9 +869,8 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
   stageTicker = setInterval(paint, 1000);
 }
 
-// Deadline routing:
-
-function nextDeadlineFor(m){ // Choose the deadline shown in the vault center per status
+// Choose the deadline shown in the vault center per status
+function nextDeadlineFor(m){
   if (!m) return 0;
   const st = Number(m.status);
   if (st === 0) return Number(m.enrollment_start || m.mission_start || 0); // Pending
@@ -844,7 +880,8 @@ function nextDeadlineFor(m){ // Choose the deadline shown in the vault center pe
   return 0; // Ended variants – no countdown in center
 }
 
-function statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute the status purely from immutable times (front-end flip)
+// NEW — compute the status purely from immutable times (front-end flip)
+function statusByClock(m, now = Math.floor(Date.now()/1000)) {
   const es = Number(m.enrollment_start || 0);
   const ee = Number(m.enrollment_end   || 0);
   const ms = Number(m.mission_start    || 0);
@@ -886,7 +923,7 @@ async function bindCenterTimerToMission(mission){
   startStageTimer(endTs, startTs, mission);
 }
 
-// Ring overlay:
+/* ---------- Ring overlay: bind to time window ---------- */
 
 function unbindRing(){
   if (ringTimer){ clearInterval(ringTimer); ringTimer = null; }
@@ -927,7 +964,8 @@ function bindRingToWindow(startSec, endSec, tickMs = 1000){
   ringTimer = setInterval(tick, Math.max(16, tickMs)); // clamp to ~60fps minimum spacing
 }
 
-async function bindRingToMission(m){ /* Map mission.status to the correct time window */
+/* Map mission.status to the correct time window */
+async function bindRingToMission(m){
   const st = Number(m?.status ?? -1);
   const now = Math.floor(Date.now()/1000);
   let   E   = 0;
@@ -987,8 +1025,7 @@ async function bindRingToMission(m){ /* Map mission.status to the correct time w
     */
 }
 
-// Page scroll lock:
-
+/* ----- page scroll lock (for gameplay stage) ----- */
 function lockScroll(){
   const y = window.scrollY || document.documentElement.scrollTop || 0;
   document.documentElement.classList.add("scroll-lock");
@@ -1005,13 +1042,7 @@ function unlockScroll(){
   window.scrollTo(0, -top);
 }
 
-// #endregion
-
-
-
-
-
-// #region SignalR hub&handlers
+// #region SignalR ---------- 
 
 function stateName(s){
   const H = signalR.HubConnectionState;
@@ -1242,23 +1273,7 @@ async function safeSubscribe(){
   }
 }
 
-window.hubState = () => {
-  try {
-    const st = window.hubConnection?.state;
-    console.log("Hub state:", st, "(", window.stateName?.(st) ,")");
-    console.log("currentMissionAddr:", currentMissionAddr);
-    console.log("subscribedGroups:", Array.from(subscribedGroups));
-    console.log("stageCurrentStatus:", window.stageCurrentStatus);
-  } catch (e) { console.log(e); }
-};
-
 // #endregion
-
-
-
-
-
-// #region Details auto-refresh
 
 function clearDetailRefresh(){          
   if (detailRefreshTimer) { 
@@ -1295,14 +1310,7 @@ function scheduleDetailRefresh(reset=false){
   }, detailBackoffMs);
 }
 
-// #endregion
-
-
-
-
-
-// #region API wrappers
-
+// #region API wrappers 
 async function fetchAndRenderAllMissions(){
   try {
     // 1) Factory call (chain): get the full mission index
@@ -1373,12 +1381,6 @@ async function apiMission(addr){
 }
 
 // #endregion
-
-
-
-
-
-// #region Reconciliation (stage)
 
 async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
   const gameMain = document.getElementById('gameMain');
@@ -1453,7 +1455,8 @@ async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
   }
 }
 
-function smartReconcile(reason = "smart") { // Lightweight reconcile when we suspect a missed push or transport hiccup
+// Lightweight reconcile when we suspect a missed push or transport hiccup
+function smartReconcile(reason = "smart") {
   try {
     const gameMain = document.getElementById('gameMain');
     if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
@@ -1475,14 +1478,7 @@ function smartReconcile(reason = "smart") { // Lightweight reconcile when we sus
   } catch {}
 }
 
-// #endregion
-
-
-
-
-
-// #region Elements (DOM map)
-
+// #region dom elements
 const els = {
   joinableList:             document.getElementById("joinableList"),
   joinableEmpty:            document.getElementById("joinableEmpty"),
@@ -1503,8 +1499,6 @@ const els = {
   refreshAllBtn:            document.getElementById("refreshAllBtn"),
 };
 
-// Buttons & stage SVG roots:
-
 const btnAllMissions      = document.getElementById("btnAllMissions"    );
 const btnJoinable         = document.getElementById("btnJoinable"       );
 const btnMyMissions       = document.getElementById("btnMyMissions"     );
@@ -1514,14 +1508,7 @@ const stageImg            = document.getElementById("stageImg"          );
 const ringOverlay         = document.getElementById("ringOverlay"       );
 const stageTitleText      = document.getElementById("stageTitleText"    );    
 const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg" );
-
 // #endregion
-
-
-
-
-
-// #region Stage entry
 
 async function showGameStage(missionRaw){
   const mission = enrichMissionFromApi({ mission: missionRaw, enrollments: missionRaw.enrollments, rounds: missionRaw.rounds });
@@ -1564,27 +1551,16 @@ async function showGameStage(missionRaw){
 
 }
 
-// #endregion
+// #region HUD
+function hudStatusFor(mission){
+  const st = Number(mission?.status ?? -1);
+  return st;
+}
 
-
-
-
-
-// #region HUD (pills) system
-
-// Layout helpers
-
-const IMG_W = 2000
-const IMG_H = 2000;
-const visibleRectangle  = { 
-  x:566, 
-  y:420, 
-  w:914, 
-  h:1238 
-};  // visibleRectangle was the rectangle from the phone header to footer space and phone 
-    // screen width on the vault bg image. This rectangle is always visible on every screen
-
-function        layoutStage(){
+const IMG_W = 2000, IMG_H = 2000;
+const visibleRectangle  = { x:566, y:420, w:914, h:1238 }; // visibleRectangle was the rectangle from the phone header to footer space and phone 
+                                                           // screen width on the vault bg image. This rectangle is always visible on every screen
+function layoutStage(){
   if (!stage || !stageViewport || !stageImg) return;
 
   // Keep scale tied to the "visible rectangle" between header & footer
@@ -1608,7 +1584,7 @@ function        layoutStage(){
   }
 }
 
-function        stageTextFill(){
+function stageTextFill(){
   // Try to reuse the CTA note color; fall back to white
   const sample = document.querySelector('#stageCtaGroup .cta-note');
   const cs = sample ? getComputedStyle(sample) : null;
@@ -1616,8 +1592,7 @@ function        stageTextFill(){
   return val && val !== "none" ? val : "#00c0f0";
 }
 
-// SVG constants:
-
+// --- Lower HUD (pills) builder --------------------------------------------
 const SVG_NS = "http://www.w3.org/2000/svg";
 const HUD = {
   maxRows:    4,                          // The maximum rows of pills              
@@ -1640,9 +1615,8 @@ const HUD = {
   ry:         12,                         // Radius (?) y
 };
 
-// Pill data:
-
-const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
+// Single source of truth for pill behaviors/labels
+const PILL_LIBRARY = {
   missionType:    { label: "Mission Type",     value: m => missionTypeName[Number(m?.mission_type ?? 0)] },
   joinFrom:       { label: "Join from",        value: m => m?.enrollment_start ? formatLocalDateTime(m.enrollment_start) : "—" },
   joinUntil:      { label: "Join until",       value: m => m?.enrollment_end ? formatLocalDateTime(m.enrollment_end) : "—" },
@@ -1671,7 +1645,8 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
   endsIn:         { label: "Ends In",          countdown: m => Number(m?.mission_end     || 0) },
 };
 
-const PILL_SETS = { // Which pills to show per status (0..7) — only using fields that exist in your payloads :contentReference[oaicite:0]{index=0}
+// Which pills to show per status (0..7) — only using fields that exist in your payloads :contentReference[oaicite:0]{index=0}
+const PILL_SETS = {
   0:        ["joinFrom","joinUntil","missionStartAt","duration","fee","poolStart","playersCap","rounds"],           // Pending
   1:        ["missionType","rounds","fee","poolCurrent","playersAllStats","duration","closesIn","missionStartAt"],  // Enrolling
   2:        ["poolStart","players","rounds","startsIn","duration"],                                                 // Arming
@@ -1680,63 +1655,7 @@ const PILL_SETS = { // Which pills to show per status (0..7) — only using fiel
   default:  ["poolCurrent","players","roundsOff"],                                                                  // Ended variants
 };
 
-// Pills refresher:
-
-async function rehydratePillsFromChain(missionOverride = null, why = "") {
-  try {
-    if (!currentMissionAddr) return;
-
-    // throttle to ~1 call per 2.5s
-    const now = Date.now();
-    if (__pillsHydrateBusy || (now - __pillsHydrateLast) < 2500) return;
-    __pillsHydrateBusy = true;
-
-    // 1) Read players from chain (source of truth)
-    const ro = getReadProvider();
-    const mc = new ethers.Contract(currentMissionAddr, MISSION_ABI, ro);
-    const md = await mc.getMissionData();
-    const tuple = md?.[0] || md;
-    const playersArr = Array.isArray(tuple?.players) ? tuple.players : [];
-    const playersCnt = playersArr.length;
-
-    // 2) Get immutable amounts from the API snapshot (or use the passed mission)
-    let mSnap = missionOverride;
-    if (!mSnap) {
-      const data = await apiMission(currentMissionAddr);
-      mSnap = enrichMissionFromApi(data);
-    }
-
-    // 3) Pool: prefer chain truth, else derive
-    const chainNow = tuple?.ethCurrent != null ? String(tuple.ethCurrent) : "";
-    const feeWei   = BigInt(String(mSnap.enrollment_amount_wei || "0"));
-    const startWei = BigInt(String(mSnap.cro_start_wei        || "0"));
-    const derived  = (startWei + feeWei * BigInt(playersCnt)).toString();
-    const croNow   = chainNow || derived;
-
-    // NEW: keep a cache of the last chain-truth so UI never regresses
-    try {
-      if (playersCnt > __lastChainPlayers) __lastChainPlayers = playersCnt;
-      if (BigInt(croNow) > BigInt(__lastChainCroWei || "0")) __lastChainCroWei = croNow;
-    } catch { /* ignore BigInt issues */ }
-
-    // 4) Paint
-    buildStageLowerHudForStatus({
-      ...mSnap,
-      enrolled_players: playersCnt,
-      cro_current_wei:  croNow
-    });
-
-  } catch (e) {
-    console.warn("[pills/rehydrate] failed:", e?.message || e);
-  } finally {
-    __pillsHydrateLast = Date.now();
-    __pillsHydrateBusy = false;
-  }
-}
-
-// Chain/No-regress merge:
-
-function        applyChainNoRegress(m){
+function applyChainNoRegress(m){
   try {
     const st = Number(m?.status);
     if (st === 1 || st === 2) { // Enrolling or Arming
@@ -1754,9 +1673,8 @@ function        applyChainNoRegress(m){
   return m;
 }
 
-// Builder:
-
-function        buildStageLowerHudForStatus(mission){ // Build (and fill) the pills for the current mission/status
+// Build (and fill) the pills for the current mission/status
+function buildStageLowerHudForStatus(mission){
   const host = document.getElementById("stageLowerHud");
   if (!host) return;
   while (host.firstChild) host.removeChild(host.firstChild);
@@ -1863,9 +1781,7 @@ function        buildStageLowerHudForStatus(mission){ // Build (and fill) the pi
   }
 }
 
-// SVG image helper:
-
-function        svgImage(href, x, y, w, h){
+function svgImage(href, x, y, w, h){
   const el = document.createElementNS(SVG_NS, "image");
   if (x != null) el.setAttribute("x", String(x));
   if (y != null) el.setAttribute("y", String(y));
@@ -1876,35 +1792,26 @@ function        svgImage(href, x, y, w, h){
   return el;
 }
 
-// UI status shim:
-
-function        uiStatusFor(mission){ // Use "Active" (3) when simulating during Enrolling (1)
+// Use "Active" (3) when simulating during Enrolling (1)
+function uiStatusFor(mission){
   const st = Number(mission?.status ?? -1);
   return st;
 }
-
-// HUD status shim:
-function        hudStatusFor(mission){
-  const st = Number(mission?.status ?? -1);
-  return st;
-}
-
 // #endregion
 
 
 
 
 
-// #region CTA render&actions
-
-// Layout constants:
-
-const CTA_LAYOUT  = { // ── CTA assets & layout (single source of truth) 
+// #region CTA's
+// ── CTA assets & layout (single source of truth) ─────────────────────────
+const CTA_LAYOUT = {
   xCenter: 500,       // viewBox center
   topY:    555,       // same top Y for all CTAs (matches Join)
 };
 
-const CTA_JOIN    = { // JOIN (status 1)
+// JOIN (status 1)
+const CTA_JOIN = {
   bg:    "assets/images/buttons/Button extra wide.png",
   text:  "assets/images/buttons/Join Mission text.png",
   btnW:  213, btnH: 50,
@@ -1912,7 +1819,8 @@ const CTA_JOIN    = { // JOIN (status 1)
   txtDy: -1,           // vertical nudge (shadow compensation)
 };
 
-const CTA_ARMING  = { // ARMING (status 2) — disabled 2-line button: ENROLLMENT / CLOSED
+// ARMING (status 2) — disabled 2-line button: ENROLLMENT / CLOSED
+const CTA_ARMING = {
   bg:     "assets/images/buttons/Button 2 lines wide.png",// ← replace with 2-line bg if you have one
   line1:  "assets/images/buttons/Enrollment text.png",    // ← set to your uploaded filename
   line2:  "assets/images/buttons/Closed text.png",        // ← set to your uploaded filename
@@ -1922,7 +1830,8 @@ const CTA_ARMING  = { // ARMING (status 2) — disabled 2-line button: ENROLLMEN
   gap:    4,                // vertical gap between lines
 };
 
-const CTA_ACTIVE  = { // ACTIVE (status 3) — BANK IT!
+// ACTIVE (status 3) — BANK IT!
+const CTA_ACTIVE = {
   bg:   "assets/images/buttons/Button extra wide.png",  // provided
   text: "assets/images/buttons/Bank it text.png", // provided
   btnW: 213, btnH: 50,     // consistent with other CTAs; PNG scales down nicely
@@ -1930,7 +1839,7 @@ const CTA_ACTIVE  = { // ACTIVE (status 3) — BANK IT!
   txtDy: -1,
 };
 
-// Actions:
+// #endregion
 
 async function  handleEnrollClick       (mission){
   const signer = getSigner?.();
@@ -2067,8 +1976,7 @@ async function  refreshStageCtaIfOpen(){
   } catch {}
 }
 
-// CTA router:
-
+// #region Render functions
 async function  renderStageCtaForStatus (mission) {
   const host = document.getElementById("stageCtaGroup");
   if (!host) return;
@@ -2091,8 +1999,6 @@ async function  renderStageCtaForStatus (mission) {
   if (st === 3) return renderCtaActive    (host, mission);  // Active → BANK IT!
   if (st === 4) return renderCtaPaused    (host, mission);  // Paused → Cooldown
 }
-
-// Per-status renderers:
 
 async function  renderCtaEnrolling      (host, mission)   {
   const { xCenter, topY } = CTA_LAYOUT;
@@ -2436,26 +2342,6 @@ function        renderCtaPaused         (host, mission)   {
   host.appendChild(bank);
 }
 
-async function flipStageToPausedOptimistic(mission){ // Flip the open stage to Paused immediately; reconcile from API afterwards
-  const gameMain = document.getElementById('gameMain');
-  if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
-
-  const m2 = { ...mission, status: 4 };     // Paused now (UI only)
-
-  setStageStatusImage(statusSlug(4));
-  buildStageLowerHudForStatus(m2);
-  await bindRingToMission(m2);
-  await bindCenterTimerToMission(m2);
-  renderStageCtaForStatus(m2);
-  await renderStageEndedPanelIfNeeded(m2);
-  stageCurrentStatus = 4;
-
-  // Pick up real pause_timestamp on the next API tick
-  refreshOpenStageFromServer(2);
-}
-
-// Round notice:
-
 function        renderRoundBankedNotice (roundNo, winner, amountWei) {
   const host = document.getElementById("stageNoticeGroup");
   if (!host) return;
@@ -2543,8 +2429,6 @@ function        renderRoundBankedNotice (roundNo, winner, amountWei) {
 
   host.appendChild(g);
 }
-
-// Ended panel:
 
 async function  renderStageEndedPanelIfNeeded(mission){
   const host = document.getElementById("stageEndedGroup");
@@ -2659,14 +2543,6 @@ async function  renderStageEndedPanelIfNeeded(mission){
   g.appendChild(link);
   host.appendChild(g);
 }
-
-// #endregion
-
-
-
-
-
-// #region Lists & detail screens
 
 function        renderAllMissions       (missions = []) {
   const ul = document.getElementById("allMissionsList");
@@ -3212,24 +3088,10 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
 
 // #endregion
 
-
-
-
-
-// #region Global listeners
-
 window.addEventListener("resize", layoutStage);
 
-// #endregion
 
-
-
-
-
-// #region Click handlers (nav)
-
-// Wallet:
-
+// #region click handlers
 connectBtn.addEventListener("click", () => {
   if (walletAddress){
     showConfirm("Disconnect current wallet?", disconnectWallet);
@@ -3237,8 +3099,6 @@ connectBtn.addEventListener("click", () => {
     connectWallet(); 
   }
 });
-
-// Tabs:
 
 btnAllMissions?.addEventListener("click", async () => {
   await cleanupMissionDetail();
@@ -3267,23 +3127,16 @@ btnMyMissions?.addEventListener("click", async () => {
     }
   }
 });
-
 // #endregion
-
-
-
-
-
-// #region Tickers
-
-// Detail countdown:
 
 let countdownTimer = null;
 function stopCountdown(){ if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }}
 
-// Joinable list:
-
+// Live ticker for Joinable list
 let joinableTimer = null;
+function stopJoinableTicker(){
+  if (joinableTimer) { clearInterval(joinableTimer); joinableTimer = null; }
+}
 
 function startJoinableTicker(){
   stopJoinableTicker();
@@ -3334,12 +3187,6 @@ function startJoinableTicker(){
   joinableTimer = setInterval(tick, 1000);
 }
 
-function stopJoinableTicker(){
-  if (joinableTimer) { clearInterval(joinableTimer); joinableTimer = null; }
-}
-
-// Realtime status hydrator for cards:
-
 async function hydrateAllMissionsRealtime(listEl){
   if (!listEl) return;
   const cards = [...listEl.querySelectorAll("li.mission-card")];
@@ -3380,14 +3227,9 @@ async function hydrateAllMissionsRealtime(listEl){
 
 }
 
-// #endregion
 
 
-
-
-
-// #region Interactions
-
+// #region Interactions */
 async function openMission(addr){
   try {
     currentMissionAddr = addr.toLowerCase();
@@ -3499,17 +3341,7 @@ async function triggerRoundCurrentMission(mission){
 
 // #endregion
 
-
-
-
-
-// #region Init & boot
-
-function updateConnectText(){
-  const span = document.getElementById("connectBtnText");
-  if (span) span.textContent = walletAddress ? shorten(walletAddress) : "Connect Wallet";
-}
-
+/* ---------- page init ---------- */
 async function init(){
   // 0) show list immediately
   showOnlySection("allMissionsSection");
@@ -3628,5 +3460,3 @@ if (document.readyState === "loading"){
     startHub();
     init();
 }
-
-// #endregion
