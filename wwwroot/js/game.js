@@ -333,7 +333,7 @@ function        missionErrorToText(name, args = []) {
     }
     case "WrongEntryFee": {
       const [expected, sent] = args;
-      return `Incorrect entry fee. Expected ${weiToCro(String(expected))} CRO, sent ${weiToCro(String(sent))} CRO.`;
+      return `Incorrect entry fee. Expected ${weiToCro(String(expected), 2)} CRO, sent ${weiToCro(String(sent), 2)} CRO.`;
     }
     case "AlreadyJoined":
       return "You already joined this mission.";
@@ -361,7 +361,7 @@ function        missionErrorToText(name, args = []) {
       return "All rounds have been completed.";
     case "PayoutFailed": {
       const [winner, amount] = args;
-      return `Payout failed (${weiToCro(String(amount))} CRO to ${winner}).`;
+      return `Payout failed (${weiToCro(String(amount), 2)} CRO to ${winner}).`;
     }
     case "ContractsNotAllowed":
       return "Contracts are not allowed to join this mission.";
@@ -1056,7 +1056,7 @@ async function  startHub() { // SignalR HUB
       dbg("RoundResult PUSH", { addr, round, winner, amountWei, currentMissionAddr, groups: Array.from(subscribedGroups) });
       const me  = (walletAddress || "").toLowerCase();
       const win = String(winner || "").toLowerCase();
-      const cro = weiToCro(String(amountWei));
+      const cro = weiToCro(String(amountWei), 2);
       if (win === me) {
         showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${round}!`, "success");
       } else {
@@ -1655,10 +1655,10 @@ const HUD = {
   pillFill:   "rgba(26,29,35,.8)",      // Background color
   pillStroke: "rgba(62,211,245,.35)",   // Stroke color
   font:       "system-ui,Segoe UI,Arial", // Font
-  fontSize:   13,                         // Font size
+  fontSize:   14,                         // Font size
   labelY:     21, // !!!!!!! Label center y. Correct if rectH is changed. labelY = LabelY - rectH diff / 2.
   valueY:     21, // !!!!!!! Value center y. Correct if rectH is changed. valueY = valueY - rectH diff / 2.
-  valueX:     130,                        // Value center x
+  valueX:     140,                        // Value center x
   rx:         12,                         // Radius (?) x
   ry:         12,                         // Radius (?) y
 };
@@ -1685,15 +1685,15 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
   missionStartAt: { label: "Start At",         value: m => m?.mission_start    ? formatLocalDateTime(m.mission_start)    : "—" },
   duration:       { label: "Duration",         value: m => (m?.mission_start && m?.mission_end)
                                                  ? formatDurationShort(Number(m.mission_end) - Number(m.mission_start)) : "—" },
-  fee:            { label: "Mission Fee",      value: m => (m && m.enrollment_amount_wei != null) ? `${weiToCro(m.enrollment_amount_wei)} CRO` : "—" },
-  poolStart:      { label: "Pool (start)",     value: m => (m && m.cro_start_wei    != null)      ? `${weiToCro(m.cro_start_wei)} CRO`    : "—" },
+  fee:            { label: "Mission Fee",      value: m => (m && m.enrollment_amount_wei != null) ? `${weiToCro(m.enrollment_amount_wei, 2)} CRO` : "—" },
+  poolStart:      { label: "Pool (start)",     value: m => (m && m.cro_start_wei    != null)      ? `${weiToCro(m.cro_start_wei, 2)} CRO`    : "—" },
   poolCurrent:    { label: "Pool (current)",   value: m => {
-    if (m?.cro_current_wei != null) return `${weiToCro(m.cro_current_wei)} CRO`;
+    if (m?.cro_current_wei != null) return `${weiToCro(m.cro_current_wei, 2)} CRO`;
     if (Number(m?.status) === 1 && Array.isArray(m?.enrollments) && m?.cro_start_wei != null && m?.enrollment_amount_wei != null){
       const startWei = BigInt(String(m.cro_start_wei || "0"));
       const feeWei   = BigInt(String(m.enrollment_amount_wei || "0"));
       const joined   = BigInt(m.enrollments.length || 0);
-      return `${weiToCro((startWei + feeWei * joined).toString())} CRO`;
+      return `${weiToCro((startWei + feeWei * joined).toString(), 2)} CRO`;
     }
     return "—";
   }},
@@ -2084,7 +2084,7 @@ async function  handleBankItClick(mission){
       const me = (await signer.getAddress()).toLowerCase();
       const missionLc = String(mission.mission_address || "").toLowerCase();
       const res = await waitForMyRoundWin(me, missionLc, 25000);
-      const cro = weiToCro(String(res.amountWei));
+      const cro = weiToCro(String(res.amountWei), 2);
       showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${res.round}!`, "success");
     } catch {
       // no win / no push within the window → keep the generic info alert
@@ -2862,7 +2862,7 @@ function        renderAllMissions       (missions = []) {
 
     const duration   = Number(m.mission_duration ?? ((m.mission_start && m.mission_end) ? (m.mission_end - m.mission_start) : 0));
     const feeWei     = (m.mission_fee ?? m.enrollment_amount_wei ?? 0);
-    const feeCro     = weiToCro(String(feeWei));
+    const feeCro     = weiToCro(String(feeWei), 2);
 
     const playersPct = maxPlayers > 0 ? Math.min(100, Math.round((curPlayers / maxPlayers) * 100)) : 0;
 
@@ -2939,7 +2939,7 @@ function        renderJoinable          (items){
     const startTs = m.mission_start ?? 0;
     const enrollEndTs = m.enrollment_end ?? 0;
 
-    const feeCro  = weiToCro(m.enrollment_amount_wei);
+    const feeCro  = weiToCro(m.enrollment_amount_wei, 2);
     const joined  = Array.isArray(m.enrollments) ? m.enrollments.length : 0;
     const max     = Number(m.enrollment_max_players ?? 0);
     const minReq  = Number(m.enrollment_min_players ?? 0);
@@ -3186,10 +3186,10 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
           <div class="value">${mission.round_count}/${mission.mission_rounds_total}</div>
 
           <div class="label">Mission Fee</div>
-          <div class="value">${weiToCro(mission.enrollment_amount_wei)} CRO</div>
+          <div class="value">${weiToCro(mission.enrollment_amount_wei, 2)} CRO</div>
 
           <div class="label">Prize pool</div>
-          <div class="value">${weiToCro(mission.cro_start_wei)} CRO</div>
+          <div class="value">${weiToCro(mission.cro_start_wei, 2)} CRO</div>
 
           <div class="label">Enrollment Start</div>
           <div class="value">
@@ -3309,7 +3309,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
     const addr = (e.player_address || "");
     const wwei = winTotals.get(addr.toLowerCase()) || 0n;
     const won  = wwei > 0n;
-    const wonLabel = won ? `${weiToCro(String(wwei))} CRO` : "";
+    const wonLabel = won ? `${weiToCro(String(wwei), 2)} CRO` : "";
 
     const li = document.createElement("li");
     li.className = "view-card mb-2";
