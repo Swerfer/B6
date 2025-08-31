@@ -39,7 +39,7 @@ import {
 
 
 // #region Config, int.face&DOM
-const MISSION_ERROR_ABI = [
+const MISSION_ERROR_ABI   = [
   "error EnrollmentNotStarted(uint256 nowTs, uint256 startTs)",
   "error EnrollmentClosed(uint256 nowTs, uint256 endTs)",
   "error MaxPlayers(uint8 maxPlayers)",
@@ -56,8 +56,8 @@ const MISSION_ERROR_ABI = [
   "error PayoutFailed(address winner, uint256 amount, bytes data)",
   "error ContractsNotAllowed()",
 ];
-const __missionErrIface = new ethers.utils.Interface(MISSION_ERROR_ABI);
-const __mcIface = new ethers.utils.Interface([
+const __missionErrIface   = new ethers.utils.Interface(MISSION_ERROR_ABI);
+const __mcIface           = new ethers.utils.Interface([
   "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)"
 ]);
 const connectBtn          = document.getElementById("connectWalletBtn");
@@ -89,6 +89,7 @@ let   stageCurrentStatus    = null;
 let   stageReturnTo         = null;   // "stage" when we navigated from stage → detail
 let   stageRefreshTimer     = null;
 let   stageRefreshBusy      = false;
+const __endPopupShown       = new Set();
 // All missions cache & filters:
 let   __allMissionsCache    = [];     // last fetched list (raw objects)
 let   __allFilterOpen       = false;
@@ -133,7 +134,7 @@ window.debugPing = (addr) => fetch(`/api/debug/push/${(addr||window.currentMissi
 
 // Bucketing/sort/filter:
 
-function bucketOfStatus(s){ // Group order: Active bucket (2/3/4), then Enrolling(1), Pending(0), Ended(5/6/7)
+function        bucketOfStatus(s){ // Group order: Active bucket (2/3/4), then Enrolling(1), Pending(0), Ended(5/6/7)
   s = Number(s);
   if (s === 1)  return 1; // Enrolling
   if (s === 0)  return 2; // Pending
@@ -141,7 +142,7 @@ function bucketOfStatus(s){ // Group order: Active bucket (2/3/4), then Enrollin
                 return 0; // Active bucket: 2 (Arming), 3 (Active), 4 (Paused)
 }
 
-function sortAllMissions(list){
+function        sortAllMissions(list){
   return list.slice().sort((a, b) => {
     const sa = Number(a.status), sb = Number(b.status);
     const ba = bucketOfStatus(sa), bb = bucketOfStatus(sb);
@@ -168,7 +169,7 @@ function sortAllMissions(list){
   });
 }
 
-function applyAllMissionFiltersAndRender(){
+function        applyAllMissionFiltersAndRender(){
   let list = __allMissionsCache || [];
   // selection → Set of explicit statuses; Active includes 2/3/4
   if (__allSelected instanceof Set){
@@ -184,7 +185,7 @@ function applyAllMissionFiltersAndRender(){
   hydrateAllMissionsRealtime(els.allMissionsList);
 }
 
-function buildAllFiltersUI(){
+function        buildAllFiltersUI(){
   const host = document.getElementById("allFilters");
   const btn  = document.getElementById("filterAllBtn");
   if (!host || !btn) return;
@@ -238,7 +239,7 @@ function buildAllFiltersUI(){
 
 // Promises/local storage:
 
-function withTimeout(promise, ms = 12000){
+function        withTimeout(promise, ms = 12000){
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("timeout")), ms);
     promise.then(
@@ -248,7 +249,7 @@ function withTimeout(promise, ms = 12000){
   });
 }
 
-function joinedCacheHas(addr, me){
+function        joinedCacheHas(addr, me){
   try {
     const k = (addr||"").toLowerCase();
     const meL = (me||"").toLowerCase();
@@ -258,7 +259,7 @@ function joinedCacheHas(addr, me){
   } catch { return false; }
 }
 
-function joinedCacheAdd(addr, me){
+function        joinedCacheAdd(addr, me){
   try {
     const k = (addr||"").toLowerCase();
     const meL = (me||"").toLowerCase();
@@ -273,15 +274,13 @@ function joinedCacheAdd(addr, me){
 
 // Enrichment:
 
-function enrichMissionFromApi(data){
+function        enrichMissionFromApi(data){
   const m = data?.mission || data || {};
   if (data && Array.isArray(data.enrollments)) m.enrollments = data.enrollments;
   if (data && Array.isArray(data.rounds))      m.rounds      = data.rounds;
 
   // Fallbacks so HUD pills show live values even if API hasn’t denormalized yet
   if (Array.isArray(m.enrollments)) {
-    // Players: use enrollments length when the numeric field is missing/stale
-    if (m.enrolled_players == null) m.enrolled_players = m.enrollments.length;
 
     // Pool (current) during Enrolling: start + fee * joined (no payouts yet)
     if (Number(m.status) === 1 &&
@@ -299,7 +298,7 @@ function enrichMissionFromApi(data){
 
 // Mission error decoding:
 
-function isCooldownError(err){
+function        isCooldownError(err){
   const hex =
     err?.error?.data ||
     err?.data?.originalError?.data ||
@@ -315,7 +314,7 @@ function isCooldownError(err){
   } catch { return false; }
 }
 
-function missionErrorToText(name, args = []) {
+function        missionErrorToText(name, args = []) {
   switch (name) {
     case "EnrollmentNotStarted": {
       const [nowTs, startTs] = args.map(a => Number(a));
@@ -367,7 +366,7 @@ function missionErrorToText(name, args = []) {
   }
 }
 
-function __revertHex(err) { // extract revert data from common provider error shapes
+function        __revertHex(err) { // extract revert data from common provider error shapes
   return (
     err?.error?.data ||
     err?.data?.originalError?.data ||
@@ -376,7 +375,7 @@ function __revertHex(err) { // extract revert data from common provider error sh
   );
 }
 
-function missionCustomErrorMessage(err) { // decode a Mission custom error if present; otherwise return null
+function        missionCustomErrorMessage(err) { // decode a Mission custom error if present; otherwise return null
   const hex = __revertHex(err);
   if (!hex || typeof hex !== "string" || !hex.startsWith("0x")) return null;
 
@@ -395,7 +394,7 @@ function missionCustomErrorMessage(err) { // decode a Mission custom error if pr
 
 // Section switcher:
 
-function showOnlySection(sectionId) {
+function        showOnlySection(sectionId) {
   sectionBoxes.forEach(sec => {
     sec.style.display = (sec.id === sectionId) ? "" : "none";
   });
@@ -410,7 +409,7 @@ function showOnlySection(sectionId) {
 
 // Cleanup:
 
-async function cleanupMissionDetail(){
+async function  cleanupMissionDetail(){
   stopCountdown();
   stopStageTimer();
   unbindRing();
@@ -429,7 +428,7 @@ async function cleanupMissionDetail(){
 
 // Status→slug:
 
-function statusSlug(s){
+function        statusSlug(s){
   switch (Number(s)) {
     case 0: return "pending";
     case 1: return "enrolling";
@@ -444,7 +443,7 @@ function statusSlug(s){
 
 // Round helpers:
 
-function waitForMyRoundWin(meAddrLc, missionAddrLc, timeoutMs = 25000){
+function        waitForMyRoundWin(meAddrLc, missionAddrLc, timeoutMs = 25000){
   return new Promise((resolve, reject) => {
     if (!hubConnection) { reject(new Error("hub not started")); return; }
 
@@ -469,7 +468,7 @@ function waitForMyRoundWin(meAddrLc, missionAddrLc, timeoutMs = 25000){
   });
 }
 
-function getLastBankTs(mission, rounds){
+function        getLastBankTs(mission, rounds){
   const t0 = Number(mission?.mission_start || 0);
   let last = t0;
   if (Array.isArray(rounds)) {
@@ -481,7 +480,7 @@ function getLastBankTs(mission, rounds){
   return last;
 }
 
-function computeBankNowWei(mission, lastBankTs, now = Math.floor(Date.now() / 1000)) {
+function        computeBankNowWei(mission, lastBankTs, now = Math.floor(Date.now() / 1000)) {
   const st = Number(mission?.status);
   if (st !== 3 && st !== 4) return "0"; // Only accrues while Active or Paused
 
@@ -505,7 +504,7 @@ function computeBankNowWei(mission, lastBankTs, now = Math.floor(Date.now() / 10
   }
 }
 
-function cooldownInfo(mission, now = Math.floor(Date.now()/1000)){
+function        cooldownInfo(mission, now = Math.floor(Date.now()/1000)){
   const st          = Number(mission?.status);
   const isPaused    = (st === 4);
   const roundsTotal = Number(mission?.mission_rounds_total ?? mission?.mission_rounds ?? 0);
@@ -517,7 +516,7 @@ function cooldownInfo(mission, now = Math.floor(Date.now()/1000)){
   return { isPaused, secsTotal, secsLeft, pauseEnd };
 }
 
-function formatMMSS(s){
+function        formatMMSS(s){
   s = Math.max(0, Math.floor(Number(s)||0));
   const m = Math.floor(s/60), sec = s % 60;
   return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
@@ -525,7 +524,7 @@ function formatMMSS(s){
 
 // Chain timestamp:
 
-async function getMissionCreationTs(mission){ // Used for circle timer if mission creation is used for start time timer.
+async function  getMissionCreationTs(mission){ // Used for circle timer if mission creation is used for start time timer.
   const inline = Number(mission.mission_created ?? 0);
   if (inline > 0) return inline;           // skip log scan when API provides it
   const addr = mission.mission_address;
@@ -583,7 +582,7 @@ async function getMissionCreationTs(mission){ // Used for circle timer if missio
 
 // Winners/Failure:
 
-function topWinners(enrollments = [], rounds = [], n = 5){
+function        topWinners(enrollments = [], rounds = [], n = 5){
   // Totals by address (BigInt)
   const totals = new Map();
   for (const r of (rounds || [])){
@@ -614,10 +613,13 @@ function topWinners(enrollments = [], rounds = [], n = 5){
   return arr.slice(0, n);
 }
 
-function failureReasonFor(mission){
+function        failureReasonFor(mission){
   if (Number(mission?.status) !== 7) return null;
   const min   = Number(mission?.enrollment_min_players ?? 0);
-  const joined= Number(mission?.enrolled_players       ?? 0);
+  const joined = Math.max(
+    Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0,
+    Number(__lastChainPlayers || 0)
+  );
   const rounds= Number(mission?.round_count            ?? 0);
 
   // Your two failure modes:
@@ -639,18 +641,18 @@ function failureReasonFor(mission){
 
 // Statusimage:
 
-function setStageStatusImage(slug){ /* Load + size the status word image and center it under the title */
+function        setStageStatusImage(slug){ /* Load + size the status word image and center it under the title */
   if (!stageStatusImgSvg || !slug) return;
   stageStatusImgSvg.setAttribute("href", `assets/images/statuses/${slug}.png`);
 }
 
 // Center timer core:
 
-function stopStageTimer(){ 
+function        stopStageTimer(){ 
   if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } 
 }
 
-function formatStageShort(leftSec){
+function        formatStageShort(leftSec){
   const s = Math.max(0, Math.floor(leftSec));
   if (s > 36*3600) return Math.round(s/86400) + "D";   // > 36h → days
   if (s > 90*60)   return Math.round(s/3600)  + "H";   // > 90m → hours
@@ -658,7 +660,7 @@ function formatStageShort(leftSec){
   return s + "S";                                      // ≤ 90s → seconds
 }
 
-function stageUnitFor(leftSec){ // Unit classifier used by the center text and the ring "reset" windows
+function        stageUnitFor(leftSec){ // Unit classifier used by the center text and the ring "reset" windows
   const s = Math.max(0, Math.floor(leftSec));
   if (s > 36*3600) return "d";
   if (s > 90*60)   return "h";
@@ -666,7 +668,7 @@ function stageUnitFor(leftSec){ // Unit classifier used by the center text and t
   return "s";
 }
 
-function ringWindowForUnit(unit, phaseStart, endTs){
+function        ringWindowForUnit(unit, phaseStart, endTs){
   if (!endTs) return [0,0];
 
   const now = Math.floor(Date.now()/1000);
@@ -698,7 +700,7 @@ function ringWindowForUnit(unit, phaseStart, endTs){
   return [now, endTs];
 }
 
-async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
+async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
   stopStageTimer();
   const node = document.getElementById("vaultTimerText");
   if (!node || !endTs) { if (node) node.textContent = ""; return; }
@@ -817,6 +819,7 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
             await bindCenterTimerToMission(m2);
             renderStageCtaForStatus(m2);
             await renderStageEndedPanelIfNeeded(m2);
+            await maybeShowMissionEndPopup(m2);
             stageCurrentStatus = next;
           }
         }
@@ -834,7 +837,7 @@ async function startStageTimer(endTs, phaseStartTs = 0, missionObj){
 
 // Deadline routing:
 
-function nextDeadlineFor(m){ // Choose the deadline shown in the vault center per status
+function        nextDeadlineFor(m){ // Choose the deadline shown in the vault center per status
   if (!m) return 0;
   const st = Number(m.status);
   if (st === 0) return Number(m.enrollment_start || m.mission_start || 0); // Pending
@@ -844,13 +847,17 @@ function nextDeadlineFor(m){ // Choose the deadline shown in the vault center pe
   return 0; // Ended variants – no countdown in center
 }
 
-function statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute the status purely from immutable times (front-end flip)
+function        statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute the status purely from immutable times (front-end flip)
   const es = Number(m.enrollment_start || 0);
   const ee = Number(m.enrollment_end   || 0);
   const ms = Number(m.mission_start    || 0);
   const me = Number(m.mission_end      || 0);
 
-  const cur = Number(m.enrolled_players ?? 0);
+  const cur = Math.max(
+    Array.isArray(m.enrollments) ? m.enrollments.length : 0,
+    Number(__lastChainPlayers || 0),
+    Number(optimisticGuard?.players || 0)
+  );
   const min = Number(m.enrollment_min_players ?? 0);
 
   if (now < es) return 0;                                              // Pending
@@ -860,7 +867,7 @@ function statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute the st
   return (m.status >= 5 ? m.status : 6);                               // Ended bucket (keep subtype if present)
 }
 
-async function bindCenterTimerToMission(mission){
+async function  bindCenterTimerToMission(mission){
   const endTs = nextDeadlineFor(mission);
   const startTs = Math.floor(Date.now()/1000);    // start windows from NOW
 
@@ -888,11 +895,11 @@ async function bindCenterTimerToMission(mission){
 
 // Ring overlay:
 
-function unbindRing(){
+function        unbindRing(){
   if (ringTimer){ clearInterval(ringTimer); ringTimer = null; }
 }
 
-function setRingProgress(pct){
+function        setRingProgress(pct){
   // pct: 0..100 revealed (0 = all covered, 100 = fully blue)
   const cover = document.getElementById("ringCover");
   if (!cover) return;
@@ -907,7 +914,7 @@ function setRingProgress(pct){
   cover.setAttribute("stroke-dashoffset", String(coverLen)); // clockwise
 }
 
-function bindRingToWindow(startSec, endSec, tickMs = 1000){
+function        bindRingToWindow(startSec, endSec, tickMs = 1000){
   unbindRing();
   const cover = document.getElementById("ringCover");
   if (!cover) return;
@@ -927,7 +934,7 @@ function bindRingToWindow(startSec, endSec, tickMs = 1000){
   ringTimer = setInterval(tick, Math.max(16, tickMs)); // clamp to ~60fps minimum spacing
 }
 
-async function bindRingToMission(m){ /* Map mission.status to the correct time window */
+async function  bindRingToMission(m){ /* Map mission.status to the correct time window */
   const st = Number(m?.status ?? -1);
   const now = Math.floor(Date.now()/1000);
   let   E   = 0;
@@ -989,14 +996,14 @@ async function bindRingToMission(m){ /* Map mission.status to the correct time w
 
 // Page scroll lock:
 
-function lockScroll(){
+function        lockScroll(){
   const y = window.scrollY || document.documentElement.scrollTop || 0;
   document.documentElement.classList.add("scroll-lock");
   document.body.classList.add("scroll-lock");
   document.body.style.setProperty("--lock-top", `-${y}px`);
 }
 
-function unlockScroll(){
+function        unlockScroll(){
   const top = parseInt(getComputedStyle(document.body).getPropertyValue("--lock-top")) || 0;
   document.documentElement.classList.remove("scroll-lock");
   document.body.classList.remove("scroll-lock");
@@ -1013,7 +1020,7 @@ function unlockScroll(){
 
 // #region SignalR hub&handlers
 
-function stateName(s){
+function        stateName(s){
   const H = signalR.HubConnectionState;
   return  s === H.Connected     ? "Connected"
         : s === H.Disconnected  ? "Disconnected"
@@ -1024,7 +1031,7 @@ function stateName(s){
 
 window.stateName = stateName; // Temp for debugging
 
-async function startHub() { // SignalR HUB
+async function  startHub() { // SignalR HUB
   if (!window.signalR) { showAlert("SignalR client script not found.", "error"); return; }
 
   if (!hubConnection) {
@@ -1115,6 +1122,8 @@ async function startHub() { // SignalR HUB
         renderStageCtaForStatus(mLocal);
         await renderStageEndedPanelIfNeeded(mLocal);
         stageCurrentStatus = target;
+
+        await maybeShowMissionEndPopup(mLocal);
 
         if (target === 1 || target === 2) {
           await rehydratePillsFromChain(mLocal, "statusChanged");
@@ -1228,18 +1237,31 @@ async function startHub() { // SignalR HUB
   }
 }
 
-async function safeSubscribe(){
+async function  safeSubscribe(){
   const H = signalR.HubConnectionState;
   if (hubConnection?.state !== H.Connected) return;
-  if (!currentMissionAddr) {
-        return;
-      }
-  try {
-    await hubConnection.invoke("SubscribeMission", currentMissionAddr);
-    subscribedAddr = currentMissionAddr;
-  } catch (err) {
-    console.error("SubscribeMission failed:", err);
+
+  // Need an address to follow
+  const lc = String(currentMissionAddr || "").toLowerCase();
+  if (!lc) return;
+
+  // Also compute checksum; both may be used server-side for group names
+  let ck = null;
+  try { ck = ethers.utils.getAddress(lc); } catch { /* ignore */ }
+
+  // Subscribe to any missing groups (no unsubscribe here)
+  for (const g of [lc, ck]) {
+    if (!g || subscribedGroups.has(g)) continue;
+    try {
+      await hubConnection.invoke("SubscribeMission", g);
+      subscribedGroups.add(g);
+      dbg("Subscribed group:", g);
+    } catch (err) {
+      console.error("SubscribeMission failed:", g, err);
+    }
   }
+
+  subscribedAddr = lc;
 }
 
 window.hubState = () => {
@@ -1260,14 +1282,14 @@ window.hubState = () => {
 
 // #region Details auto-refresh
 
-function clearDetailRefresh(){          
+function        clearDetailRefresh(){          
   if (detailRefreshTimer) { 
     clearTimeout(detailRefreshTimer); 
     detailRefreshTimer = null; 
   }
 }
 
-function scheduleDetailRefresh(reset=false){ 
+function        scheduleDetailRefresh(reset=false){ 
   if (els.missionDetail.style.display === "none" || !currentMissionAddr) {
         return;
       }
@@ -1303,7 +1325,7 @@ function scheduleDetailRefresh(reset=false){
 
 // #region API wrappers
 
-async function fetchAndRenderAllMissions(){
+async function  fetchAndRenderAllMissions(){
   try {
     // 1) Factory call (chain): get the full mission index
     const provider = getReadProvider();
@@ -1354,19 +1376,19 @@ async function fetchAndRenderAllMissions(){
   }
 }
 
-async function apiJoinable(){
+async function  apiJoinable(){
   const r = await fetch("/api/missions/joinable", { cache: "no-store" });
   if (!r.ok) throw new Error("/api/missions/joinable failed");
   return r.json();
 }
 
-async function apiPlayerMissions(addr){
+async function  apiPlayerMissions(addr){
   const r = await fetch(`/api/missions/player/${addr}`, { cache: "no-store" });
   if (!r.ok) throw new Error("/api/missions/player failed");
   return r.json();
 }
 
-async function apiMission(addr){
+async function  apiMission(addr){
   const r = await fetch(`/api/missions/mission/${addr}`, { cache: "no-store" });
   if (!r.ok) throw new Error("/api/missions/mission failed");
   return r.json();
@@ -1380,7 +1402,7 @@ async function apiMission(addr){
 
 // #region Reconciliation (stage)
 
-async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
+async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
 
@@ -1402,12 +1424,9 @@ async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
     // Merge optimism for a short window so API can't regress the UI
     if (Date.now() < (optimisticGuard?.untilMs || 0)) {
       try {
-        const apiPlayers = Number(m.enrolled_players || (Array.isArray(m.enrollments) ? m.enrollments.length : 0) || 0);
         const apiCro     = BigInt(String(m.cro_current_wei || m.cro_start_wei || "0"));
-        const optPlayers = Number(optimisticGuard.players || 0);
         const optCro     = BigInt(String(optimisticGuard.croNow || "0"));
 
-        if (optPlayers > apiPlayers) m.enrolled_players = optPlayers;
         if (optCro     > apiCro)     m.cro_current_wei  = optCro.toString();
       } catch {}
     }
@@ -1429,7 +1448,7 @@ async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
       buildStageLowerHudForStatus(m);
     }
 
-    dbg("refreshOpenStageFromServer", { newStatus, stageCurrentStatus, retries });
+    //dbg("refreshOpenStageFromServer", { newStatus, stageCurrentStatus, retries });
 
     if (newStatus !== stageCurrentStatus) {
       setStageStatusImage(statusSlug(m.status));
@@ -1439,6 +1458,8 @@ async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
       await renderStageEndedPanelIfNeeded(m);
       stageCurrentStatus = newStatus;
       dbg("refreshOpenStageFromServer APPLIED status", { stageCurrentStatus });
+
+      await maybeShowMissionEndPopup(m);
 
       // one gentle reconcile after DB denorms settle
       scheduleRetry(Math.min(retries, 1));
@@ -1453,7 +1474,7 @@ async function refreshOpenStageFromServer(retries = 3, delay = 1600) {
   }
 }
 
-function smartReconcile(reason = "smart") { // Lightweight reconcile when we suspect a missed push or transport hiccup
+function        smartReconcile(reason = "smart") { // Lightweight reconcile when we suspect a missed push or transport hiccup
   try {
     const gameMain = document.getElementById('gameMain');
     if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
@@ -1523,7 +1544,7 @@ const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg" );
 
 // #region Stage entry
 
-async function showGameStage(missionRaw){
+async function  showGameStage(missionRaw){
   const mission = enrichMissionFromApi({ mission: missionRaw, enrollments: missionRaw.enrollments, rounds: missionRaw.rounds });
   document.getElementById('gameMain').classList.add('stage-mode');
   showOnlySection("gameStage");
@@ -1557,8 +1578,6 @@ async function showGameStage(missionRaw){
 
   // CTA (status 1 → JOIN MISSION)
   renderStageCtaForStatus(mission);
-
-  setTimeout(() => { refreshStageCtaIfOpen().catch(()=>{}); }, 800);
 
   await renderStageEndedPanelIfNeeded(mission);
 
@@ -1640,6 +1659,19 @@ const HUD = {
   ry:         12,                         // Radius (?) y
 };
 
+// Helper used by pill library (single source)
+function        playersAllStatsParts(m){
+  const min    = Number(m?.enrollment_min_players ?? 0);
+  const joined = Math.max(
+    Array.isArray(m?.enrollments) ? m.enrollments.length : 0,
+    Number(__lastChainPlayers || 0),
+    Number(optimisticGuard?.players || 0)
+  );
+  const max    = (m?.enrollment_max_players == null) ? "—" : String(m.enrollment_max_players);
+  const color  = joined >= min ? "var(--success)" : "var(--error)";
+  return { min, joined, max, color };
+}
+
 // Pill data:
 
 const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
@@ -1662,10 +1694,36 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
     return "—";
   }},
   playersCap:     { label: "Players cap",      value: m => (m?.enrollment_max_players ?? "—") },
-  players:        { label: "Players",          value: m => Number(m?.enrolled_players ?? (Array.isArray(m?.enrollments) ? m.enrollments.length : 0)) },     
+  players: { label: "Players",                 value: m => Math.max(
+    Array.isArray(m?.enrollments) ? m.enrollments.length : 0,
+    Number(__lastChainPlayers || 0),
+    Number(optimisticGuard?.players || 0)
+  )},
   rounds:         { label: "Rounds",           value: m => Number(m?.mission_rounds_total ?? 0) },
   roundsOff:      { label: "Rounds",           value: m => `${Number(m?.round_count ?? 0)}/${Number(m?.mission_rounds_total ?? 0)}` },
-  playersAllStats:{ label: "Players",          value: m => `${m?.enrollment_min_players ?? "—"}/${Number(m?.enrolled_players ?? (Array.isArray(m?.enrollments) ? m.enrollments.length : 0))}/${m?.enrollment_max_players ?? "—"}`},
+  playersAllStats: {label: "Players",          value: m => {
+    const { min, joined, max } = playersAllStatsParts(m);
+      return `${joined} (Min ${min}/Max ${max})`;
+    },
+    // SVG renderer used by the stage HUD
+    renderSvg: (valNode, m) => {
+      const { min, joined, max, color } = playersAllStatsParts(m);
+      const tCur = document.createElementNS(SVG_NS, "tspan");
+      tCur.textContent = String(joined);
+      tCur.setAttribute("style", `fill:${color}`);
+
+      const tMin = document.createElementNS(SVG_NS, "tspan");
+      tMin.textContent = ` (Min ${min}`;
+
+      const tMax = document.createElementNS(SVG_NS, "tspan");
+      tMax.textContent = `/Max ${max})`;
+
+      valNode.textContent = "";
+      valNode.appendChild(tCur);
+      valNode.appendChild(tMin);
+      valNode.appendChild(tMax);
+    }
+  },
   closesIn:       { label: "Closes In",        countdown: m => Number(m?.enrollment_end  || 0) },
   startsIn:       { label: "Starts In",        countdown: m => Number(m?.mission_start   || 0) },
   endsIn:         { label: "Ends In",          countdown: m => Number(m?.mission_end     || 0) },
@@ -1682,7 +1740,7 @@ const PILL_SETS = { // Which pills to show per status (0..7) — only using fiel
 
 // Pills refresher:
 
-async function rehydratePillsFromChain(missionOverride = null, why = "") {
+async function  rehydratePillsFromChain(missionOverride = null, why = "") {
   try {
     if (!currentMissionAddr) return;
 
@@ -1720,9 +1778,16 @@ async function rehydratePillsFromChain(missionOverride = null, why = "") {
     } catch { /* ignore BigInt issues */ }
 
     // 4) Paint
+    const snapStatus = Number(mSnap?.status ?? -1);
+    const curStatus  = Number(stageCurrentStatus ?? -1);
+    const toggle34   = (snapStatus === 3 && curStatus === 4) || (snapStatus === 4 && curStatus === 3);
+
+    // Use the higher of (API snapshot, current stage), except allow 3↔4 either way.
+    const effectiveStatus = (curStatus >= 0 && snapStatus < curStatus && !toggle34) ? curStatus : snapStatus;
+
     buildStageLowerHudForStatus({
       ...mSnap,
-      enrolled_players: playersCnt,
+      status:           effectiveStatus,
       cro_current_wei:  croNow
     });
 
@@ -1739,18 +1804,14 @@ async function rehydratePillsFromChain(missionOverride = null, why = "") {
 function        applyChainNoRegress(m){
   try {
     const st = Number(m?.status);
-    if (st === 1 || st === 2) { // Enrolling or Arming
-      const apiPlayers = Number(m?.enrolled_players ?? (Array.isArray(m?.enrollments) ? m.enrollments.length : 0) ?? 0);
-      const apiCro     = BigInt(String(m?.cro_current_wei ?? m?.cro_start_wei ?? "0"));
-      const chainPlayers = Number(__lastChainPlayers || 0);
-      const chainCro     = BigInt(String(__lastChainCroWei || "0"));
-
-      const merged = { ...m };
-      if (chainPlayers > apiPlayers) merged.enrolled_players = chainPlayers;
-      if (chainCro > apiCro)         merged.cro_current_wei  = chainCro.toString();
+    if (st === 1 || st === 2) {
+      const apiCro   = BigInt(String(m?.cro_current_wei ?? m?.cro_start_wei ?? "0"));
+      const chainCro = BigInt(String(__lastChainCroWei || "0"));
+      const merged   = { ...m };
+      if (chainCro > apiCro) merged.cro_current_wei = chainCro.toString();
       return merged;
     }
-  } catch { /* noop */ }
+  } catch {}
   return m;
 }
 
@@ -1762,7 +1823,6 @@ function        buildStageLowerHudForStatus(mission){ // Build (and fill) the pi
   while (host.firstChild) host.removeChild(host.firstChild);
 
   const safe = applyChainNoRegress(mission);
-
   const keys = PILL_SETS[hudStatusFor(safe)] ?? PILL_SETS.default;
 
   // layout helpers
@@ -1829,31 +1889,9 @@ function        buildStageLowerHudForStatus(mission){ // Build (and fill) the pi
       } else {
         val.textContent = "—";
       }
-    } else if (p.key === "playersAllStats") {
-      // min / joined / max with colored "joined"
-      const min = Number(safe?.enrollment_min_players ?? 0);
-      const cur = Number(safe?.enrolled_players ?? 0);
-      const maxRaw = safe?.enrollment_max_players;
-      const max = (maxRaw == null) ? "—" : String(maxRaw);
-
-      const tMin = document.createElementNS(SVG_NS, "tspan");
-      tMin.textContent = ` (Min ${min}`;
-
-      const tCur = document.createElementNS(SVG_NS, "tspan");
-      tCur.textContent = String(cur);
-      // color by threshold (uses your CSS vars from core.css)
-      const color = cur >= min ? "var(--success)" : "var(--error)";
-      tCur.setAttribute("style", `fill:${color}`);   // use CSS var
-      // tCur.setAttribute("fill", color);           // (extra-safe duplicate if you want)
-
-      const tMax = document.createElementNS(SVG_NS, "tspan");
-      tMax.textContent = `/Max ${max})`;
-
-      // build the value as tspans
-      val.textContent = "";
-      val.appendChild(tCur);
-      val.appendChild(tMin);
-      val.appendChild(tMax);
+    } else if (typeof def.renderSvg === "function") {
+      // Let the pill define its own SVG rendering (single source)
+      def.renderSvg(val, safe);
     } else {
       val.textContent = def.value ? def.value(safe) : "—";
     }
@@ -1886,6 +1924,11 @@ function        uiStatusFor(mission){ // Use "Active" (3) when simulating during
 // HUD status shim:
 function        hudStatusFor(mission){
   const st = Number(mission?.status ?? -1);
+  const cur = Number(stageCurrentStatus ?? -1);
+  const toggle34 = (st === 3 && cur === 4) || (st === 4 && cur === 3);
+
+  // Never let pills go “backwards” below the visible stage, except allow 3↔4.
+  if (cur >= 0 && st < cur && !toggle34) return cur;
   return st;
 }
 
@@ -1965,23 +2008,32 @@ async function  handleEnrollClick       (mission){
     try {
       const feeWei = String(mission.enrollment_amount_wei || "0");
 
-      // remember optimistic values for the next couple seconds
+      // base before-join count (array if present, or last chain truth)
+      const beforeJoined = Math.max(
+        Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0,
+        Number(__lastChainPlayers || 0)
+      );
+
+      // remember optimistic values (longer window so DB/indexer can catch up)
       optimisticGuard = {
-        untilMs: Date.now() + 4000,                              // 4s guard window
-        players: Number(mission.enrolled_players || 0) + 1,
+        untilMs: Date.now() + 15000, // 15s guard window
+        players: beforeJoined + 1,
         croNow:  (BigInt(mission.cro_current_wei || mission.cro_start_wei || "0") + BigInt(feeWei)).toString()
       };
 
+      // paint immediately
       const m2 = {
         ...mission,
-        enrolled_players: optimisticGuard.players,
-        // NOTE: do NOT bump cro_start_wei (start pool is fixed)
-        cro_current_wei:  optimisticGuard.croNow,
+        cro_current_wei: optimisticGuard.croNow,
       };
-
       buildStageLowerHudForStatus(m2);
       renderStageCtaForStatus(m2);
-    } catch { /* no-op */ }
+
+      // also kick a chain rehydrate to set __lastChainPlayers quickly
+      rehydratePillsFromChain(mission, "joined:post-tx").catch(()=>{});
+    } catch (e) {
+      console.warn("[CTA/JOIN] optimistic paint failed:", e?.message || e);
+    }
 
     // Let indexer catch up, then reconcile (no await, slight delay)
     setTimeout(() => { refreshOpenStageFromServer(2).catch(()=>{}); }, 1200);
@@ -2010,7 +2062,7 @@ async function  handleEnrollClick       (mission){
 
 }
 
-async function handleBankItClick(mission){
+async function  handleBankItClick(mission){
   const signer = getSigner?.();
   if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
 
@@ -2436,7 +2488,7 @@ function        renderCtaPaused         (host, mission)   {
   host.appendChild(bank);
 }
 
-async function flipStageToPausedOptimistic(mission){ // Flip the open stage to Paused immediately; reconcile from API afterwards
+async function  flipStageToPausedOptimistic(mission){ // Flip the open stage to Paused immediately; reconcile from API afterwards
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
 
@@ -2542,6 +2594,72 @@ function        renderRoundBankedNotice (roundNo, winner, amountWei) {
   g.appendChild(tClose);
 
   host.appendChild(g);
+}
+
+async function  maybeShowMissionEndPopup(mission){
+  try{
+    if (!mission) return;
+    const st = Number(mission.status ?? -1);
+    if (st < 5 || st === 7) return; // only Success/Partly Success
+
+    const addr = String(mission.mission_address || currentMissionAddr || "").toLowerCase();
+    if (!addr || __endPopupShown.has(addr)) return;
+    __endPopupShown.add(addr);
+
+    // Ensure we have enrollments + rounds for role detection
+    let enrollments = Array.isArray(mission.enrollments) ? mission.enrollments : null;
+    let rounds      = Array.isArray(mission.rounds)      ? mission.rounds      : null;
+    if (!enrollments || !rounds){
+      try{
+        const data = await apiMission(addr);
+        enrollments = data?.enrollments || [];
+        rounds      = data?.rounds      || [];
+      } catch {}
+    } else {
+      // Keep as-is
+    }
+
+    const me = (walletAddress || "").toLowerCase();
+    const joined = !!(me && (enrollments || []).some(e => {
+      const a = String(e.player_address || e.address || e.player || "").toLowerCase();
+      return a === me;
+    }));
+
+    const isAllBanked = (st === 6);
+    const reasonText  = isAllBanked ? "All rounds were banked." : "The mission timer ran out.";
+
+    // If the viewer won any round, show their latest win
+    let myWins = [];
+    if (me && Array.isArray(rounds)){
+      myWins = rounds.filter(r => String(r.winner_address || "").toLowerCase() === me)
+                     .sort((a,b) => Number(a.round_no || a.round || 0) - Number(b.round_no || b.round || 0));
+    }
+
+    if (myWins.length){
+      const last = myWins[myWins.length - 1];
+      const roundNo = Number(last.round_no || last.round || 0);
+      const cro = weiToCro(String(last.payout_wei || last.amountWei || "0"), 2);
+      // Winners: celebratory copy + brief reason line
+      showAlert(`🎉 Congratulations!<br/>You won round ${roundNo} and claimed <b>${cro} CRO</b>.<br/><small>${reasonText}</small>`, "success");
+      return;
+    }
+
+    if (joined){
+      // Non-winning player: supportive copy, reason-tailored
+      const msg = isAllBanked
+        ? "🏁 Mission complete.<br/>All rounds were banked and you didn’t bank a round this time.<br/><small>Better luck next mission!</small>"
+        : "⏱️ Mission complete.<br/>Time’s up, and you didn’t bank a round this time.<br/><small>Better luck next mission!</small>";
+      showAlert(msg, "info");
+      return;
+    }
+
+    // Spectator: neutral reason-only line
+    const spec = isAllBanked
+      ? "🏁 Mission ended: all rounds were banked."
+      : "⏱️ Mission ended: the mission time expired.";
+    showAlert(spec, "info");
+
+  } catch {/* silent */}
 }
 
 // Ended panel:
@@ -2818,7 +2936,7 @@ function        renderJoinable          (items){
     const enrollEndTs = m.enrollment_end ?? 0;
 
     const feeCro  = weiToCro(m.enrollment_amount_wei);
-    const joined  = Number(m.enrolled_players ?? 0);
+    const joined  = Array.isArray(m.enrollments) ? m.enrollments.length : 0;
     const max     = Number(m.enrollment_max_players ?? 0);
     const minReq  = Number(m.enrollment_min_players ?? 0);
     const pct     = max > 0 ? Math.min(100, Math.round((joined / max) * 100)) : 0;
@@ -3014,9 +3132,12 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
 
   // No-regress: prefer chain-truth for Enrolling/Arming
   const safe = applyChainNoRegress(mission);
-  const apiJoined  = Number(safe?.enrolled_players ?? 0);
   const listJoined = Array.isArray(enrollments) ? enrollments.length : 0;
-  const joinedPlayers = Math.max(apiJoined, listJoined);
+  const joinedPlayers = Math.max(
+    listJoined,
+    Number(__lastChainPlayers || 0),
+    Number(optimisticGuard?.players || 0)
+  );
 
   const minP = Number(safe?.enrollment_min_players ?? mission.enrollment_min_players ?? 0);
   const maxP = Number(safe?.enrollment_max_players ?? mission.enrollment_max_players ?? 0);
@@ -3230,7 +3351,7 @@ window.addEventListener("resize", layoutStage);
 
 // Wallet:
 
-connectBtn.addEventListener("click", () => {
+connectBtn.addEventListener     ("click", () => {
   if (walletAddress){
     showConfirm("Disconnect current wallet?", disconnectWallet);
   } else {
@@ -3246,7 +3367,7 @@ btnAllMissions?.addEventListener("click", async () => {
   await fetchAndRenderAllMissions(); 
 });
 
-btnJoinable?.addEventListener("click", async () => {
+btnJoinable?.addEventListener   ("click", async () => {
   await cleanupMissionDetail();
   showOnlySection("joinableSection");
   const joinable = await apiJoinable();
@@ -3254,7 +3375,7 @@ btnJoinable?.addEventListener("click", async () => {
   startJoinableTicker();
 });
 
-btnMyMissions?.addEventListener("click", async () => {
+btnMyMissions?.addEventListener ("click", async () => {
   await cleanupMissionDetail();
   showOnlySection("myMissionsSection");
   if (walletAddress) {
@@ -3279,13 +3400,13 @@ btnMyMissions?.addEventListener("click", async () => {
 // Detail countdown:
 
 let countdownTimer = null;
-function stopCountdown(){ if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }}
+function        stopCountdown(){ if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }}
 
 // Joinable list:
 
 let joinableTimer = null;
 
-function startJoinableTicker(){
+function        startJoinableTicker(){
   stopJoinableTicker();
 
   const tick = () => {
@@ -3334,13 +3455,13 @@ function startJoinableTicker(){
   joinableTimer = setInterval(tick, 1000);
 }
 
-function stopJoinableTicker(){
+function        stopJoinableTicker(){
   if (joinableTimer) { clearInterval(joinableTimer); joinableTimer = null; }
 }
 
 // Realtime status hydrator for cards:
 
-async function hydrateAllMissionsRealtime(listEl){
+async function  hydrateAllMissionsRealtime(listEl){
   if (!listEl) return;
   const cards = [...listEl.querySelectorAll("li.mission-card")];
   if (!cards.length) return;
@@ -3388,7 +3509,7 @@ async function hydrateAllMissionsRealtime(listEl){
 
 // #region Interactions
 
-async function openMission(addr){
+async function  openMission(addr){
   try {
     currentMissionAddr = addr.toLowerCase();
     await subscribeToMission(currentMissionAddr);
@@ -3402,7 +3523,7 @@ async function openMission(addr){
   }
 }
 
-async function closeMission(){
+async function  closeMission(){
   const cameFromStage = (stageReturnTo === "stage") && !!currentMissionAddr;
   const addr = currentMissionAddr;
 
@@ -3431,7 +3552,7 @@ async function closeMission(){
   showOnlySection(lastListShownId);
 }
 
-async function subscribeToMission(addr){
+async function  subscribeToMission(addr){
   if (!hubConnection) return;
 
   const H = signalR.HubConnectionState;
@@ -3441,9 +3562,19 @@ async function subscribeToMission(addr){
 
   // If the hub isn't connected yet, remember what we want to subscribe to
   if (hubConnection.state !== H.Connected) {
-    subscribedAddr = targetLc;                            // keep your existing marker
+    subscribedAddr = targetLc;
     subscribedGroups = new Set([targetLc, targetCk].filter(Boolean));
     dbg("hub not connected; will subscribe later:", Array.from(subscribedGroups));
+    return;
+  }
+
+  // IDEMPOTENCE: already on the right groups? do nothing.
+  const targetSet = new Set([targetLc, targetCk].filter(Boolean));
+  const same = (subscribedGroups.size === targetSet.size) &&
+               [...targetSet].every(g => subscribedGroups.has(g));
+  if (same) {
+    dbg("Already subscribed to target groups:", Array.from(subscribedGroups));
+    subscribedAddr = targetLc;
     return;
   }
 
@@ -3469,7 +3600,7 @@ async function subscribeToMission(addr){
   subscribedAddr = targetLc;
 }
 
-async function triggerRoundCurrentMission(mission){
+async function  triggerRoundCurrentMission(mission){
   try {
     const signer = getSigner();
     if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
@@ -3505,12 +3636,12 @@ async function triggerRoundCurrentMission(mission){
 
 // #region Init & boot
 
-function updateConnectText(){
+function        updateConnectText(){
   const span = document.getElementById("connectBtnText");
   if (span) span.textContent = walletAddress ? shorten(walletAddress) : "Connect Wallet";
 }
 
-async function init(){
+async function  init(){
   // 0) show list immediately
   showOnlySection("allMissionsSection");
 
