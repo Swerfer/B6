@@ -55,10 +55,12 @@ C:\_publish\B6.Backend\Nethereum.Web3.dll
 C:\_publish\B6.Backend\Newtonsoft.Json.dll
 C:\_publish\B6.Backend\Npgsql.dll
 C:\_publish\B6.Backend\Npgsql.EntityFrameworkCore.PostgreSQL.dll
+C:\_publish\B6.Backend\BouncyCastle.Crypto.dll
 C:\_publish\B6.Backend\System.ClientModel.dll
 C:\_publish\B6.Backend\System.Memory.Data.dll
 C:\_publish\B6.Backend\System.Net.WebSockets.WebSocketProtocol.dll
 C:\_publish\B6.Backend\System.Security.Cryptography.ProtectedData.dll
+C:\_publish\B6.Backend\WebPush.dll
 C:\_publish\B6.Backend\runtimes\win\lib\netstandard2.0\System.Security.Cryptography.ProtectedData.dll
 C:\_publish\B6.Backend\B6.Contracts.dll
 C:\_publish\B6.Backend\B6.Contracts.pdb

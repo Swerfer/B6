@@ -32,6 +32,10 @@ import {
   getReadProvider,
   shorten,
 } from "./core.js";
+
+import { 
+  enableGamePush 
+} from "./push.js";
 // #endregion
 
 
@@ -3706,15 +3710,28 @@ async function  init(){
   buildAllFiltersUI();
   
   // event-based (if we add wallet events in walletConnect.js, see 1D)
-  window.addEventListener("wallet:connected",               fetchAndRenderAllMissions);
-  window.addEventListener("wallet:changed",                 fetchAndRenderAllMissions);
-  window.addEventListener("wallet:disconnected", () =>      renderAllMissions([]));
+  window.addEventListener("wallet:connected", () => {
+    fetchAndRenderAllMissions();
+    if (walletAddress) enableGamePush(walletAddress);
+  });
+
+  window.addEventListener("wallet:changed", () => {
+    fetchAndRenderAllMissions();
+    if (walletAddress) enableGamePush(walletAddress);
+  });
+
+  window.addEventListener("wallet:disconnected", () => {
+    renderAllMissions([]);
+    // optional: no-op (enableGamePush(null) returns early)
+  });
+
+  if (walletAddress) enableGamePush(walletAddress);
 
   window.addEventListener("wallet:connected",               refreshStageCtaIfOpen);
   window.addEventListener("wallet:changed",                 refreshStageCtaIfOpen);
   window.addEventListener("wallet:disconnected",            refreshStageCtaIfOpen);
 
- // Fallback if those custom events aren’t emitted:
+  // Fallback if those custom events aren’t emitted:
   if (window.ethereum) {
     window.ethereum.on("accountsChanged", () => setTimeout( refreshStageCtaIfOpen, 0));
   }
@@ -3750,14 +3767,14 @@ async function  init(){
 
 if (document.readyState === "loading"){
   document.addEventListener("DOMContentLoaded", () => {
+    init();
     connectWallet();
     startHub();
-    init();
   }, { once:true });
 } else {
+    init();
     connectWallet();
     startHub();
-    init();
 }
 
 // #endregion

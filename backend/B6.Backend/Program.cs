@@ -3,6 +3,7 @@ using Azure.Extensions.AspNetCore.Configuration.Secrets;
 using B6.Backend;
 using B6.Backend.Hubs;
 using B6.Contracts; 
+using B6.Backend.Services;   // PushFanout & NotificationScheduler (new)
 using Microsoft.AspNetCore.SignalR;                       
 using Microsoft.Extensions.Logging.EventLog;
 using Nethereum.Web3;
@@ -14,6 +15,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using WebPush;               // Web Push VAPID support (new)
 
 // The base uri is https://b6missions.com/api It is set to 'api' in ISS server.
 
@@ -53,6 +55,19 @@ builder.Services.AddHttpClient();
 builder.Logging.ClearProviders();
 builder.Logging.SetMinimumLevel(LogLevel.Information);
 builder.Logging.AddConsole();
+
+// Web Push VAPID keys
+builder.Services.AddSingleton(sp =>{
+    var cfg = sp.GetRequiredService<IConfiguration>();
+    var subject = cfg["WebPush:Subject"]    ?? "mailto:ops@b6missions.com";
+    var pub     = cfg["WebPush:PublicKey"]  ?? throw new InvalidOperationException("Missing WebPush:PublicKey");
+    var priv    = cfg["WebPush:PrivateKey"] ?? throw new InvalidOperationException("Missing WebPush:PrivateKey");
+    return new VapidDetails(subject, pub, priv);
+});
+
+// Notification services
+builder.Services.AddSingleton<PushFanout>();
+builder.Services.AddHostedService<NotificationScheduler>();
 
 var app = builder.Build();
 
@@ -111,6 +126,17 @@ app.MapPost("/rpc",                     async (HttpRequest req, IHttpClientFacto
         return Results.Content(text, "application/json", Encoding.UTF8, (int)resp.StatusCode);
     }
 
+});
+
+// Expose VAPID public key to the frontend
+app.MapGet("/push/vapid-public-key", (IConfiguration cfg) =>
+    Results.Text(cfg["WebPush:PublicKey"] ?? "", "text/plain")
+);
+
+// Save/refresh a browser's push subscription
+app.MapPost("/push/subscribe", async (PushSubscribeDto dto, PushFanout fanout) => {
+    await fanout.UpsertSubscriptionAsync(dto);
+    return Results.Ok(new { saved = true });
 });
 
 /***********************
@@ -515,29 +541,31 @@ app.MapGet("/debug/env",                      (IHostEnvironment env) => {
 /* ---------- HUB ---------- */
 app.MapHub<GameHub>("/hub/game");
 
-app.MapPost("/push/mission",            async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushMissionDto body) => {
+app.MapPost("/push/mission",            async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushMissionDto body,  PushFanout fan) => {
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
     var g = (body.Mission ?? "").ToLowerInvariant();
     await hub.Clients.Group(g).SendAsync("MissionUpdated", g);
+    await fan.OnMissionUpdatedAsync(g); // schedule -1m warning, etc.
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/push/status",             async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto  body) => {
-    // simple shared-secret guard
+app.MapPost("/push/status",             async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto body,   PushFanout fan) => {
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
     var g = (body.Mission ?? "").ToLowerInvariant();
     await hub.Clients.Group(g).SendAsync("StatusChanged", g, body.NewStatus);
+    await fan.OnStatusChangedAsync(g, body.NewStatus); // schedule -5m prestart
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/push/round",              async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto   body) => {
+app.MapPost("/push/round",              async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto body,    PushFanout fan) => {
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
     var g = (body.Mission ?? "").ToLowerInvariant();
     await hub.Clients.Group(g).SendAsync("RoundResult", g, body.Round, body.Winner, body.AmountWei);
     await hub.Clients.Group(g).SendAsync("MissionUpdated", g);
+    await fan.OnRoundAsync(g, body.Round, body.Winner, body.AmountWei); // inactive-only banked + schedule -10s cooldown
     return Results.Ok(new { pushed = true });
 });
 

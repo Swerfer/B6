@@ -1221,6 +1221,19 @@
           }
         }
       },
+      "Portable.BouncyCastle/1.8.1.3": {
+        "type": "package",
+        "compile": {
+          "lib/netstandard2.0/BouncyCastle.Crypto.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/netstandard2.0/BouncyCastle.Crypto.dll": {
+            "related": ".xml"
+          }
+        }
+      },
       "System.Buffers/4.6.0": {
         "type": "package",
         "compile": {
@@ -1423,6 +1436,19 @@
         },
         "runtime": {
           "lib/netcoreapp2.1/_._": {}
+        }
+      },
+      "WebPush/1.0.12": {
+        "type": "package",
+        "dependencies": {
+          "Newtonsoft.Json": "10.0.3",
+          "Portable.BouncyCastle": "1.8.1.3"
+        },
+        "compile": {
+          "lib/net5.0/WebPush.dll": {}
+        },
+        "runtime": {
+          "lib/net5.0/WebPush.dll": {}
         }
       },
       "B6.Contracts/1.0.0": {
@@ -2887,6 +2913,27 @@
         "postgresql.png"
       ]
     },
+    "Portable.BouncyCastle/1.8.1.3": {
+      "sha512": "1jUpszv0ETm+hl78HKnYgY3wPzt6qRtjxaPENNrGCuB8nondbR/j75WAKdd6sxXzOzBcX07WMZhZEYc4s5jVWg==",
+      "type": "package",
+      "path": "portable.bouncycastle/1.8.1.3",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "lib/net40/BouncyCastle.Crypto.dll",
+        "lib/net40/BouncyCastle.Crypto.xml",
+        "lib/netstandard1.0/BouncyCastle.Crypto.dll",
+        "lib/netstandard1.0/BouncyCastle.Crypto.xml",
+        "lib/netstandard1.3/BouncyCastle.Crypto.dll",
+        "lib/netstandard1.3/BouncyCastle.Crypto.xml",
+        "lib/netstandard2.0/BouncyCastle.Crypto.dll",
+        "lib/netstandard2.0/BouncyCastle.Crypto.xml",
+        "lib/portable-net40+sl5+win8+wp8+wpa81/BouncyCastle.Crypto.dll",
+        "lib/portable-net40+sl5+win8+wp8+wpa81/BouncyCastle.Crypto.xml",
+        "portable.bouncycastle.1.8.1.3.nupkg.sha512",
+        "portable.bouncycastle.nuspec"
+      ]
+    },
     "System.Buffers/4.6.0": {
       "sha512": "lN6tZi7Q46zFzAbRYXTIvfXcyvQQgxnY7Xm6C6xQ9784dEL1amjM6S6Iw4ZpsvesAKnRVsM4scrDQaDqSClkjA==",
       "type": "package",
@@ -3297,6 +3344,25 @@
         "version.txt"
       ]
     },
+    "WebPush/1.0.12": {
+      "sha512": "vc91Uby6UaQQijOPRY4B1tWFaQJlbfOyfOMIPpdAT6mANcPhHcvDJeLjr6B0Adjij71WIAH718MC7coQdrJZAw==",
+      "type": "package",
+      "path": "webpush/1.0.12",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "lib/net45/WebPush.dll",
+        "lib/net46/WebPush.dll",
+        "lib/net471/WebPush.dll",
+        "lib/net48/WebPush.dll",
+        "lib/net5.0/WebPush.dll",
+        "lib/netstandard1.3/WebPush.dll",
+        "lib/netstandard2.0/WebPush.dll",
+        "lib/netstandard2.1/WebPush.dll",
+        "webpush.1.0.12.nupkg.sha512",
+        "webpush.nuspec"
+      ]
+    },
     "B6.Contracts/1.0.0": {
       "type": "project",
       "path": "../B6.Contracts/B6.Contracts.csproj",
@@ -3314,7 +3380,8 @@
       "Nethereum.Contracts >= 5.0.0",
       "Nethereum.Web3 >= 5.0.0",
       "Npgsql >= 9.0.3",
-      "Npgsql.EntityFrameworkCore.PostgreSQL >= 9.0.4"
+      "Npgsql.EntityFrameworkCore.PostgreSQL >= 9.0.4",
+      "WebPush >= 1.0.12"
     ]
   },
   "packageFolders": {
@@ -3407,6 +3474,10 @@
           "Npgsql.EntityFrameworkCore.PostgreSQL": {
             "target": "Package",
             "version": "[9.0.4, )"
+          },
+          "WebPush": {
+            "target": "Package",
+            "version": "[1.0.12, )"
           }
         },
         "imports": [
