@@ -1,5 +1,6 @@
 using Azure.Identity;
 using Azure.Extensions.AspNetCore.Configuration.Secrets;
+using Azure.Security.KeyVault.Secrets;
 using B6.Backend;
 using B6.Backend.Hubs;
 using B6.Contracts; 
@@ -13,6 +14,7 @@ using Npgsql;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using WebPush;               // Web Push VAPID support (new)
@@ -128,13 +130,65 @@ app.MapPost("/rpc",                     async (HttpRequest req, IHttpClientFacto
 
 });
 
+app.MapGet("/secrets", async (HttpRequest req, IConfiguration cfg) =>{
+    // --- 1) Ask the browser for Basic credentials if none present
+    var auth = req.Headers["Authorization"].ToString();
+    if (string.IsNullOrWhiteSpace(auth) || !auth.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
+    {
+        req.HttpContext.Response.Headers["WWW-Authenticate"] = "Basic realm=\"B6 Secrets\"";
+        return Results.Unauthorized();
+    }
+
+    // --- 2) Extract password from Basic <base64(user:pass)>
+    try
+    {
+        var raw     = Encoding.UTF8.GetString(Convert.FromBase64String(auth.Substring("Basic ".Length).Trim()));
+        var colonIx = raw.IndexOf(':');
+        var pass    = colonIx >= 0 ? raw[(colonIx + 1)..] : raw;   // username ignored
+
+        var expected = cfg["Azure:PW"]; // from Key Vault secret "Azure--PW"
+        if (string.IsNullOrEmpty(expected) || pass != expected)
+        {
+            req.HttpContext.Response.Headers["WWW-Authenticate"] = "Basic realm=\"B6 Secrets\"";
+            return Results.Unauthorized();
+        }
+    }
+    catch
+    {
+        req.HttpContext.Response.Headers["WWW-Authenticate"] = "Basic realm=\"B6 Secrets\"";
+        return Results.Unauthorized();
+    }
+
+    // --- 3) List *Key Vault* secrets directly
+    var client = new SecretClient(
+        new Uri("https://B6Missions.vault.azure.net/"),
+        new DefaultAzureCredential()
+    );
+
+    var dict = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+    await foreach (var p in client.GetPropertiesOfSecretsAsync())
+    {
+        if (p.Enabled != true) continue;
+
+        // optional: do not show the password secret itself
+        if (p.Name.Equals("Azure--PW", StringComparison.OrdinalIgnoreCase)) continue;
+
+        var s   = await client.GetSecretAsync(p.Name);
+        var key = p.Name.Replace("--", ":");   // same normalization you use in config
+        dict[key] = s.Value.Value;
+    }
+
+    return Results.Ok(dict);
+});
+
 // Expose VAPID public key to the frontend
-app.MapGet("/push/vapid-public-key", (IConfiguration cfg) =>
+app.MapGet("/push/vapid-public-key",          (IConfiguration cfg) =>
     Results.Text(cfg["WebPush:PublicKey"] ?? "", "text/plain")
 );
 
 // Save/refresh a browser's push subscription
-app.MapPost("/push/subscribe", async (PushSubscribeDto dto, PushFanout fanout) => {
+app.MapPost("/push/subscribe",          async (PushSubscribeDto dto, PushFanout fanout) => {
     await fanout.UpsertSubscriptionAsync(dto);
     return Results.Ok(new { saved = true });
 });
@@ -524,6 +578,33 @@ app.MapGet("/debug/push/{addr}",        async (string addr, IHubContext<GameHub>
     var g = addr.ToLowerInvariant();
     await hub.Clients.Group(g).SendAsync("ServerPing", $"Hello group: {g}");
     return Results.Ok(new { pushed = g });
+});
+
+app.MapGet("/debug/push-subs/{wallet}", async (string wallet, PushFanout fan) => {
+    // intentionally minimal output so we can see if the server has anything to send to
+    // uses the same DB read PushFanout uses
+    var method = typeof(B6.Backend.Services.PushFanout).GetMethod("GetType"); // no-op to keep compiler happy with DI
+    // We don't expose internals; just trigger a verbose send with no send:
+    var (count, _) = await fan.DebugPushVerboseAsync(wallet);
+    return Results.Ok(new { wallet = wallet.ToLowerInvariant(), subscriptionCount = count });
+});
+
+// Debug: prune push subscriptions for a wallet.
+// If ?keep=<endpoint> is provided, keep only that endpoint; otherwise delete all.
+app.MapDelete("/debug/push-subs/{wallet}", async (string wallet, HttpRequest req, PushFanout fan) =>{
+    var keep = req.Query["keep"].ToString();
+    var removed = await fan.PruneSubsAsync(wallet, string.IsNullOrWhiteSpace(keep) ? null : keep);
+    return Results.Ok(new { wallet = wallet.ToLowerInvariant(), kept = string.IsNullOrWhiteSpace(keep) ? null : keep, removed });
+});
+
+app.MapMethods("/debug/push-web/{wallet}", new[] { "GET", "POST" }, async (string wallet, PushFanout fan) => {
+    var (count, attempts) = await fan.DebugPushVerboseAsync(wallet);
+    return Results.Ok(new { wallet = wallet.ToLowerInvariant(), subscriptionCount = count, attempts });
+});
+
+app.MapMethods("/debug/push-web-empty/{wallet}", new[] { "GET", "POST" }, async (string wallet, PushFanout fan) => {
+    var (count, attempts) = await fan.DebugPushVerboseAsync(wallet, noPayload: true);
+    return Results.Ok(new { wallet = wallet.ToLowerInvariant(), subscriptionCount = count, attempts });
 });
 
 // Inspect environment paths and process identity

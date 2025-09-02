@@ -11,6 +11,8 @@ namespace B6.Backend.Services
         private readonly WebPushClient  _web;
         private readonly string         _cs;
 
+        public sealed record PushAttempt(string Endpoint, bool Ok, int? Status, string? Error);
+
         public                          PushFanout(IConfiguration cfg, VapidDetails vapid) {
             _cfg = cfg;
             _vapid = vapid;
@@ -162,18 +164,96 @@ namespace B6.Backend.Services
         }
 
         private async Task              SendWebPushAsync(string wallet, string title, string body, object payload) {
+            static string ToUrlB64(string x) =>
+                string.IsNullOrWhiteSpace(x) ? "" : x.Replace('+','-').Replace('/','_').TrimEnd('=');
+
             var subs = await GetWebPushSubsAsync(wallet);
             foreach (var s in subs)
             {
-                var sub = new PushSubscription(s.Endpoint, s.P256dh, s.Auth);
+                var sub = new PushSubscription(s.Endpoint, ToUrlB64(s.P256dh), ToUrlB64(s.Auth));
                 var json = JsonSerializer.Serialize(new { title, body, data = payload });
-                try { await _web.SendNotificationAsync(sub, json, _vapid); }
+                try
+                {
+                    var options = new Dictionary<string, object>
+                    {
+                        ["vapidDetails"] = _vapid,                               // required
+                        ["TTL"] = 60,                                            // optional
+                        ["headers"] = new Dictionary<string, object> {           // optional
+                            ["Urgency"] = "high"
+                        }
+                    };
+
+                    await _web.SendNotificationAsync(sub, json, options);
+                }
                 catch (WebPushException ex)
                 {
                     if (ex.StatusCode == System.Net.HttpStatusCode.Gone || ex.StatusCode == System.Net.HttpStatusCode.NotFound)
                         await RemoveSubAsync(s.Endpoint);
                 }
             }
+        }
+
+        private async Task              RemoveSubAsync(string endpoint) {
+            await using var c = new NpgsqlConnection(_cs);
+            await c.OpenAsync();
+            await using var cmd = new NpgsqlCommand("delete from push_subscriptions where endpoint=@e;", c);
+            cmd.Parameters.AddWithValue("e", endpoint);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        public async Task<int>          PruneSubsAsync(string wallet, string? keepEndpoint){
+            await using var c = new NpgsqlConnection(_cs);
+            await c.OpenAsync();
+            var sql = keepEndpoint == null
+                ? "delete from push_subscriptions where wallet_address=@w;"
+                : "delete from push_subscriptions where wallet_address=@w and endpoint<>@k;";
+            await using var cmd = new NpgsqlCommand(sql, c);
+            cmd.Parameters.AddWithValue("w", (wallet ?? "").ToLowerInvariant());
+            if (keepEndpoint != null) cmd.Parameters.AddWithValue("k", keepEndpoint);
+            return await cmd.ExecuteNonQueryAsync();
+        }
+
+        public async Task<(int Count, List<PushAttempt> Attempts)>              DebugPushVerboseAsync(string wallet, bool noPayload = false) {
+            var attempts = new List<PushAttempt>();
+            var subs = await GetWebPushSubsAsync(wallet);
+            foreach (var s in subs)
+            {
+                static string ToUrlB64(string x) =>
+                    string.IsNullOrWhiteSpace(x) ? "" : x.Replace('+','-').Replace('/','_').TrimEnd('=');
+
+                var sub = new PushSubscription(s.Endpoint, ToUrlB64(s.P256dh), ToUrlB64(s.Auth));
+                var json = JsonSerializer.Serialize(new { title = "B6 test", body = "It works!", data = new { type = "debug", at = DateTime.UtcNow } });
+
+                try {
+                var options = new Dictionary<string, object> {
+                    ["vapidDetails"] = _vapid,
+                    ["TTL"] = 60,
+                    ["headers"] = new Dictionary<string, object> { ["Urgency"] = "high" }
+                };
+
+                if (noPayload) {
+                    await _web.SendNotificationAsync(sub, null, options);   // <— send no payload
+                } else {
+                    await _web.SendNotificationAsync(sub, json, options);
+                }
+                attempts.Add(new PushAttempt(s.Endpoint, true, 200, null));
+
+                }
+                catch (WebPushException ex)
+                {
+                    // include HTTP status + message body so we can see Unauthorized, InvalidToken, etc.
+                    attempts.Add(new PushAttempt(s.Endpoint, false, (int)ex.StatusCode, ex.Message));
+                    if (ex.StatusCode == System.Net.HttpStatusCode.Gone || ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    {
+                        await RemoveSubAsync(s.Endpoint);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    attempts.Add(new PushAttempt(s.Endpoint, false, null, ex.Message));
+                }
+            }
+            return (subs.Count, attempts);
         }
 
         private async Task<List<(string Endpoint, string P256dh, string Auth)>> GetWebPushSubsAsync(string wallet) {
@@ -186,14 +266,6 @@ namespace B6.Backend.Services
             while (await rd.ReadAsync())
                 list.Add((rd.GetString(0), rd.GetString(1), rd.GetString(2)));
             return list;
-        }
-
-        private async Task              RemoveSubAsync(string endpoint) {
-            await using var c = new NpgsqlConnection(_cs);
-            await c.OpenAsync();
-            await using var cmd = new NpgsqlCommand("delete from push_subscriptions where endpoint=@e;", c);
-            cmd.Parameters.AddWithValue("e", endpoint);
-            await cmd.ExecuteNonQueryAsync();
         }
     }
 }

@@ -114,6 +114,7 @@ let __pillsHydrateBusy      = false;
 let __pillsHydrateLast      = 0;
 let __lastChainPlayers      = 0;
 let __lastChainCroWei       = "0";
+let __pauseUntilSec         = 0;
 // #endregion
 
 
@@ -764,6 +765,9 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
           el.dataset.flipDone = "1"; // debounce
           const m2 = { ...missionObj, status: 3, pause_timestamp: 0 };
 
+          // cooldown ended → allow 4→3 again
+          __pauseUntilSec = 0;
+
           // prevent double tickers and flip immediately
           stopStageTimer();
           setStageStatusImage(statusSlug(3));
@@ -1092,10 +1096,15 @@ async function  startHub() { // SignalR HUB
       if (gameMain && gameMain.classList.contains('stage-mode')) {
         const me  = (walletAddress || "").toLowerCase();
         const win = String(winner || "").toLowerCase();
-        if (win !== me) {
-          renderRoundBankedNotice(Number(round), String(winner || ""), String(amountWei || "0"));
-        }
-        await refreshOpenStageFromServer(2);
+      if (win !== me) {
+        renderRoundBankedNotice(Number(round), String(winner || ""), String(amountWei || "0"));
+      }
+
+      // 1) Fast: grab chain-truth so “Pool (current)” is instant for spectators
+      try { await rehydratePillsFromChain(null, "roundResult"); } catch {}
+
+      // 2) Keep the regular reconcile (API snapshot, etc.)
+      await refreshOpenStageFromServer(2);
       }
 
     });
@@ -1120,12 +1129,29 @@ async function  startHub() { // SignalR HUB
         const target = Number(newStatus);
         const mLocal = { ...(mApi || {}), status: target };
 
+        // Sticky cooldown: ignore 4→3 pushes while timer still running
+        if (Number(stageCurrentStatus) === 4 && target === 3) {
+          const now = Math.floor(Date.now()/1000);
+          if (__pauseUntilSec && now < __pauseUntilSec) {
+            console.debug("[StatusChanged] 4→3 ignored during cooldown");
+            return;
+          }
+        }
+
         setStageStatusImage(statusSlug(target));
         await bindRingToMission(mLocal);
         await bindCenterTimerToMission(mLocal);
         renderStageCtaForStatus(mLocal);
         await renderStageEndedPanelIfNeeded(mLocal);
         stageCurrentStatus = target;
+
+        // refresh sticky window
+        if (target === 4) {
+          const info = cooldownInfo(mLocal);
+          __pauseUntilSec = info.pauseEnd || 0;
+        } else if (target === 3) {
+          __pauseUntilSec = 0;
+        }
 
         await maybeShowMissionEndPopup(mLocal);
 
@@ -1159,6 +1185,19 @@ async function  startHub() { // SignalR HUB
             return;
           }
 
+          // EARLY-RETURN GUARD: ignore 4→3 flips while the local cooldown is still running.
+          // We rely on the CTA's data-cooldown-end set by renderCtaPaused() to know the end.
+          if (curStatus === 4 && apiStatus === 3) {
+            const el  = document.querySelector('#stageCtaGroup [data-cooldown-end]');
+            const end = el ? Number(el.getAttribute('data-cooldown-end') || 0) : 0;
+            const now = Math.floor(Date.now() / 1000);
+            if (end > now) {
+              console.debug("[MissionUpdated] 4→3 ignored (cooldown ticking)", { now, end });
+              setTimeout(() => refreshOpenStageFromServer(1), 1200);
+              return;
+            }
+          }
+
           // If API moved forward, do a full rebuild now.
           if (apiStatus !== curStatus) {
             setStageStatusImage(statusSlug(apiStatus));
@@ -1187,7 +1226,7 @@ async function  startHub() { // SignalR HUB
 
           setTimeout(() => refreshOpenStageFromServer(2), 1600);
 
-        } catch (err) {console.log("startHub MissionUpdated error: " + err)}
+        } catch (err) { console.log("startHub MissionUpdated error: " + err) }
       }
     });
 
@@ -1440,6 +1479,18 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
 
     // NO-REGRESS GUARD: ignore stale snapshots from API/indexer (except 3↔4)
     const toggle34 = (newStatus === 3 && curStatus === 4) || (newStatus === 4 && curStatus === 3);
+
+    // Sticky cooldown: while Paused and cooldown not finished, ignore 4→3 flips
+    if (curStatus === 4 && newStatus === 3) {
+      const now = Math.floor(Date.now()/1000);
+      if (__pauseUntilSec && now < __pauseUntilSec) {
+        // still cooling down → don't apply the temporary 3
+        scheduleRetry(retries);
+        return;
+      }
+    }
+
+    // Normal no-regress (except active↔paused)
     if (curStatus >= 0 && newStatus < curStatus && !toggle34) {
       scheduleRetry(retries);
       return;
@@ -1461,11 +1512,18 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
       renderStageCtaForStatus(m);
       await renderStageEndedPanelIfNeeded(m);
       stageCurrentStatus = newStatus;
-      dbg("refreshOpenStageFromServer APPLIED status", { stageCurrentStatus });
 
+      // update sticky window edge
+      if (newStatus === 4) {
+        const info = cooldownInfo(m);
+        __pauseUntilSec = info.pauseEnd || 0;
+      } else if (newStatus === 3) {
+        __pauseUntilSec = 0;
+      }
+
+      dbg("refreshOpenStageFromServer APPLIED status", { stageCurrentStatus });
       await maybeShowMissionEndPopup(m);
 
-      // one gentle reconcile after DB denorms settle
       scheduleRetry(Math.min(retries, 1));
     } else {
       scheduleRetry(retries);
@@ -2442,12 +2500,16 @@ function        renderCtaPaused         (host, mission)   {
 
   const tVal = document.createElementNS(SVG_NS, "tspan");
   const info = cooldownInfo(mission);
+  // remember the cooldown end so we can block 4→3 wobble
+  __pauseUntilSec = info.pauseEnd || 0;
+
   if (info.pauseEnd) {
     tVal.setAttribute("data-cooldown-end", String(info.pauseEnd));
     tVal.textContent = formatMMSS(info.secsLeft);
   } else {
     tVal.textContent = "00:00";
   }
+
   tVal.style.fontWeight = "700";
   cool.appendChild(tLabel);
   cool.appendChild(tVal);
@@ -2497,6 +2559,9 @@ async function  flipStageToPausedOptimistic(mission){ // Flip the open stage to 
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
 
   const m2 = { ...mission, status: 4 };     // Paused now (UI only)
+
+  const info = cooldownInfo(m2);
+  __pauseUntilSec = info.pauseEnd || 0;
 
   setStageStatusImage(statusSlug(4));
   buildStageLowerHudForStatus(m2);
@@ -2629,7 +2694,7 @@ async function  maybeShowMissionEndPopup(mission){
       return a === me;
     }));
 
-    const isAllBanked = (st === 6);
+    const isAllBanked = Number(mission?.round_count ?? -1) == Number(mission?.mission_rounds_total ?? -1);
     const reasonText  = isAllBanked ? "All rounds were banked." : "The mission timer ran out.";
 
     // If the viewer won any round, show their latest win
@@ -2673,7 +2738,7 @@ async function  renderStageEndedPanelIfNeeded(mission){
   if (!host) return;
   host.innerHTML = "";
 
-  const st = Number(mission?.status ?? -1);
+  const st  = Number(mission?.status ?? -1);
   if (st < 5) return; // only ended bucket
 
   // NEW — Failed (status 7): render reason + refund line and exit
@@ -2745,7 +2810,7 @@ async function  renderStageEndedPanelIfNeeded(mission){
     sub.setAttribute("y", String(y + lineH));
     sub.setAttribute("text-anchor", "middle");
     sub.setAttribute("class", "notice-text");
-    sub.textContent = (st === 6) ? "All rounds were banked." : "Mission time ended.";
+    sub.textContent = Number(mission?.round_count ?? -1) == Number(mission?.mission_rounds_total ?? -1) ? "All rounds were banked." : "Mission time ended.";
     g.appendChild(sub);
     preLines = 2; // title + subtitle
   }

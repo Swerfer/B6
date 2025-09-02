@@ -39,20 +39,32 @@ async function  subscribe(reg) {
 }
 
 async function  upsert(address, sub) {
-  const body = {
-    Address: (address || "").toLowerCase(),
-    Endpoint: sub.endpoint,
-    P256dh: btoa(String.fromCharCode(...new Uint8Array(sub.getKey("p256dh")))),
-    Auth:    btoa(String.fromCharCode(...new Uint8Array(sub.getKey("auth")))),
-    UserAgent: navigator.userAgent,
-    Locale:    navigator.language,
-    Timezone:  Intl.DateTimeFormat().resolvedOptions().timeZone
-  };
-  await api("/push/subscribe", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  });
+    // Preserve the exact base64 the browser produces; no extra URL-safe transform here.
+    const bytesToB64 = (ab) => {
+        const arr = new Uint8Array(ab);
+        let s = "";
+        for (let i = 0; i < arr.length; i++) s += String.fromCharCode(arr[i]);
+        return btoa(s); // plain base64
+        };
+
+        const p256 = bytesToB64(sub.getKey("p256dh"));
+        const auth = bytesToB64(sub.getKey("auth"));
+
+        const body = {
+        Address:   (address || "").toLowerCase(),
+        Endpoint:  sub.endpoint,
+        P256dh:    p256,   // send as-is
+        Auth:      auth,   // send as-is
+        UserAgent: navigator.userAgent,
+        Locale:    navigator.language,
+        Timezone:  Intl.DateTimeFormat().resolvedOptions().timeZone
+    };
+
+    await api("/push/subscribe", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+    });
 }
 
 async function  enableGamePush(address) {
@@ -66,7 +78,15 @@ async function  enableGamePush(address) {
     }
     const reg = await ensureSw();
     const existing = await reg.pushManager.getSubscription();
-    const sub = existing || await subscribe(reg);
+    console.log('[push] endpoint', sub?.endpoint);  
+    let sub = existing;
+
+    // Force a fresh subscription once after you deploy this fix.
+    // (You can remove this block after confirming notifications work.)
+    if (!sub) {
+        sub = await subscribe(reg);
+    }
+
     await upsert(address, sub);
   } catch (e) {
     console.warn("[push]", e?.message || e);
