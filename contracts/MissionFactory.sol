@@ -26,7 +26,7 @@
  *
  * 2. **Active** (`missionStart → missionEnd`)  
  *    • Consists of `missionRounds` payout rounds.  
- *    • A cooldown: 5 min after normal rounds, 1 min before the final round.  
+ *    • A cooldown: Default: 1 min after normal rounds, 1 min before the final round.  
  *    • A player can win **once per mission**.  
  *    • Each round’s payout = time-progress since last claim × `croStart` / 100.
  *
