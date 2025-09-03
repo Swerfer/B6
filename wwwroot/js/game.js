@@ -93,6 +93,8 @@ let   stageCurrentStatus    = null;
 let   stageReturnTo         = null;   // "stage" when we navigated from stage → detail
 let   stageRefreshTimer     = null;
 let   stageRefreshBusy      = false;
+let   roundPauseDuration    = 60;		// READ FROM BLOCKCHAIN INSTEAD
+let   lastRoundPauseDuration= 60;		// READ FROM BLOCKCHAIN INSTEAD
 const __endPopupShown       = new Set();
 // All missions cache & filters:
 let   __allMissionsCache    = [];     // last fetched list (raw objects)
@@ -115,6 +117,8 @@ let __pillsHydrateLast      = 0;
 let __lastChainPlayers      = 0;
 let __lastChainCroWei       = "0";
 let __pauseUntilSec         = 0;
+let __postCooldownUntilSec  = 0; 
+let __lastPauseTs           = 0;
 // #endregion
 
 
@@ -514,7 +518,7 @@ function        cooldownInfo(mission, now = Math.floor(Date.now()/1000)){
   const isPaused    = (st === 4);
   const roundsTotal = Number(mission?.mission_rounds_total ?? mission?.mission_rounds ?? 0);
   const roundCount  = Number(mission?.round_count ?? 0);
-  const secsTotal   = (roundCount === (roundsTotal - 1)) ? 60 : 300;  // last round → 60s, else 300s
+  const secsTotal   = (roundCount === (roundsTotal - 1)) ? lastRoundPauseDuration : roundPauseDuration;  // last round → 60s, else 300s
   const pauseTs     = Number(mission?.pause_timestamp || 0);
   const pauseEnd    = pauseTs ? (pauseTs + secsTotal) : 0;
   const secsLeft    = pauseEnd ? Math.max(0, pauseEnd - now) : 0;
@@ -767,6 +771,7 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
 
           // cooldown ended → allow 4→3 again
           __pauseUntilSec = 0;
+          __postCooldownUntilSec = Math.floor(Date.now()/1000) + 60;
 
           // prevent double tickers and flip immediately
           stopStageTimer();
@@ -1138,6 +1143,17 @@ async function  startHub() { // SignalR HUB
           }
         }
 
+        // Post-cooldown: ignore 3→4 unless this is a NEW pause (pause_timestamp increased)
+        if (Number(stageCurrentStatus) === 3 && target === 4) {
+          const now     = Math.floor(Date.now()/1000);
+          const pauseTs = Number((mApi || {}).pause_timestamp || 0);
+          const looksStale = !pauseTs || pauseTs <= __lastPauseTs;
+          if (__postCooldownUntilSec && now < __postCooldownUntilSec && looksStale) {
+            console.debug("[StatusChanged] 3→4 ignored post-cooldown (stale pause)");
+            return;
+          }
+        }
+
         setStageStatusImage(statusSlug(target));
         await bindRingToMission(mLocal);
         await bindCenterTimerToMission(mLocal);
@@ -1149,8 +1165,10 @@ async function  startHub() { // SignalR HUB
         if (target === 4) {
           const info = cooldownInfo(mLocal);
           __pauseUntilSec = info.pauseEnd || 0;
+          __lastPauseTs   = Number(mLocal.pause_timestamp || 0);
         } else if (target === 3) {
           __pauseUntilSec = 0;
+          // keep __postCooldownUntilSec until it expires
         }
 
         await maybeShowMissionEndPopup(mLocal);
@@ -1186,13 +1204,24 @@ async function  startHub() { // SignalR HUB
           }
 
           // EARLY-RETURN GUARD: ignore 4→3 flips while the local cooldown is still running.
-          // We rely on the CTA's data-cooldown-end set by renderCtaPaused() to know the end.
           if (curStatus === 4 && apiStatus === 3) {
             const el  = document.querySelector('#stageCtaGroup [data-cooldown-end]');
             const end = el ? Number(el.getAttribute('data-cooldown-end') || 0) : 0;
             const now = Math.floor(Date.now() / 1000);
             if (end > now) {
               console.debug("[MissionUpdated] 4→3 ignored (cooldown ticking)", { now, end });
+              setTimeout(() => refreshOpenStageFromServer(1), 1200);
+              return;
+            }
+          }
+
+          // MIRROR GUARD: after cooldown, ignore 3→4 unless API shows a NEW pause_timestamp
+          if (curStatus === 3 && apiStatus === 4) {
+            const now     = Math.floor(Date.now() / 1000);
+            const pauseTs = Number(m.pause_timestamp || 0);
+            const looksStale = !pauseTs || pauseTs <= __lastPauseTs;
+            if (__postCooldownUntilSec && now < __postCooldownUntilSec && looksStale) {
+              console.debug("[MissionUpdated] 3→4 ignored post-cooldown (stale pause)", { now, pauseTs, __lastPauseTs });
               setTimeout(() => refreshOpenStageFromServer(1), 1200);
               return;
             }
@@ -1484,7 +1513,17 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
     if (curStatus === 4 && newStatus === 3) {
       const now = Math.floor(Date.now()/1000);
       if (__pauseUntilSec && now < __pauseUntilSec) {
-        // still cooling down → don't apply the temporary 3
+        scheduleRetry(retries);
+        return;
+      }
+    }
+
+    // Post-cooldown: after we locally flipped to Active, ignore 3→4 unless it's a NEW pause
+    if (curStatus === 3 && newStatus === 4) {
+      const now = Math.floor(Date.now()/1000);
+      const pauseTs = Number(m.pause_timestamp || 0);
+      const looksStale = !pauseTs || pauseTs <= __lastPauseTs;
+      if (__postCooldownUntilSec && now < __postCooldownUntilSec && looksStale) {
         scheduleRetry(retries);
         return;
       }
@@ -1513,12 +1552,14 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
       await renderStageEndedPanelIfNeeded(m);
       stageCurrentStatus = newStatus;
 
-      // update sticky window edge
+      // update sticky windows / last pause stamp
       if (newStatus === 4) {
         const info = cooldownInfo(m);
         __pauseUntilSec = info.pauseEnd || 0;
+        __lastPauseTs   = Number(m.pause_timestamp || 0);
       } else if (newStatus === 3) {
         __pauseUntilSec = 0;
+        // keep __postCooldownUntilSec as set by the local flip; it will expire on its own
       }
 
       dbg("refreshOpenStageFromServer APPLIED status", { stageCurrentStatus });
@@ -2502,6 +2543,8 @@ function        renderCtaPaused         (host, mission)   {
   const info = cooldownInfo(mission);
   // remember the cooldown end so we can block 4→3 wobble
   __pauseUntilSec = info.pauseEnd || 0;
+  // and remember which pause this is (lets us detect a truly new pause later)
+  __lastPauseTs = Number(mission?.pause_timestamp || 0);
 
   if (info.pauseEnd) {
     tVal.setAttribute("data-cooldown-end", String(info.pauseEnd));

@@ -140,6 +140,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         MissionType     missionType,
         uint256         enrollmentStart,
         uint256         enrollmentEnd,
+        uint8           roundPauseDuration,
+        uint8           lastRoundPauseDuration,
         uint8           minPlayers,
         uint8           maxPlayers,
         uint256         enrollmentAmount,
@@ -453,15 +455,17 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     // ───────────── Core Factory Functions ─────────────
     /**
      * @dev Creates a new mission with the specified parameters.
-     * @param _missionType          The type of the mission.
-     * @param _enrollmentStart      The start time for enrollment.
-     * @param _enrollmentEnd        The end time for enrollment.
-     * @param _enrollmentAmount     The amount required for enrollment.
-     * @param _enrollmentMinPlayers The minimum number of players required to start the mission.
-     * @param _enrollmentMaxPlayers The maxnimum number of players required to start the mission.
-     * @param _missionStart         The start time for the mission.
-     * @param _missionEnd           The end time for the mission.
-     * @param _missionRounds        The number of rounds in the mission.
+     * @param _missionType              The type of the mission.
+     * @param _enrollmentStart          The start time for enrollment.
+     * @param _enrollmentEnd            The end time for enrollment.
+     * @param _enrollmentAmount         The amount required for enrollment.
+     * @param _enrollmentMinPlayers     The minimum number of players required to start the mission.
+     * @param _enrollmentMaxPlayers     The maxnimum number of players required to start the mission.
+     * @param _roundPauseDuration       The duration of pause between rounds in seconds.
+     * @param _lastRoundPauseDuration   The duration of pause before the last round in seconds
+     * @param _missionStart             The start time for the mission.
+     * @param _missionEnd               The end time for the mission.
+     * @param _missionRounds            The number of rounds in the mission.
      */
     function createMission (
         MissionType     _missionType,           // Type of the mission
@@ -470,6 +474,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         uint256         _enrollmentAmount,      // Amount required for enrollment
         uint8           _enrollmentMinPlayers,  // Minimum number of players required to start the mission
         uint8           _enrollmentMaxPlayers,  // Maximum number of players required to start the mission
+        uint8           _roundPauseDuration,    // Duration of pause between rounds in seconds
+        uint8           _lastRoundPauseDuration,// Duration of pause before the last round in seconds
         uint256         _missionStart,          // Start time for the mission
         uint256         _missionEnd,            // End time for the mission
         uint8           _missionRounds,         // Number of rounds in the mission
@@ -482,6 +488,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             require(_missionStart           >= _enrollmentEnd,          "Mission start must be on or after enrollment end");                // Ensure mission start is on or after enrollment end
             require(_missionEnd             >  _missionStart,           "Mission start must be before end");                                // Ensure mission start is before end
             require(_enrollmentAmount       >  0,                       "Enrollment amount must be greater than zero");                     // Ensure enrollment amount is greater than zero
+            require(_roundPauseDuration     >= 60,                      "Round pause duration must be at least 60 seconds");                // Ensure round pause duration is at least 1 minute
+            require(_lastRoundPauseDuration >= 60,                      "Last round pause duration must be at least 60 seconds");           // Ensure last round pause duration is at least 1 minute
 
 			address clone = missionImplementation.clone(); 	    // EIP-1167 minimal proxy
 
@@ -508,6 +516,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
                 _enrollmentAmount,                              // Set the enrollment amount
                 _enrollmentMinPlayers,                          // Set the minimum players required
                 _enrollmentMaxPlayers,                          // Set the maximum players allowed
+                _roundPauseDuration,                            // Set the pause duration between rounds
+                _lastRoundPauseDuration,                        // Set the pause duration before the last round
                 _missionStart,                                  // Set the mission start time
                 _missionEnd,                                    // Set the mission end time
                 _missionRounds,                                 // Set the number of rounds in the mission
@@ -523,6 +533,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             _enrollmentEnd,
             _enrollmentMinPlayers,
             _enrollmentMaxPlayers,
+            _roundPauseDuration,
+            _lastRoundPauseDuration,
             _enrollmentAmount,
             _missionStart,
             _missionEnd,
@@ -1030,6 +1042,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     event MissionRefunded       (uint256    indexed nrOfPlayers,    uint256     indexed amount,         address[] player,  uint256 timestamp); // Event emitted when a player is refunded
     event MissionInitialized    (address    indexed owner,          MissionType indexed missionType,    uint256 timestamp                   );
 	event PotIncreased			(uint256			value,			uint256				croCurrent											);
+	event PauseDurationUpdated	(uint8				rounds,			uint8				lastround											);
     // #endregion
 
     // #region ─── Player-facing custom errors ───────────
@@ -1085,6 +1098,8 @@ contract Mission        is Ownable, ReentrancyGuard {
         uint256         enrollmentAmount;               // Amount required for enrollment
         uint8           enrollmentMinPlayers;           // Minimum number of players required to start the mission
         uint8           enrollmentMaxPlayers;           // Maximum number of players allowed in the mission
+        uint8			roundPauseDuration;			    // Cooldown duration: rounds before the penultimate round
+        uint8			lastRoundPauseDuration;		    // Cooldown duration: before final round
         uint256         missionStart;                   // Start time for the mission
         uint256         missionEnd;                     // End time for the mission
         uint8           missionRounds;                  // Total number of rounds in the mission
@@ -1114,6 +1129,9 @@ contract Mission        is Ownable, ReentrancyGuard {
     MissionData                 private _missionData;        // Struct to hold all mission data  
     bool                        private _initialized;        // Flag to track if the contract has been initialized
     Status                      private _previousStatus;     // Track the previous status of the mission
+	uint8						public	roundPauseTime 	   = 60; // Cooldown duration: rounds before the penultimate round
+	uint8						public  lastRoundPauseTime = 60; // Cooldown duration: before final round
+
     // #endregion
 
     // ────────────────── Constructor ───────────────────
@@ -1150,6 +1168,8 @@ contract Mission        is Ownable, ReentrancyGuard {
         uint256         _enrollmentAmount,
         uint8           _enrollmentMinPlayers,
         uint8           _enrollmentMaxPlayers,
+		uint8			_roundPauseDuration,
+		uint8			_lastRoundPauseDuration,
         uint256         _missionStart,
         uint256         _missionEnd,
         uint8           _missionRounds,
@@ -1169,6 +1189,8 @@ contract Mission        is Ownable, ReentrancyGuard {
         _missionData.enrollmentAmount        = _enrollmentAmount;
         _missionData.enrollmentMinPlayers    = _enrollmentMinPlayers;
         _missionData.enrollmentMaxPlayers    = _enrollmentMaxPlayers;
+		_missionData.roundPauseDuration		 = _roundPauseDuration;
+		_missionData.lastRoundPauseDuration	 = _lastRoundPauseDuration;
         _missionData.missionStart            = _missionStart;
         _missionData.missionEnd              = _missionEnd;
         _missionData.missionRounds           = _missionRounds;
@@ -1287,7 +1309,7 @@ contract Mission        is Ownable, ReentrancyGuard {
 
         if (s == Status.Paused) {
             uint256 cd = (_missionData.roundCount + 1 == _missionData.missionRounds)
-                ? 60 : 300;                                                                                             // Cooldown duration: 1 minute before final round, 5 minutes otherwise
+                ? lastRoundPauseTime : roundPauseTime;                                                                	// Cooldown duration
             uint256 secsLeft = _missionData.pauseTimestamp + cd - nowTs;                                                // Calculate seconds left in the cooldown period
                                                                     revert Cooldown(secsLeft);                          // Ensure the mission is not in a cooldown period
         }
@@ -1417,7 +1439,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         }
         uint256 nowTs = block.timestamp;                                        // Get the current timestamp
         uint256 cd = (_missionData.roundCount + 1 == _missionData.missionRounds)
-            ? 60 : 300;                                                         // Cooldown duration: 1 minute before final round, 5 minutes otherwise
+            ? lastRoundPauseTime : roundPauseTime;                             	// Cooldown duration
         return _missionData.pauseTimestamp + cd - nowTs;                        // Calculate seconds until next round based on pause timestamp and cooldown duration
     }
 
