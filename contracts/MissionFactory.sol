@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// #region Introduction
 /**
  * © 2025 Be Brave Be Bold Be Banked™ | B6 Labs™ – Swerfer
  * All rights reserved.
@@ -73,18 +74,25 @@
  *
  * @dev Each Mission is an EIP-1167 minimal proxy deployed by MissionFactory.
  */
+// #endregion
+
 
 pragma solidity ^0.8.30;
 
-// #region ───────────── Imports ────────────────────────
+
+// #region Imports
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/proxy/Clones.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
-// #endregion
 using Strings for uint256;
+// #endregion
 
-// ─────────────────── Global Enums ─────────────────────
+
+
+
+
+// #region Global Enums
 /**
  * @dev Enum to represent the type of mission.
  * The mission can be one of several types: Custom, Hourly, QuarterDaily, BiDaily, Daily, Weekly, or Monthly.
@@ -124,12 +132,19 @@ enum Limit      {
     Weekly,     // Weekly limit breached
     Monthly     // Monthly limit breached
 }
+// #endregion
 
-// ────────────── Contract MissionFactory────────────────
+
+
+
+
+// #region Contr. MissionFactory
 contract MissionFactory is Ownable, ReentrancyGuard {
     using Clones    for address;
-    
-    // #region ────────── Events ───────────────────────
+
+
+
+    // #region Events
     /** 
      * @dev Events emitted by the MissionFactory contract.
      * These events are used to log important actions and state changes within the contract.
@@ -140,10 +155,10 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         MissionType     missionType,
         uint256         enrollmentStart,
         uint256         enrollmentEnd,
-        uint8           roundPauseDuration,
-        uint8           lastRoundPauseDuration,
         uint8           minPlayers,
         uint8           maxPlayers,
+        uint8           roundPauseDuration,
+        uint8           lastRoundPauseDuration,
         uint256         enrollmentAmount,
         uint256         missionStart,
         uint256         missionEnd,
@@ -151,7 +166,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     );
     event AuthorizedAddressAdded                (address        indexed addr                                                                        );
     event AuthorizedAddressRemoved              (address        indexed addr                                                                        );
-    event FundsReceived                         (address        indexed sender,         uint256             amount                                  );
     event MissionFundsRegistered                (uint256                amount,         MissionType indexed missionType,    address indexed sender  );
     event FundsWithdrawn                        (address        indexed to,             uint256             amount                                  );    
     event OwnershipTransferProposed             (address        indexed proposer,       address             newOwner,       uint256 timestamp       );
@@ -162,7 +176,11 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     event MissionFinalized                      (address        indexed mission,        uint8       indexed finalStatus,    uint256 timestamp       );
     // #endregion
 
-    // ────────────────── Modifiers ─────────────────────
+
+
+
+
+    // #region Modifiers
     /**
      * @dev Modifier that allows only the owner or an authorized address to call.
      */
@@ -185,8 +203,13 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         );
         _;
     }
+    // #endregion
 
-    // #region ─────── State Variables ───────────────────
+
+
+
+
+    // #region State Variables
     /**
      * @dev State variables for the MissionFactory contract.
      * These variables store the state of the contract, including authorized addresses, reserved funds, mission statuses, and the implementation address for missions.
@@ -212,7 +235,11 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     mapping(MissionType => uint256)         public missionTypeCounts;                           // Store per mission type the mission type count
     // #endregion
 
-    // ──────────────── Constructor ─────────────────────
+
+
+
+
+    // #region Constructor
     /**
      * @dev Struct to hold information about players who won the mission.
      * Contains the player's address and the amount they won.
@@ -221,8 +248,13 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         require(_impl != address(0), "impl zero");
         missionImplementation = _impl;
     }
+    // #endregion
 
-    // ────────────────── Helper functions ──────────────
+
+
+
+
+    // #region Helper functions
     /**
      * @dev Function to convert mission types to human readable names 
      */  
@@ -271,8 +303,13 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         }
         return earliest == 0 ? 0 : earliest + 30 days - nowTs;   // If no valid enrollment found, return 0; otherwise, return the time until the next monthly slot
     }
+    // #endregion
 
-    // ──────────── Anti-addiction Functions ────────────
+
+
+
+    
+    // #region Anti-addiction Func.
     /**
      * @dev Sets the weekly and monthly enrollment limits.
      * This function allows the owner or an authorized address to set the limits for how many missions a user can enroll in per week and per month.
@@ -394,8 +431,13 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         secToMonth = earliest30d == 0 ? 0 : earliest30d + 30 days - nowTs;      // Calculate seconds until next monthly slot
         return (weekUsed, weekMax, monthUsed, monthMax, secToWeek, secToMonth); // Return the limits and time until next slots
     }
+    // #endregion
 
-    // ──────────────── Admin Functions ─────────────────
+
+
+
+
+    // #region Admin Functions
     /**
      * @dev Adds an address to the list of authorized addresses.
      * @param account The address to authorize.
@@ -451,8 +493,13 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         delete proposalTimestamp;                                                                       // Delete the proposal timestamp
 
     }
+    // #endregion
 
-    // ───────────── Core Factory Functions ─────────────
+
+
+
+
+    // #region Core Factory Func.
     /**
      * @dev Creates a new mission with the specified parameters.
      * @param _missionType              The type of the mission.
@@ -582,8 +629,13 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             emit MissionFinalized(msg.sender, uint8(newStatus), block.timestamp);
         }
     }
+    // #endregion
 
-    // ──────────────── Financial Functions ─────────────
+
+
+
+
+    // #region Financial Functions
     /**
      * @dev Registers mission funds for a specific mission type.
      * @param missionType The type of the mission.
@@ -643,8 +695,13 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         require(ok, "Transfer failed");                                     // Ensure the transfer was successful
         emit FundsWithdrawn(mgrOwner, amount);                              // Emit event for funds withdrawal
     }
+    // #endregion
 
-    // ──────────────── View Functions ────────────────
+
+
+
+
+    // #region View Functions
 
     /**
      * @dev Returns the missions a player is participating in and their statuses.
@@ -923,7 +980,15 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         return (result, statuses, names);                       // Return arrays: addresses of missions not ended, their statuses and names  
     }
 
-    // NEW
+    /**
+     * @dev Returns a paginated list of missions that have ended.
+     * This function retrieves a subset of missions that have ended, based on the specified offset and limit.
+     * @param offset The starting index for pagination.
+     * @param limit The maximum number of missions to return.
+     * @return addrs An array of mission addresses that have ended.
+     * @return statuses An array of statuses corresponding to each mission.
+     * @return names An array of mission names corresponding to each mission.
+     */
     function getMissionsEndedPaged(uint256 offset, uint256 limit)           external view returns (address[] memory addrs, uint8[] memory statuses, string[] memory names) {
         uint256 len = missions.length;
         if (offset >= len) {
@@ -985,7 +1050,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             address m = missions[total - 1 - i];            // Get the address of the mission
             result[i] = m;                                  // Add the mission address to the result array  
             statuses[i] = uint8(missionStatus[m]);          // Add the status of the mission to the statuses array
-            names[i] = missionNames[missions[i]];           // Add the mission name to the output array
+            names[i] = missionNames[missions[m]];           // Add the mission name to the output array
        }
 
         return (result, statuses, names);                   // Return arrays: addresses of missions not ended, their statuses and names  
@@ -1026,13 +1091,20 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             expiry - nowTs                                                      // Seconds remaining until expiry
         );
     }
-
+    // #endregion
+    // #endregion
 }
 
-// ───────────────── Contract Mission ───────────────────
+
+
+
+// #region Contract Mission
 contract Mission        is Ownable, ReentrancyGuard {
-    
-    // #region ─────────────── Events ─────────────────────
+
+
+
+
+    // #region Events
     event MissionStatusChanged  (Status     indexed previousStatus, Status      indexed newStatus,      uint256 timestamp                   );
     event PlayerEnrolled        (address    indexed player,         uint256             amount,         uint256 totalPlayers                );
     event RoundCalled           (address    indexed player,         uint8       indexed roundNumber,    uint256 payout, uint256 croRemaining);
@@ -1045,7 +1117,11 @@ contract Mission        is Ownable, ReentrancyGuard {
 	event PauseDurationUpdated	(uint8				rounds,			uint8				lastround											);
     // #endregion
 
-    // #region ─── Player-facing custom errors ───────────
+
+
+
+
+    // #region Player custom errors
     error EnrollmentNotStarted(uint256 nowTs, uint256 startTs);     // Enrollment has not started yet.
     error EnrollmentClosed(uint256 nowTs, uint256 endTs);           // Enrollment is closed.
     error MaxPlayers(uint8 maxPlayers);                             // Maximum number of players has been reached.  
@@ -1063,7 +1139,11 @@ contract Mission        is Ownable, ReentrancyGuard {
     error ContractsNotAllowed();                                    // Contracts are not allowed to join the mission.
     // #endregion 
 
-    // ──────────────────── Modifiers ───────────────────
+
+
+
+
+    // #region Modifiers
     /**
      * @dev Modifier to restrict access to the owner or an authorized address.
      * This is used for functions that can only be called by the owner or an authorized address.
@@ -1075,8 +1155,13 @@ contract Mission        is Ownable, ReentrancyGuard {
         );
         _;
     }
+    // #endregion
 
-    // ──────────────────── Structs ───────────────────── 
+
+
+
+
+    // #region Structs 
     /**
      * @dev Struct to hold information about players who won the mission.
      * Contains the player's address and the amount they won.
@@ -1112,28 +1197,38 @@ contract Mission        is Ownable, ReentrancyGuard {
         string          name;                           // Name of the mission
         uint256         missionCreated;                 // Timestamp of when the mission was created, used for 'Pending' stage in dApp
     }
+    // #endregion
 
-    // #region ───────── State Variables ─────────────────
+
+
+
+
+    // #region State Variables
     /**
      * @dev Reference to the MissionFactory contract.
      * This contract manages the overall mission lifecycle and player interactions.
      */
-    MissionFactory              public  missionFactory;      // Reference to the MissionFactory contract
-    mapping(address => bool)    public  enrolled;            // Track if a player is enrolled in the mission
-    mapping(address => bool)    public  hasWon;              // Track if a player has won in any round
-    mapping(address => bool)    public  refunded;            // Track if a player has been refunded
-    mapping(address => uint256) public  failedRefundAmounts; // Track failed refund amounts for players
-    uint256                     public  ownerShare;          // Total share of funds for the owner
-    uint256                     public  factoryShare;        // Total share of funds for the MissionFactory
+    MissionFactory              public  missionFactory;                 // Reference to the MissionFactory contract
+    mapping(address => bool)    public  enrolled;                       // Track if a player is enrolled in the mission
+    mapping(address => bool)    public  hasWon;                         // Track if a player has won in any round
+    mapping(address => bool)    public  refunded;                       // Track if a player has been refunded
+    mapping(address => uint256) public  failedRefundAmounts;            // Track failed refund amounts for players
+    uint256                     public  ownerShare;                     // Total share of funds for the owner
+    uint256                     public  factoryShare;                   // Total share of funds for the MissionFactory
     bool                        public  missionStartConditionChecked = false; // Flag to check if the mission start condition has been checked
-    MissionData                 private _missionData;        // Struct to hold all mission data  
-    bool                        private _initialized;        // Flag to track if the contract has been initialized
-    Status                      private _previousStatus;     // Track the previous status of the mission
-	uint8						public	roundPauseTime 	   = 60; // Cooldown duration: rounds before the penultimate round
-	uint8						public  lastRoundPauseTime = 60; // Cooldown duration: before final round
+    MissionData                 private _missionData;                   // Struct to hold all mission data  
+    bool                        private _initialized;                   // Flag to track if the contract has been initialized
+    Status                      private _previousStatus;                // Track the previous status of the mission
+	uint8						public	roundPauseDuration 	   = 60;    // Cooldown duration: rounds before the penultimate round
+	uint8						public  lastRoundPauseDuration = 60;    // Cooldown duration: before final round
 
     // #endregion
 
+
+
+
+
+    // #region Constructor-Initializer
     // ────────────────── Constructor ───────────────────
     /**
      * @dev Constructor for the Mission contract.
@@ -1141,7 +1236,6 @@ contract Mission        is Ownable, ReentrancyGuard {
      * The actual ownership will be set during the initialization phase.
      */
     constructor() Ownable(msg.sender) {}      
-
     // ────────────────── Initializer ───────────────────
     /**
      * @dev Initializes the Mission contract.
@@ -1204,8 +1298,13 @@ contract Mission        is Ownable, ReentrancyGuard {
         _missionData.missionCreated          = block.timestamp;
         emit MissionInitialized(_owner, _missionType, block.timestamp);         // Emit event for mission initialization
     }
+    // #endregion
 
-    // ──────────── Core Mission Functions ──────────────
+
+
+
+
+    // #region Core Mission Functions
     /**
      * @notice Allows a player to enroll by paying the enrollment fee.
      * @dev Player can enroll only during the enrollment window and only once.
@@ -1257,7 +1356,9 @@ contract Mission        is Ownable, ReentrancyGuard {
         _missionData.croStart += msg.value;                                                 // Increase the initial CRO amount by the enrollment fee
         _missionData.croCurrent += msg.value;                                               // Increase the current CRO amount by the enrollment fee
 
-        _setStatus(Status.Enrolling);                                                       // Set the mission status to Enrolling
+        if (_previousStatus != Status.Enrolling) {
+            _setStatus(Status.Enrolling);                                                   // Set the mission status to Enrolling
+        }
         missionFactory.recordEnrollment(player);                                            // Record the player's enrollment in the MissionFactory contract
         emit PlayerEnrolled(player, msg.value, _missionData.players.length);                // Emit event for player enrollment
     }
@@ -1309,7 +1410,7 @@ contract Mission        is Ownable, ReentrancyGuard {
 
         if (s == Status.Paused) {
             uint256 cd = (_missionData.roundCount + 1 == _missionData.missionRounds)
-                ? lastRoundPauseTime : roundPauseTime;                                                                	// Cooldown duration
+                ? lastRoundPauseDuration : roundPauseDuration;                                                                	// Cooldown duration
             uint256 secsLeft = _missionData.pauseTimestamp + cd - nowTs;                                                // Calculate seconds left in the cooldown period
                                                                     revert Cooldown(secsLeft);                          // Ensure the mission is not in a cooldown period
         }
@@ -1350,8 +1451,13 @@ contract Mission        is Ownable, ReentrancyGuard {
             _setStatus(Status.Paused);
         }
     }
+    // #endregion
 
-    // ────────────── Financial Functions ───────────────
+
+
+
+
+    // #region Financial Functions
 	/**
      * @dev Add funds to prize pool.
      */
@@ -1396,8 +1502,13 @@ contract Mission        is Ownable, ReentrancyGuard {
         _setStatus(Status.Success);                             
         _withdrawFunds(false);                                  // Withdraw funds to MissionFactory contract 
     }
+    // #endregion
 
-    // ───────────────── View Functions ─────────────────
+
+
+
+
+    // #region View Functions
 
     /**
      * @dev Returns the current number of players enrolled in the mission.
@@ -1622,7 +1733,12 @@ contract Mission        is Ownable, ReentrancyGuard {
         }
     }
 
-    // ──────────────── Internal Helpers ────────────────
+    // #endregion
+
+
+
+
+    // #region Internal Helpers
     /**
      * @dev Returns the current status of the mission based on the current time and mission data.
      * This function checks various conditions to determine the real-time status of the mission.
@@ -1666,8 +1782,8 @@ contract Mission        is Ownable, ReentrancyGuard {
                 return Status.Active;                                       // mission is active, no pause in progress
             } else if (nowTs < _missionData.pauseTimestamp +
                 ((_missionData.roundCount + 1 == _missionData.missionRounds)
-                    ? 1 minutes
-                    : 5 minutes))                                           // if pause time is set, check if we are still in the pause window
+                    ? _lastRoundPauseDuration
+                    : _roundPauseDuration))                                 // if pause time is set, check if we are still in the pause window
             {
                 return Status.Paused;                                       // in pause window, waiting for next round
             } else {
@@ -1803,5 +1919,7 @@ contract Mission        is Ownable, ReentrancyGuard {
             block.timestamp                                                                                     // Emit MissionRefunded event with current timestamp
         );
     }
+    // #endregion
+    // #endregion
 
 }

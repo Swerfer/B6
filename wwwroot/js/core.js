@@ -111,24 +111,43 @@ export const shorten = addr =>
 
 export function weiToCro(weiStr, decimals = null) {
   // decimals === null  → trimmed (old default feel)
-  // decimals is number → fixed to exactly that many fractional digits
-  if (!weiStr) return decimals != null ? (decimals ? `0.${"0".repeat(decimals)}` : "0") : "0";
+  // decimals is number → fixed to exactly that many fractional digits (rounded half-up)
+  if (!weiStr) {
+    return decimals != null ? (decimals ? `0.${"0".repeat(decimals)}` : "0") : "0";
+  }
+
   try {
     const wei  = BigInt(weiStr);
     const base = 10n ** 18n;
-    const i    = wei / base;
-    const fraw = (wei % base).toString().padStart(18, "0");
 
+    // Legacy trimmed mode (unchanged)
     if (decimals == null) {
-      // keep the classic trimmed look (up to 6 shown, then trimmed)
-      const f = fraw.slice(0, 6).replace(/0+$/, "");
+      const i    = wei / base;
+      const fraw = (wei % base).toString().padStart(18, "0");
+      const f    = fraw.slice(0, 6).replace(/0+$/, "");
       return f ? `${i}.${f}` : `${i}`;
-    } else if (decimals === 0) {
-      return `${i}`;
-    } else {
-      const f = fraw.slice(0, decimals).padEnd(decimals, "0");
-      return `${i}.${f}`;
     }
+
+    // Fixed decimals with rounding (half-up)
+    const d = Math.max(0, Number(decimals));
+    let scaled; // CRO * 10^d (rounded if d <= 18, exact if d > 18)
+
+    if (d <= 18) {
+      const pow  = 10n ** (18n - BigInt(d)); // wei per 10^-d CRO
+      const half = pow / 2n;
+      scaled     = (wei + half) / pow;       // integer rounding half-up
+    } else {
+      // More digits than on-chain precision → exact expansion (no rounding possible)
+      const mul = 10n ** (BigInt(d) - 18n);
+      scaled    = wei * mul;
+    }
+
+    if (d === 0) return scaled.toString();
+
+    const div      = 10n ** BigInt(d);
+    const intPart  = (scaled / div).toString();
+    const fracPart = (scaled % div).toString().padStart(d, "0");
+    return `${intPart}.${fracPart}`;
   } catch {
     const n = Number(weiStr) / 1e18;
     if (decimals == null) return String(n);

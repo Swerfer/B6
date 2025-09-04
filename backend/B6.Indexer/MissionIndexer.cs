@@ -213,8 +213,13 @@ namespace B6.Indexer
                     {
                         await TryAutoRefundAsync(a, token);        // uses RefundPlayersFunction
                     }
+
+                    var potChanged = await RefreshPotFromChainAsync(a, token);
+                    if (potChanged)
+                        await NotifyMissionUpdatedAsync(a, token);
                 }
-                catch { 
+                catch 
+                { 
                     _log.LogInformation((rt == 5 ? "TryAutoFinalizeAsync" : "TryAutoRefundAsync") + " - Mission: {a} - Realtime status: {rt}", a, rt);
                 }
             }
@@ -853,7 +858,11 @@ namespace B6.Indexer
                                     await NotifyRoundAsync(addr, r, w, a, token);
 
                                 if (missionUpdated)
-                                    await NotifyMissionUpdatedAsync(addr, token);   // NEW
+                                    await NotifyMissionUpdatedAsync(addr, token);
+
+                                var potChanged = await RefreshPotFromChainAsync(addr, token);
+                                if (potChanged && !missionUpdated)
+                                    await NotifyMissionUpdatedAsync(addr, token);
                             }
                             catch { /* best-effort */ }
 
@@ -1381,6 +1390,35 @@ namespace B6.Indexer
             var url = _rpcEndpoints[_rpcIndex];  // current active RPC
             var acct = new Account(_ownerPk);
             return new Web3(acct, url);
+        }
+
+        private async Task<bool>                        RefreshPotFromChainAsync    (string mission, CancellationToken token) {
+            // 1) Pull on-chain mission tuple (already used elsewhere in this file)
+            var wrap = await RunRpc(
+                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                    .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                        new GetMissionDataFunction(), mission, null),
+                "Call.getMissionData");
+            var md = wrap.Data;
+
+            // 2) Update only when changed (uses PostgreSQL IS DISTINCT FROM to avoid false positives)
+            await using var c = new NpgsqlConnection(_pg);
+            await c.OpenAsync(token);
+            await using var up = new NpgsqlCommand(@"
+                update missions
+                set cro_start_wei   = @cs,
+                    cro_current_wei = @cc,
+                    updated_at      = now()
+                where mission_address = @a
+                and (cro_start_wei   is distinct from @cs
+                    or cro_current_wei is distinct from @cc);", c);
+
+            up.Parameters.AddWithValue("a", mission);
+            up.Parameters.Add("cs", NpgsqlTypes.NpgsqlDbType.Numeric).Value = md.EthStart;
+            up.Parameters.Add("cc", NpgsqlTypes.NpgsqlDbType.Numeric).Value = md.EthCurrent;
+
+            var rows = await up.ExecuteNonQueryAsync(token);
+            return rows > 0; // true → pot changed and DB was updated
         }
 
         private async Task<bool>                        HasAnyRefundsRecordedAsync  (string mission, CancellationToken token) {
