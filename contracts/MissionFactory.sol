@@ -174,6 +174,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     event EnrollmentRecorded                    (address        indexed user,           uint256             timestamp                               );
     event MissionStatusUpdated                  (address        indexed mission,        uint8       indexed fromStatus,     uint8   indexed toStatus, uint256        timestamp);
     event MissionFinalized                      (address        indexed mission,        uint8       indexed finalStatus,    uint256 timestamp       );
+    event EnrollmentReverted                    (address        indexed user,           uint256             timestampRemoved                        );
     // #endregion
 
 
@@ -431,6 +432,36 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         secToMonth = earliest30d == 0 ? 0 : earliest30d + 30 days - nowTs;      // Calculate seconds until next monthly slot
         return (weekUsed, weekMax, monthUsed, monthMax, secToWeek, secToMonth); // Return the limits and time until next slots
     }
+
+    /**
+     * @dev Undoes a user's enrollment in a mission within a specified time window.
+     * This function is called by a mission to remove a user's enrollment record if they are refunded.
+     * It searches the user's enrollment history for a timestamp within the specified window and removes it.
+     * @param user The address of the user whose enrollment is to be undone.
+     * @param startTs The start timestamp of the enrollment window.
+     * @param endTs The end timestamp of the enrollment window.
+     */
+    function undoEnrollmentInWindow(address user, uint256 startTs, uint256 endTs) external onlyMission {
+        require(user != address(0), "Invalid user");
+        uint256[] storage h = _enrollmentHistory[user];
+        uint256 len = h.length;
+        if (len == 0) return;
+
+        // Remove exactly one timestamp that falls inside this mission’s enrollment window.
+        for (uint256 i = 0; i < len; ++i) {
+            uint256 t = h[i];
+            if (t >= startTs && t <= endTs) {
+                // Keep chronological order (important for pruning logic): shift left, then pop.
+                for (uint256 j = i; j + 1 < len; ++j) {
+                    h[j] = h[j + 1];
+                }
+                h.pop();
+                emit EnrollmentReverted(user, t);
+                return;
+            }
+        }
+    }
+
     // #endregion
 
 
@@ -1897,14 +1928,20 @@ contract Mission        is Ownable, ReentrancyGuard {
             address player = _missionData.players[i];                                                           // Get the player address
             if (!refunded[player]) {                                                                            // Check if player has not been refunded
                 (bool ok, ) = payable(player).call{ value: _missionData.enrollmentAmount }("");                 // Attempt to transfer the refund amount to the player
-                if (ok) {
-                    refunded[player] = true;                                                                    // If transfer successful, mark player as refunded
-                    _missionData.refundedPlayers.push(player);                                                  // If transfer successful, track refunded player
-                    emit PlayerRefunded(player, _missionData.enrollmentAmount);                                 // Emit PlayerRefunded event with player address and amount
-                } else {
-                    failedRefundAmounts[player] += _missionData.enrollmentAmount;                               // Track failed refund amounts for players
-                    emit RefundFailed(player, _missionData.enrollmentAmount);                                   // Log the failure, but don’t revert
-                    _force = false;                                                                             // Set force to false if any refund fails     
+                if (ok) {                                                                                       // If the transfer is successful                                          
+                    refunded[player] = true;                                                                    // Mark the player as refunded                        
+                    _missionData.refundedPlayers.push(player);                                                  // Add the player to the refundedPlayers array 
+                    emit PlayerRefunded(player, _missionData.enrollmentAmount);                                 // Emit event for player refund
+
+                    missionFactory.undoEnrollmentInWindow(                                                      // Notify MissionFactory to undo enrollment
+                        player,
+                        _missionData.enrollmentStart,
+                        _missionData.enrollmentEnd
+                    );
+                } else {                                                                                        // If the transfer fails                              
+                    failedRefundAmounts[player] += _missionData.enrollmentAmount;                               // Record the failed refund amount for the player      
+                    emit RefundFailed(player, _missionData.enrollmentAmount);                                   // Emit event for refund failure          
+                    _force = false;                                                                             // If any refund fails, do not force withdraw of remaining funds
                 }
             }
         }
@@ -1919,7 +1956,8 @@ contract Mission        is Ownable, ReentrancyGuard {
             block.timestamp                                                                                     // Emit MissionRefunded event with current timestamp
         );
     }
-    // #endregion
+
     // #endregion
 
+    // #endregion
 }
