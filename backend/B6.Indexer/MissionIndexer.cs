@@ -214,7 +214,9 @@ namespace B6.Indexer
                         await TryAutoRefundAsync(a, token);        // uses RefundPlayersFunction
                     }
                 }
-                catch { /* best-effort; next poll will retry */ }
+                catch { 
+                    _log.LogInformation((rt == 5 ? "TryAutoFinalizeAsync" : "TryAutoRefundAsync") + " - Mission: {a} - Realtime status: {rt}", a, rt);
+                }
             }
         }
 
@@ -1388,6 +1390,7 @@ namespace B6.Indexer
                 "select 1 from mission_enrollments where mission_address=@a and refunded = true limit 1;", c);
             cmd.Parameters.AddWithValue("a", mission);
             var v = await cmd.ExecuteScalarAsync(token);
+            _log.LogInformation("HasAnyRefundsRecordedAsync - {mission} - Refunded?: {v}", mission, v != null);
             return v != null;
         }
 

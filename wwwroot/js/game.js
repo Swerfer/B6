@@ -1731,7 +1731,7 @@ function        layoutStage(){
 }
 
 function        stageTextFill(){
-  // Try to reuse the CTA note color; fall back to white
+  // Try to reuse the CTA note color; fall back to blue
   const sample = document.querySelector('#stageCtaGroup .cta-note');
   const cs = sample ? getComputedStyle(sample) : null;
   const val = cs?.fill || cs?.color || "";
@@ -2788,6 +2788,7 @@ async function  renderStageEndedPanelIfNeeded(mission){
   if (st === 7) {
     const x = 500, y = 585;
     const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+    g.setAttribute("fill", stageTextFill());
 
     const title = document.createElementNS("http://www.w3.org/2000/svg","text");
     title.setAttribute("x", String(x));
