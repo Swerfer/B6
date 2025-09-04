@@ -110,10 +110,10 @@ export const shorten = addr =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
 
 export function weiToCro(weiStr, decimals = null) {
-  // decimals === null  → trimmed (old default feel)
-  // decimals is number → fixed to exactly that many fractional digits (rounded half-up)
+  // decimals === null  → legacy "trimmed" (up to 6 decimals, then trim)
+  // decimals is number → round to that many decimals, then trim trailing zeros
   if (!weiStr) {
-    return decimals != null ? (decimals ? `0.${"0".repeat(decimals)}` : "0") : "0";
+    return decimals == null ? "0" : "0";
   }
 
   try {
@@ -128,30 +128,42 @@ export function weiToCro(weiStr, decimals = null) {
       return f ? `${i}.${f}` : `${i}`;
     }
 
-    // Fixed decimals with rounding (half-up)
     const d = Math.max(0, Number(decimals));
-    let scaled; // CRO * 10^d (rounded if d <= 18, exact if d > 18)
 
+    // Round half-up to d decimals (handle negatives safely)
+    let scaled;
     if (d <= 18) {
-      const pow  = 10n ** (18n - BigInt(d)); // wei per 10^-d CRO
+      const pow  = 10n ** (18n - BigInt(d));   // wei per 10^-d CRO
       const half = pow / 2n;
-      scaled     = (wei + half) / pow;       // integer rounding half-up
+      scaled = wei >= 0n ? (wei + half) / pow  : (wei - half) / pow;
     } else {
       // More digits than on-chain precision → exact expansion (no rounding possible)
       const mul = 10n ** (BigInt(d) - 18n);
-      scaled    = wei * mul;
+      scaled = wei * mul;
     }
 
     if (d === 0) return scaled.toString();
 
     const div      = 10n ** BigInt(d);
     const intPart  = (scaled / div).toString();
-    const fracPart = (scaled % div).toString().padStart(d, "0");
-    return `${intPart}.${fracPart}`;
+    let   fracPart = (scaled % div).toString().padStart(d, "0");
+
+    // Trim trailing zeros (so 212.010 → 212.01, 212.000 → 212)
+    fracPart = fracPart.replace(/0+$/, "");
+    return fracPart ? `${intPart}.${fracPart}` : intPart;
+
   } catch {
+    // Fallback for non-BigIntable inputs
     const n = Number(weiStr) / 1e18;
-    if (decimals == null) return String(n);
-    return Number.isFinite(n) ? n.toFixed(decimals) : String(weiStr);
+    if (!Number.isFinite(n)) return String(weiStr);
+
+    if (decimals == null) {
+      const s = n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+      return s;
+    } else {
+      const s = n.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
+      return s;
+    }
   }
 }
 
