@@ -93,6 +93,7 @@ let   stageCurrentStatus    = null;
 let   stageReturnTo         = null;   // "stage" when we navigated from stage → detail
 let   stageRefreshTimer     = null;
 let   stageRefreshBusy      = false;
+let   stageRefreshPending   = false;
 let   roundPauseDuration    = 60;		// READ FROM BLOCKCHAIN INSTEAD
 let   lastRoundPauseDuration= 60;		// READ FROM BLOCKCHAIN INSTEAD
 const __endPopupShown       = new Set();
@@ -107,6 +108,8 @@ let   optimisticGuard       = { untilMs: 0, players: 0, croNow: "0" };
 // Cache:
 const __missionCreatedCache = new Map();
 const JOIN_CACHE_KEY        = "_b6joined";
+const MISSION_CACHE_TTL_MS  = 15000;
+let __missionSnapCache      = { addr:"", ts:0, data:null };
 
 // miscellaneous 
 let   staleWarningShown     = false;
@@ -882,8 +885,8 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
     const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
     if (onStage && left > 0) {
       const gapMs = Date.now() - (__lastPushTs || 0);
-      if (gapMs > 12000 && Date.now() > __watchdogCooldownUntil) {  // >12s silence
-        __watchdogCooldownUntil = Date.now() + 6000;                 // 6s cooldown
+      if (gapMs > 30000 && Date.now() > __watchdogCooldownUntil) {  // >30s silence
+        __watchdogCooldownUntil = Date.now() + 15000;                // 15s cooldown
         smartReconcile("watchdog");
       }
     }
@@ -1172,22 +1175,23 @@ async function  startHub() { // SignalR HUB
 
       // refresh the detail view (used for the auto-dismiss timer, etc.)
       try {
-        const data = await apiMission(currentMissionAddr);
-
         // Only refresh the detail panel if the user is not on the stage
         const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
-        if (!onStage) renderMissionDetail(data);
+        if (!onStage) { 
+          const data = await apiMission(currentMissionAddr, true);
+          renderMissionDetail(data);
 
-        const mission = data?.mission || data;
-        const { pauseEnd } = cooldownInfo(mission);
-        if (pauseEnd) {
-          const now = Math.floor(Date.now()/1000);
-          const ms  = Math.max(0, (pauseEnd - 10) - now) * 1000;
-          setTimeout(() => {
-            const g = document.getElementById("stageNoticeGroup");
-            if (g) g.innerHTML = "";
-          }, ms);
-        }
+          const mission = data?.mission || data;
+          const { pauseEnd } = cooldownInfo(mission);
+          if (pauseEnd) {
+            const now = Math.floor(Date.now()/1000);
+            const ms  = Math.max(0, (pauseEnd - 10) - now) * 1000;
+            setTimeout(() => {
+              const g = document.getElementById("stageNoticeGroup");
+              if (g) g.innerHTML = "";
+            }, ms);
+          }
+        } 
       } catch (err) {console.log("startHub RoundResult error: " + err)}
 
       // show inline “Round N banked by …” on the stage + rebuild the stage
@@ -1220,7 +1224,7 @@ async function  startHub() { // SignalR HUB
       // try to fetch a fresh snapshot (for times/pills), but don't block the flip
       let mApi = null;
       try {
-        const data = await apiMission(currentMissionAddr);
+        const data = await apiMission(currentMissionAddr, true);
         mApi = enrichMissionFromApi(data);
       } catch (err) {console.log("startHub Statuschanged error: " + err)}
 
@@ -1272,7 +1276,8 @@ async function  startHub() { // SignalR HUB
           rehydratePillsFromChain(mLocal, "statusChanged", true).catch(()=>{});
         }
 
-        setTimeout(() => refreshOpenStageFromServer(2), 800);
+        // setTimeout(() => refreshOpenStageFromServer(2), 800);
+        refreshOpenStageFromServer(2);
       } else {
         if (mApi) renderMissionDetail({ mission: mApi });
       }
@@ -1283,7 +1288,7 @@ async function  startHub() { // SignalR HUB
       dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
         try {
-          const data = await apiMission(currentMissionAddr);
+          const data = await apiMission(currentMissionAddr, true);
           const m = enrichMissionFromApi(data);
 
           const apiStatus = Number(m.status);
@@ -1292,7 +1297,8 @@ async function  startHub() { // SignalR HUB
           // If API is behind our locally flipped stage, ignore now but retry soon.
           if (apiStatus < curStatus) {
             console.debug("[MissionUpdated] stale status from API; ignoring", apiStatus, "<", curStatus);
-            setTimeout(() => refreshOpenStageFromServer(1), 1200); // gentle retry
+            // setTimeout(() => refreshOpenStageFromServer(1), 1200); // gentle retry
+            refreshOpenStageFromServer(1);
             return;
           }
 
@@ -1301,9 +1307,10 @@ async function  startHub() { // SignalR HUB
             const el  = document.querySelector('#stageCtaGroup [data-cooldown-end]');
             const end = el ? Number(el.getAttribute('data-cooldown-end') || 0) : 0;
             const now = Math.floor(Date.now() / 1000);
-            if (end > now) {
-              console.debug("[MissionUpdated] 4→3 ignored (cooldown ticking)", { now, end });
-              setTimeout(() => refreshOpenStageFromServer(1), 1200);
+            // also honor the sticky window (__pauseUntilSec) if present
+            if (end > now || (__pauseUntilSec && now < __pauseUntilSec)) {
+              console.debug("[MissionUpdated] 4→3 ignored (cooldown ticking)", { now, end, __pauseUntilSec });
+              refreshOpenStageFromServer(1);   // no ad-hoc setTimeout
               return;
             }
           }
@@ -1335,7 +1342,8 @@ async function  startHub() { // SignalR HUB
               buildStageLowerHudForStatus(m);
             }
 
-            setTimeout(() => refreshOpenStageFromServer(2), 1600);
+            // setTimeout(() => refreshOpenStageFromServer(2), 1600);
+            refreshOpenStageFromServer(2);
             return;
           }
 
@@ -1344,10 +1352,9 @@ async function  startHub() { // SignalR HUB
           } else {
             buildStageLowerHudForStatus(m);
           }
-          if (walletAddress) renderStageCtaForStatus(m);
 
-          setTimeout(() => refreshOpenStageFromServer(2), 1600);
-
+          // setTimeout(() => refreshOpenStageFromServer(2), 1600);
+          refreshOpenStageFromServer(2);
         } catch (err) { console.log("startHub MissionUpdated error: " + err) }
       }
     });
@@ -1455,18 +1462,20 @@ function        clearDetailRefresh(){
 }
 
 function        scheduleDetailRefresh(reset=false){ 
-  if (els.missionDetail.style.display === "none" || !currentMissionAddr) {
-        return;
-      }
+  const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
+  if (onStage || els.missionDetail.style.display === "none" || !currentMissionAddr) {
+    return;
+  }
 
   if (reset) { detailBackoffMs = 15000; detailFailures = 0; }
   clearDetailRefresh();
   detailRefreshTimer = setTimeout(async () => {
-    if (els.missionDetail.style.display === "none" || !currentMissionAddr) {
+    const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
+    if (onStage || els.missionDetail.style.display === "none" || !currentMissionAddr) {
         return;
-      }
+    }
     try {
-      const data = await apiMission(currentMissionAddr);
+      const data = await apiMission(currentMissionAddr, false);
       renderMissionDetail(data);
       detailFailures = 0;
       detailBackoffMs = 15000; // reset on success
@@ -1505,11 +1514,16 @@ async function  fetchAndRenderAllMissions(){
     })).reverse();
 
     // 3) Hydrate with details from your API (address → mission object)
+    //    Only for the newest PRIMARY; older ones render lightweight (no detail call)
+    const PRIMARY = 12;
+    const primaryRows    = rows.slice(0, PRIMARY);
+    const secondaryRows  = rows.slice(PRIMARY);
+
     const details = await Promise.all(
-      rows.map(r => apiMission(r.mission_address).catch(() => null))
+      primaryRows.map(r => apiMission(r.mission_address, true).catch(() => null))
     );
 
-    const missions = details.filter(Boolean).map(d => {
+    const primaryMissions = details.filter(Boolean).map(d => {
       const m = d.mission;
 
       // enrich with fields the All Missions renderer expects
@@ -1523,6 +1537,16 @@ async function  fetchAndRenderAllMissions(){
       m.mission_fee      = m.enrollment_amount_wei;   // show fee in CRO via weiToCro
       return m;
     });
+
+    // lightweight rows for the rest (no API call)
+    const secondaryMissions = secondaryRows.map(r => ({
+      mission_address: r.mission_address,
+      status: r.status,
+      name: r.name
+    }));
+
+    const missions = [...primaryMissions, ...secondaryMissions];
+
 
     // if you use the filtered cache path:
     if (typeof __allMissionsCache !== "undefined") {
@@ -1542,21 +1566,44 @@ async function  fetchAndRenderAllMissions(){
 }
 
 async function  apiJoinable(){
-  const r = await fetch("/api/missions/joinable", { cache: "no-store" });
+  const r = await fetch("/api/missions/joinable"); // allow HTTP caching / 304
   if (!r.ok) throw new Error("/api/missions/joinable failed");
   return r.json();
 }
 
 async function  apiPlayerMissions(addr){
-  const r = await fetch(`/api/missions/player/${addr}`, { cache: "no-store" });
+  const r = await fetch(`/api/missions/player/${addr}`); // allow HTTP caching / 304
   if (!r.ok) throw new Error("/api/missions/player failed");
   return r.json();
 }
 
-async function  apiMission(addr){
-  const r = await fetch(`/api/missions/mission/${addr}`, { cache: "no-store" });
+/**
+ * Stage-aware mission reader:
+ * - When in game stage: returns cached snapshot for 15s, unless `force` is true.
+ * - When not in game stage: no caching is stored (always fresh fetch).
+ * - Force calls refresh the cache and reset the 15s window.
+ */
+async function apiMission(addr, force = false) {
+  const lcAddr  = String(addr || "").toLowerCase();
+  const now     = Date.now();
+  const onStage = !!(document.getElementById('gameMain')?.classList.contains('stage-mode'));
+
+  // serve cache only in stage-mode
+  if (onStage && !force) {
+    if (__missionSnapCache.addr === lcAddr && __missionSnapCache.data && (now - __missionSnapCache.ts) < MISSION_CACHE_TTL_MS) {
+      return __missionSnapCache.data;
+    }
+  }
+
+  const r = await fetch(`/api/missions/mission/${addr}`); // allow HTTP caching / 304
   if (!r.ok) throw new Error("/api/missions/mission failed");
-  return r.json();
+  const data = r.json();
+
+  // store only in stage-mode
+  if (onStage) {
+    __missionSnapCache = { addr: lcAddr, ts: now, data };
+  }
+  return data;
 }
 
 // #endregion
@@ -1571,8 +1618,8 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
 
-  // serialize: only one in-flight refresh
-  if (stageRefreshBusy) return;
+  // serialize: only one in-flight refresh; coalesce others
+  if (stageRefreshBusy) { stageRefreshPending = true; return; }
   stageRefreshBusy = true;
 
   const scheduleRetry = (n) => {
@@ -1583,7 +1630,7 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
   };
 
   try {
-    const data = await apiMission(currentMissionAddr);
+    const data = await apiMission(currentMissionAddr, false);
     const m = enrichMissionFromApi(data);
 
     // Merge optimism for a short window so API can't regress the UI
@@ -1667,7 +1714,12 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
     scheduleRetry(retries);
   } finally {
     stageRefreshBusy = false;
+    if (stageRefreshPending) {
+      stageRefreshPending = false;
+      setTimeout(() => refreshOpenStageFromServer(1, Math.max(2500, delay)), 750);
+    }
   }
+
 }
 
 function        smartReconcile(reason = "smart") { // Lightweight reconcile when we suspect a missed push or transport hiccup
@@ -1962,7 +2014,7 @@ async function  rehydratePillsFromChain(missionOverride = null, why = "", force 
     // 2) Get immutable amounts from the API snapshot (or use the passed mission)
     let mSnap = missionOverride;
     if (!mSnap) {
-      const data = await apiMission(currentMissionAddr);
+      const data = await apiMission(currentMissionAddr, true);
       mSnap = enrichMissionFromApi(data);
     }
 
@@ -2238,8 +2290,8 @@ async function  handleEnrollClick       (mission){
     }
 
     // Let indexer catch up, then reconcile (no await, slight delay)
-    setTimeout(() => { refreshOpenStageFromServer(2).catch(()=>{}); }, 1200);
-
+    // setTimeout(() => { refreshOpenStageFromServer(2).catch(()=>{}); }, 1200);
+    refreshOpenStageFromServer(2).catch(()=>{});
   } catch (err) {
     // wallet cancel → warning, no “stuck” UI
     if (err?.code === 4001 || err?.code === "ACTION_REJECTED") {
@@ -2254,7 +2306,7 @@ async function  handleEnrollClick       (mission){
     // UNLOCK first, then re-render (prevents “Joining…” from sticking)
     ctaBusy = false;
     try {
-      const data = await apiMission(mission.mission_address);
+      const data = await apiMission(mission.mission_address, true);
       const m2 = enrichMissionFromApi(data);
       renderStageCtaForStatus(m2);
     } catch {
@@ -2315,7 +2367,7 @@ async function  refreshStageCtaIfOpen(){
         return;
       }
   try {
-    const data = await apiMission(currentMissionAddr);
+    const data = await apiMission(currentMissionAddr, false);
     const m = enrichMissionFromApi(data);
     renderStageCtaForStatus(m);
   } catch {}
@@ -2338,12 +2390,50 @@ async function  renderStageCtaForStatus (mission) {
     }
   }
 
-  host.innerHTML = "";
+  // Enrolling → show a disabled JOIN immediately, then refine gating async.
+  if (st === 1) {
+    host.innerHTML = "";
+    renderJoinPlaceholder(host, mission);           // instant, no-await
+    (async () => {                                  // refine without removing the CTA
+      try { await renderCtaEnrolling(host, mission); } catch (e) { console.warn(e); }
+    })();
+    return;
+  }
 
-  if (st === 1) return renderCtaEnrolling (host, mission);  // JOIN
-  if (st === 2) return renderCtaArming    (host, mission);  // ENROLLMENT / CLOSED (disabled)
-  if (st === 3) return renderCtaActive    (host, mission);  // Active → BANK IT!
-  if (st === 4) return renderCtaPaused    (host, mission);  // Paused → Cooldown
+  // other statuses: keep existing “clear then draw”
+  host.innerHTML = "";
+  if (st === 2) return renderCtaArming (host, mission);
+  if (st === 3) return renderCtaActive (host, mission);
+  if (st === 4) return renderCtaPaused (host, mission);
+}
+
+function        renderJoinPlaceholder   (host, mission){
+  const { xCenter, topY } = CTA_LAYOUT;
+  const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_JOIN;
+
+  const x = xCenter - Math.round(btnW / 2);
+  const y = topY;
+
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "cta-btn cta-disabled");
+  g.setAttribute("transform", `translate(${x},${y})`);
+  g.setAttribute("role", "button");
+  g.setAttribute("tabindex", "-1");
+
+  g.appendChild(svgImage(bg, null, null, btnW, btnH));
+  const txtX = x + Math.round((btnW - txtW) / 2);
+  const txtY = y + Math.round((btnH - txtH) / 2) + (txtDy || 0);
+  g.appendChild(svgImage(text, txtX - x, txtY - y, txtW, txtH));
+  host.appendChild(g);
+
+  const note = document.createElementNS(SVG_NS, "text");
+  note.setAttribute("id", "stageCtaNote");
+  note.setAttribute("x", String(xCenter));
+  note.setAttribute("y", String(y + btnH + 18));
+  note.setAttribute("text-anchor", "middle");
+  note.setAttribute("class", "cta-note");
+  note.textContent = walletAddress ? "Checking eligibility…" : "Connect your wallet to join";
+  host.appendChild(note);
 }
 
 // Per-status renderers:
@@ -2376,22 +2466,24 @@ async function  renderCtaEnrolling      (host, mission)   {
   let already = alreadyByCache || alreadyByApi;
 
   try {
-    // (C) Chain probe → source of truth
     const ro = getReadProvider();
     const mc = new ethers.Contract(mission.mission_address, MISSION_ABI, ro);
-    const md = await mc.getMissionData();
-    const tuple = md?.[0] || md;
-    const players = (tuple?.players || []).map(a => String(a).toLowerCase());
+
+    // Cap chain calls so the CTA never “hangs” invisibly.
+    const md = await withTimeout(mc.getMissionData(), 2500).catch(() => null);
+    const tuple   = md?.[0] || md || {};
+    const players = (tuple.players || []).map(a => String(a).toLowerCase());
 
     const alreadyByChain = !!(me && players.includes(me));
     already = already || alreadyByChain;
 
     const maxP = Number(mission.enrollment_max_players ?? 0);
-    hasSpots = maxP ? (players.length < maxP) : true;
+    hasSpots  = maxP ? (players.length < maxP) : true;
 
     if (me && FACTORY_ADDRESS) {
       const fac = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, ro);
-      canEnrollSoft = await fac.canEnroll(me);
+      const ok = await withTimeout(fac.canEnroll(me), 2500).catch(() => true);
+      canEnrollSoft = (ok == null) ? true : ok;
     }
   } catch (err) {
     console.warn("[CTA/JOIN] chain probe failed:", err?.message || err);
@@ -2412,6 +2504,7 @@ async function  renderCtaEnrolling      (host, mission)   {
     me, inWin, alreadyByCache, alreadyByApi, already, hasSpots, canEnrollSoft
   });
 
+  host.innerHTML = "";
 
   const g = document.createElementNS(SVG_NS, "g");
   g.setAttribute("class", "cta-btn" + (disabled ? " cta-disabled" : ""));
@@ -2830,7 +2923,7 @@ async function  maybeShowMissionEndPopup(mission){
     let rounds      = Array.isArray(mission.rounds)      ? mission.rounds      : null;
     if (!enrollments || !rounds){
       try{
-        const data = await apiMission(addr);
+        const data = await apiMission(addr, false);
         enrollments = data?.enrollments || [];
         rounds      = data?.rounds      || [];
       } catch {}
@@ -2931,7 +3024,7 @@ async function  renderStageEndedPanelIfNeeded(mission){
   // Partly Success / Success (5/6) — “Top winners” + subtype note
   let enrollments = [], rounds = [];
   try {
-    const data = await apiMission(mission.mission_address);
+    const data = await apiMission(mission.mission_address, false);
     enrollments = data?.enrollments || [];
     rounds      = data?.rounds       || [];
   } catch { /* keep empty */ }
@@ -3645,53 +3738,44 @@ function        stopCountdown(){ if (countdownTimer) { clearInterval(countdownTi
 // Joinable list:
 
 let joinableTimer = null;
+let joinableFetchInFlight = false;
+let lastJoinableRefreshAt = 0;
 
 function        startJoinableTicker(){
   stopJoinableTicker();
 
   const tick = () => {
+    if (document.hidden) return; // don’t churn in background tabs
+
     const nowSec = Math.floor(Date.now() / 1000);
     let needsRefresh = false;
 
-    // update "Starts in"
     document.querySelectorAll('[data-start]').forEach(el => {
       const t = Number(el.getAttribute('data-start') || 0);
-      if (t > 0) {
-        const left = Math.max(0, t - nowSec);
-        el.textContent = formatCountdown(t);
-        if (left <= 0) needsRefresh = true;
-      } else {
-        el.textContent = '—';
-      }
+      if (!t) { el.textContent = '—'; return; }
+
+      const left = Math.max(0, t - nowSec);
+      const prev = Number(el.dataset.prevLeft ?? Number.POSITIVE_INFINITY);
+      el.dataset.prevLeft = String(left);
+      el.textContent = formatCountdown(t);
+
+      // EDGE: only when we cross from >0 to 0
+      if (prev > 0 && left === 0) needsRefresh = true;
     });
 
-    // update "Ends in" for cards that provide it (e.g., My Missions active ones)
-    document.querySelectorAll('[data-end]').forEach(el => {
-      const t = Number(el.getAttribute('data-end') || 0);
-      el.textContent = t > 0 ? formatCountdown(t) : '—';
-    });
-
-    // color the current players count by min threshold
-    document.querySelectorAll('.players-count .current[data-min][data-current]').forEach(el => {
-      const cur = Number(el.getAttribute('data-current') || 0);
-      const min = Number(el.getAttribute('data-min') || 0);
-      el.classList.remove('ok', 'low');
-      el.classList.add(cur >= min ? 'ok' : 'low');
-      // keep the text updated in case API changed
-      el.textContent = String(cur);
-    });
-
-    // if any mission just reached start, refresh the list once
-    if (needsRefresh) {
-      // small debounce: stop ticker, refetch, re-render, restart
+    // small, safe cooldown and in-flight guard
+    if (needsRefresh && !joinableFetchInFlight && (Date.now() - lastJoinableRefreshAt) > 5000) {
+      joinableFetchInFlight = true;
+      lastJoinableRefreshAt = Date.now();
       stopJoinableTicker();
       apiJoinable()
-        .then(items => { renderJoinable(items); startJoinableTicker(); })
-        .catch(() => { /* ignore transient */ });
+        .then(items => { renderJoinable(items); })
+        .catch(() => {})
+        .finally(() => { joinableFetchInFlight = false; startJoinableTicker(); });
     }
   };
 
-  tick(); // immediate paint
+  tick(); // one paint
   joinableTimer = setInterval(tick, 1000);
 }
 
@@ -3703,6 +3787,12 @@ function        stopJoinableTicker(){
 
 async function  hydrateAllMissionsRealtime(listEl){
   if (!listEl) return;
+
+  // NEW: don’t churn when the tab or section is hidden
+  if (document.hidden) return;
+  const cs = getComputedStyle(listEl);
+  if (cs.display === "none" || cs.visibility === "hidden") return;
+
   const cards = [...listEl.querySelectorAll("li.mission-card")];
   if (!cards.length) return;
 
@@ -3759,7 +3849,7 @@ async function  openMission(addr){
   try {
     currentMissionAddr = addr.toLowerCase();
     await subscribeToMission(currentMissionAddr);
-    const data = await apiMission(currentMissionAddr);
+    const data = await apiMission(currentMissionAddr, false);
     renderMissionDetail(data);
     scheduleDetailRefresh(true);
     window.scrollTo({ top: els.missionDetail.offsetTop - 20, behavior: "smooth" });
@@ -3784,9 +3874,10 @@ async function  closeMission(){
   if (cameFromStage && addr){
     // Re-open the stage for the same mission
     try {
-      const data = await apiMission(addr);
+      const data = await apiMission(addr, false);
       const m = enrichMissionFromApi(data);
       await showGameStage(m);
+      await apiMission(currentMissionAddr, true);
       await renderStageEndedPanelIfNeeded(m);
       stageReturnTo = null;
       return;
@@ -3864,7 +3955,7 @@ async function  triggerRoundCurrentMission(mission){
     await tx.wait();
 
     showAlert("Round triggered!", "success");
-    const data = await apiMission(mission.mission_address);
+    const data = await apiMission(mission.mission_address, true);
     renderMissionDetail(data);
   } catch (err) {
     console.error(err);
@@ -3917,15 +4008,6 @@ async function  init(){
 
   // 2) other existing listeners (unchanged)
   els.closeMissionBtn?.addEventListener("click", closeMission);
-  els.reloadMissionBtn?.addEventListener("click", async () => {
-    if (!currentMissionAddr) return;
-    try {
-      const data = await apiMission(currentMissionAddr);
-      renderMissionDetail(data);
-    } catch (e) {
-      showAlert("Reload failed. Please check your connection.", "error");
-    }
-  });
 
   // 3) kick off first load with a timeout so init never “hangs”
   try {
@@ -3942,7 +4024,7 @@ async function  init(){
       }
     try {
       // icon-only button → keep original innerHTML, no text label
-      const data = await apiMission(currentMissionAddr);
+      const data = await apiMission(currentMissionAddr, true);
       renderMissionDetail(data);
     } catch (e) {
       showAlert("Reload failed. Please check your connection.", "error");
