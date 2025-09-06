@@ -111,7 +111,8 @@ const JOIN_CACHE_KEY        = "_b6joined";
 const MISSION_CACHE_TTL_MS  = 15000;
 let __missionSnapCache      = { addr:"", ts:0, data:null };
 const __missionInflight     = new Map();
-const API_SOFT_THROTTLE_MS = 1200;
+const __missionMicroCache   = new Map();           // addr -> { ts, payload }
+const MICRO_TTL_MS          = 900;   
 
 // miscellaneous 
 let   staleWarningShown     = false;
@@ -1590,31 +1591,31 @@ async function apiMission(addr, force = false) {
   const now     = Date.now();
   const onStage = !!(document.getElementById('gameMain')?.classList.contains('stage-mode'));
 
-  // Stage cache (unchanged behavior)
-  if (onStage && !force) {
-    if (__missionSnapCache.addr === lcAddr && __missionSnapCache.data && (now - __missionSnapCache.ts) < MISSION_CACHE_TTL_MS) {
-      return __missionSnapCache.data;
-    }
+  if (            !force && __missionSnapCache.addr === lcAddr && __missionSnapCache.data && (now - __missionSnapCache.ts) < 900) {
+    return __missionSnapCache.data;
   }
+
+  // Stage cache (unchanged behavior)
+  if (onStage &&  !force && __missionSnapCache.addr === lcAddr && __missionSnapCache.data && (now - __missionSnapCache.ts) < MISSION_CACHE_TTL_MS) {
+      return __missionSnapCache.data;
+  }
+
+    // Micro window: if we fetched this addr very recently, reuse that payload (collapses “paired” calls)
+    const mc = __missionMicroCache.get(lcAddr);
+    if (mc && (now - mc.ts) < MICRO_TTL_MS) {
+      return mc.payload;
+    }
 
   // Coalesce concurrent requests for the same address (even if force=true)
   if (__missionInflight.has(lcAddr)) {
     return __missionInflight.get(lcAddr);
   }
 
-  // Soft throttle: if we *just* fetched this on the stage, reuse the snapshot
-  if (onStage) {
-    const sameAddr = (__missionSnapCache.addr === lcAddr);
-    const ageMs    = sameAddr ? (now - (__missionSnapCache.ts || 0)) : Number.POSITIVE_INFINITY;
-    if (!force && sameAddr && ageMs >= 0 && ageMs < API_SOFT_THROTTLE_MS && __missionSnapCache.data) {
-      return __missionSnapCache.data;
-    }
-  }
-
   const p = (async () => {
     const r = await fetch(`/api/missions/mission/${addr}`);
     if (!r.ok) throw new Error("/api/missions/mission failed");
     const data = await r.json(); // ← await the JSON
+    __missionMicroCache.set(lcAddr, { ts: Date.now(), payload: data });
     if (onStage) {
       __missionSnapCache = { addr: lcAddr, ts: Date.now(), data };
     }
@@ -1733,17 +1734,10 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
     dbg("refreshOpenStageFromServer FAILED", e?.message || e);
     scheduleRetry(retries);
   } finally {
+    stageRefreshBusy = false;
     if (stageRefreshPending) {
       stageRefreshPending = false;
-      // Only refetch if the last stage snapshot isn't super fresh yet
-      const lastTs = (__missionSnapCache.addr === (currentMissionAddr || "").toLowerCase())
-        ? (__missionSnapCache.ts || 0) : 0;
-      const ageMs = Date.now() - lastTs;
-      if (ageMs > API_SOFT_THROTTLE_MS) {
-        setTimeout(() => refreshOpenStageFromServer(1, Math.max(2500, delay)), 750);
-      } else {
-        // fresh enough → skip the redundant follow-up
-      }
+      setTimeout(() => refreshOpenStageFromServer(1, Math.max(2500, delay)), 750);
     }
   }
 
