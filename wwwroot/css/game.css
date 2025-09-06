@@ -227,3 +227,18 @@ body.scroll-lock{
 @supports (height: 100dvh){
   #gameMain.stage-mode #stageViewport{ height: 100dvh; }
 }
+
+.badge-refunded {
+  background: rgba(250, 204, 21, 0.12); /* amber-300 bg tint */
+  color: #facc15;                       /* amber-400 text */
+}
+
+.badge-refund-pending {
+  background: rgba(245, 158, 11, 0.12); /* amber-500 bg tint */
+  color: #f59e0b;                       /* amber-500 text */
+}
+
+.badge-cancelled {
+  background: rgba(156, 163, 175, 0.15);/* gray-400 bg tint */
+  color: #9ca3af;                       /* gray-400 text */
+}

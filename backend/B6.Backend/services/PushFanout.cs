@@ -145,17 +145,20 @@ namespace B6.Backend.Services
             await using var c = new NpgsqlConnection(_cs);
             await c.OpenAsync();
             await using var cmd = new NpgsqlCommand(@"
-                select pause_timestamp, round_count, mission_rounds_total from missions where mission_address=@a;", c);
+                select pause_timestamp, round_count, mission_rounds_total, round_pause_secs, last_round_pause_secs
+                from missions where mission_address=@a;", c);
             cmd.Parameters.AddWithValue("a", mission.ToLowerInvariant());
             await using var rd = await cmd.ExecuteReaderAsync();
             if (!await rd.ReadAsync()) return null;
 
-            var pause = rd["pause_timestamp"] is DBNull ? 0 : (long)rd["pause_timestamp"];
-            var rc    = rd["round_count"] is DBNull ? 0 : (short)rd["round_count"];
-            var total = rd["mission_rounds_total"] is DBNull ? 0 : (short)rd["mission_rounds_total"];
+            var pause = rd["pause_timestamp"]               is DBNull ?  0 : (long)rd["pause_timestamp"];
+            var rc    = rd["round_count"]                   is DBNull ?  0 : (short)rd["round_count"];
+            var total = rd["mission_rounds_total"]          is DBNull ?  0 : (short)rd["mission_rounds_total"];
             if (pause <= 0) return null;
 
-            var secs = (rc == (total - 1)) ? 60 : 300;
+            var roundPause = rd["round_pause_secs"]         is DBNull ? 60 : (short)rd["round_pause_secs"];
+            var lastPause  = rd["last_round_pause_secs"]    is DBNull ? 60 : (short)rd["last_round_pause_secs"];
+            var secs       = (rc == (total - 1)) ? lastPause : roundPause;
             return DateTimeOffset.FromUnixTimeSeconds(pause + secs).UtcDateTime;
         }
 

@@ -167,6 +167,20 @@
                                     class="form-control" required>
                         </div>
 
+                        <div class="col-sm-6">
+                            <label for="roundPauseDuration" class="form-label">Round pause (seconds)</label>
+                            <input id="roundPauseDuration" name="roundPauseDuration" type="number" class="form-control"
+                                min="60" max="255" step="1" required value="60">
+                            <div class="form-text">Cooldown after non-final rounds.</div>
+                        </div>
+
+                        <div class="col-sm-6">
+                            <label for="lastRoundPauseDuration" class="form-label">Final-round pause (seconds)</label>
+                            <input id="lastRoundPauseDuration" name="lastRoundPauseDuration" type="number" class="form-control"
+                                min="60" max="255" step="1" required value="60">
+                            <div class="form-text">Cooldown before the last round.</div>
+                        </div>
+
                         <div class="col-md-6">
                             <label class="form-label" for="rounds">Mission Rounds</label>
                             <input id="rounds" name="rounds" type="number" min="5" placeholder=">= 5"

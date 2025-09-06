@@ -216,8 +216,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * These variables store the state of the contract, including authorized addresses, reserved funds, mission statuses, and the implementation address for missions.
      */
     address[]                               public  missions;                                   // Array to hold all mission addresses
-    uint8                                   public  weeklyLimit = 4;                            // Maximum number of missions a player can enroll in per week
-    uint8                                   public  monthlyLimit = 10;                          // Maximum number of missions a player can enroll in per month
+    uint8                                   public  weeklyLimit = 7;                            // Maximum number of missions a player can enroll in per week
+    uint8                                   public  monthlyLimit = 15;                          // Maximum number of missions a player can enroll in per month
     uint256                                 public  totalMissionFunds;                          // Total funds registered by missions
     uint256                                 public  totalOwnerEarnedFunds;                      // Total funds earned by the owner from missions
     uint256                                 public  totalMissionSuccesses;                      // Total number of successful missions
@@ -1081,7 +1081,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             address m = missions[total - 1 - i];            // Get the address of the mission
             result[i] = m;                                  // Add the mission address to the result array  
             statuses[i] = uint8(missionStatus[m]);          // Add the status of the mission to the statuses array
-            names[i] = missionNames[missions[m]];           // Add the mission name to the output array
+            names[i] = missionNames[m];                     // Add the mission name to the output array
        }
 
         return (result, statuses, names);                   // Return arrays: addresses of missions not ended, their statuses and names  
@@ -1145,7 +1145,6 @@ contract Mission        is Ownable, ReentrancyGuard {
     event MissionRefunded       (uint256    indexed nrOfPlayers,    uint256     indexed amount,         address[] player,  uint256 timestamp); // Event emitted when a player is refunded
     event MissionInitialized    (address    indexed owner,          MissionType indexed missionType,    uint256 timestamp                   );
 	event PotIncreased			(uint256			value,			uint256				croCurrent											);
-	event PauseDurationUpdated	(uint8				rounds,			uint8				lastround											);
     // #endregion
 
 
@@ -1250,8 +1249,6 @@ contract Mission        is Ownable, ReentrancyGuard {
     MissionData                 private _missionData;                   // Struct to hold all mission data  
     bool                        private _initialized;                   // Flag to track if the contract has been initialized
     Status                      private _previousStatus;                // Track the previous status of the mission
-	uint8						public	roundPauseDuration 	   = 60;    // Cooldown duration: rounds before the penultimate round
-	uint8						public  lastRoundPauseDuration = 60;    // Cooldown duration: before final round
 
     // #endregion
 
@@ -1440,8 +1437,9 @@ contract Mission        is Ownable, ReentrancyGuard {
         uint256 nowTs = block.timestamp;                                                                                // Get the current timestamp
 
         if (s == Status.Paused) {
-            uint256 cd = (_missionData.roundCount + 1 == _missionData.missionRounds)
-                ? lastRoundPauseDuration : roundPauseDuration;                                                                	// Cooldown duration
+            uint256 cd = (_missionData.roundCount + 1 == _missionData.missionRounds)                                    // If next round is the last round, use lastRoundPauseDuration
+                ? _missionData.lastRoundPauseDuration
+                : _missionData.roundPauseDuration;                                                                	    
             uint256 secsLeft = _missionData.pauseTimestamp + cd - nowTs;                                                // Calculate seconds left in the cooldown period
                                                                     revert Cooldown(secsLeft);                          // Ensure the mission is not in a cooldown period
         }
@@ -1575,14 +1573,12 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @return The number of seconds until the next round starts, or 0 if the mission is not paused.
      */
     function secondsUntilNextRound()        external view returns (uint256) {
-        Status s = _getRealtimeStatus();                                        // Get the current real-time status of the mission
-        if (s != Status.Paused) {
-            return 0;                                                           // If the mission is not paused, return 0 seconds until next round
-        }
-        uint256 nowTs = block.timestamp;                                        // Get the current timestamp
-        uint256 cd = (_missionData.roundCount + 1 == _missionData.missionRounds)
-            ? lastRoundPauseTime : roundPauseTime;                             	// Cooldown duration
-        return _missionData.pauseTimestamp + cd - nowTs;                        // Calculate seconds until next round based on pause timestamp and cooldown duration
+        if (_getRealtimeStatus() != Status.Paused) return 0;                        // If the mission is not paused, return 0
+        uint256 cd = (_missionData.roundCount + 1 == _missionData.missionRounds)    // Cooldown duration
+            ? _missionData.lastRoundPauseDuration                                   
+            : _missionData.roundPauseDuration;
+        uint256 nowTs = block.timestamp;                                            // Get the current timestamp
+        return _missionData.pauseTimestamp + cd - nowTs;                            // Calculate and return the seconds until the next round starts
     }
 
     /**
@@ -1813,11 +1809,12 @@ contract Mission        is Ownable, ReentrancyGuard {
                 return Status.Active;                                       // mission is active, no pause in progress
             } else if (nowTs < _missionData.pauseTimestamp +
                 ((_missionData.roundCount + 1 == _missionData.missionRounds)
-                    ? _lastRoundPauseDuration
-                    : _roundPauseDuration))                                 // if pause time is set, check if we are still in the pause window
+                    ? _missionData.lastRoundPauseDuration
+                    : _missionData.roundPauseDuration))
             {
-                return Status.Paused;                                       // in pause window, waiting for next round
-            } else {
+                return Status.Paused;
+            }
+            else {
                 return Status.Active;                                       // mission is active, no pause in progress                   
             }           
         }

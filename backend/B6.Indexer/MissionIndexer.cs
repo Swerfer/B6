@@ -152,8 +152,6 @@ namespace B6.Indexer
         }
 
         private async Task                              PollRealtimeStatusesAsync   (CancellationToken token) {
-            // 0) (Optional) Ensure DB columns exist – comment out if you run DDL yourself
-            await EnsureRealtimeColumnsAsync(token);
 
             // 1) Load missions that are "not ended" per DB (status < 5)
             var missions = new List<string>();
@@ -218,38 +216,11 @@ namespace B6.Indexer
                     if (potChanged)
                         await NotifyMissionUpdatedAsync(a, token);
                 }
-                catch 
+                catch (Exception ex)
                 { 
-                    _log.LogInformation((rt == 5 ? "TryAutoFinalizeAsync" : "TryAutoRefundAsync") + " - Mission: {a} - Realtime status: {rt}", a, rt);
+                    _log.LogWarning(ex, (rt == 5 ? "TryAutoFinalizeAsync" : "TryAutoRefundAsync") + " failed for mission {mission}; Realtime status: {rt}", a, rt);
                 }
             }
-        }
-
-        private async Task                              EnsureRealtimeColumnsAsync  (CancellationToken token) {
-            try
-            {
-                await using var c = new NpgsqlConnection(_pg);
-                await c.OpenAsync(token);
-                await using var cmd = new NpgsqlCommand(@"
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM information_schema.columns
-                            WHERE table_name='missions' AND column_name='realtime_status'
-                        ) THEN
-                            ALTER TABLE missions ADD COLUMN realtime_status SMALLINT;
-                        END IF;
-
-                        IF NOT EXISTS (
-                            SELECT 1 FROM information_schema.columns
-                            WHERE table_name='missions' AND column_name='realtime_checked_at'
-                        ) THEN
-                            ALTER TABLE missions ADD COLUMN realtime_checked_at TIMESTAMPTZ;
-                        END IF;
-                    END$$;", c);
-                await cmd.ExecuteNonQueryAsync(token);
-            }
-            catch { /* optional; ignore if insufficient perms */ }
         }
 
         private async Task                              ScanFactoryEventsAsync      (CancellationToken token, long? latestOverride = null) {
@@ -377,24 +348,33 @@ namespace B6.Indexer
                         var a   = (ev.Event.Mission ?? string.Empty).ToLowerInvariant();
                         var blk = (long)ev.Log.BlockNumber.Value;
 
-                        // NEW: pull MissionData so we can take missionCreated from the tuple
-                        var wrap = await _web3.Eth.GetContractQueryHandler<GetMissionDataFunction>()
-                            .QueryDeserializingToObjectAsync<MissionDataWrapper>(
-                                new GetMissionDataFunction(), a, null)
-                            .ConfigureAwait(false);
+                        MissionDataWrapper wrap;
+                        try
+                        {
+                            wrap = await RunRpc(
+                                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                                            new GetMissionDataFunction(), a, null),
+                                "Call.getMissionData");
+                        }
+                        catch (Exception ex)
+                        {
+                            _log.LogError(ex, "Factory seed: getMissionData failed for {addr}; skipping this event", a);
+                            continue; // or: throw to let the window retry logic handle it
+                        }
                         var md = wrap.Data;
 
                         await using var up = new NpgsqlCommand(@"
                             insert into missions (
                             mission_address, name, mission_type, status,
                             enrollment_start, enrollment_end, enrollment_amount_wei,
-                            enrollment_min_players, enrollment_max_players,
+                            enrollment_min_players, enrollment_max_players, round_pause_secs, last_round_pause_secs,
                             mission_start, mission_end, mission_rounds_total, round_count,
                             cro_start_wei, cro_current_wei, pause_timestamp, mission_created, last_seen_block, updated_at
                             ) values (
                             @a,@n,@ty,@st,
                             @es,@ee,@amt,
-                            @min,@max,
+                            @min,@max,@rps,@lrps,
                             @ms,@me,@rt,0,
                             @cs,@cc,null,@mc,@blkMinus1, now()
                             )
@@ -428,13 +408,15 @@ namespace B6.Indexer
                         up.Parameters.Add("amt", NpgsqlDbType.Numeric).Value = ev.Event.EnrollmentAmount;
                         up.Parameters.AddWithValue("min",   (short)ev.Event.MinPlayers);
                         up.Parameters.AddWithValue("max",   (short)ev.Event.MaxPlayers);
+                        up.Parameters.AddWithValue("rps",   (short)ev.Event.RoundPauseDuration);
+                        up.Parameters.AddWithValue("lrps",  (short)ev.Event.LastRoundPauseDuration);
                         up.Parameters.AddWithValue("ms",    (long)ev.Event.MissionStart);
                         up.Parameters.AddWithValue("me",    (long)ev.Event.MissionEnd);
                         up.Parameters.AddWithValue("rt",    (short)ev.Event.MissionRounds);
 
                         // pull initial pool directly from getMissionData() we already queried above
-                        up.Parameters.Add("cs", NpgsqlDbType.Numeric).Value = md.EthStart;
-                        up.Parameters.Add("cc", NpgsqlDbType.Numeric).Value = md.EthCurrent;
+                        up.Parameters.Add("cs", NpgsqlDbType.Numeric).Value = md.CroStart;
+                        up.Parameters.Add("cc", NpgsqlDbType.Numeric).Value = md.CroCurrent;
 
                         var createdUnix = tsByBlock.TryGetValue(blk, out var cr)
                             ? new DateTimeOffset(cr).ToUnixTimeSeconds()
@@ -518,9 +500,19 @@ namespace B6.Indexer
                             await tx.CommitAsync(token);
 
                             foreach (var (a, s) in pushStatuses)
-                            {
-                                try { await NotifyStatusAsync(a, s, token); } catch { /* best-effort */ }
-                                if (s == 7) { try { await TryAutoRefundAsync(a, token); } catch { /* best-effort */ } }
+                            {   
+                                try { 
+                                    await NotifyStatusAsync(a, s, token); 
+                                } catch (Exception ex) {
+                                    _log.LogWarning(ex, "Notify status failed for {addr}", a); 
+                                }
+                                if (s == 7) { 
+                                    try { 
+                                        await TryAutoRefundAsync(a, token); 
+                                    } catch (Exception ex) {
+                                        _log.LogWarning(ex, "Auto refund failed for {addr}", a); 
+                                    }
+                                }
                             }
                             pushStatuses.Clear();
 
@@ -768,8 +760,10 @@ namespace B6.Indexer
                                     insert into mission_enrollments (mission_address, player_address, refunded, refund_tx_hash)
                                     values (@a,@p, true, @tx)
                                     on conflict (mission_address, player_address) do update set
-                                        refunded = true,
-                                        refund_tx_hash = excluded.refund_tx_hash;", conn, tx);
+                                        refunded                = true,
+                                        refund_tx_hash          = excluded.refund_tx_hash,
+                                        round_pause_secs        = excluded.round_pause_secs,
+                                        last_round_pause_secs   = excluded.last_round_pause_secs;", conn, tx);
                                 u.Parameters.AddWithValue("a",  addr);
                                 u.Parameters.AddWithValue("p",  p);
                                 u.Parameters.AddWithValue("tx", txh);
@@ -863,10 +857,15 @@ namespace B6.Indexer
                                 var potChanged = await RefreshPotFromChainAsync(addr, token);
                                 if (potChanged && !missionUpdated)
                                     await NotifyMissionUpdatedAsync(addr, token);
+                            } catch (Exception ex) {
+                                _log.LogWarning(ex, "Notify failed for {addr}", addr); 
                             }
-                            catch { /* best-effort */ }
 
-                            try { await TryAutoFinalizeAsync(addr, token); } catch { /* best-effort */ }
+                            try { 
+                                await TryAutoFinalizeAsync(addr, token); 
+                            } catch (Exception ex) {
+                                _log.LogWarning(ex, "Finalize mission failed for {addr}", addr); 
+                            }
 
                             windowSucceeded = true;
                             break; // success for this window
@@ -969,8 +968,8 @@ namespace B6.Indexer
                 up.Parameters.AddWithValue("rt", (short)md.MissionRounds);
                 up.Parameters.AddWithValue("rc", (short)md.RoundCount);
 
-                up.Parameters.Add("cs", NpgsqlDbType.Numeric).Value = md.EthStart;
-                up.Parameters.Add("cc", NpgsqlDbType.Numeric).Value = md.EthCurrent;
+                up.Parameters.Add("cs", NpgsqlDbType.Numeric).Value = md.CroStart;
+                up.Parameters.Add("cc", NpgsqlDbType.Numeric).Value = md.CroCurrent;
 
                 up.Parameters.AddWithValue("pt",  ToInt64(md.PauseTimestamp));
                 up.Parameters.AddWithValue("mc",  ToInt64(md.MissionCreated));
@@ -1414,8 +1413,8 @@ namespace B6.Indexer
                     or cro_current_wei is distinct from @cc);", c);
 
             up.Parameters.AddWithValue("a", mission);
-            up.Parameters.Add("cs", NpgsqlTypes.NpgsqlDbType.Numeric).Value = md.EthStart;
-            up.Parameters.Add("cc", NpgsqlTypes.NpgsqlDbType.Numeric).Value = md.EthCurrent;
+            up.Parameters.Add("cs", NpgsqlTypes.NpgsqlDbType.Numeric).Value = md.CroStart;
+            up.Parameters.Add("cc", NpgsqlTypes.NpgsqlDbType.Numeric).Value = md.CroCurrent;
 
             var rows = await up.ExecuteNonQueryAsync(token);
             return rows > 0; // true → pot changed and DB was updated

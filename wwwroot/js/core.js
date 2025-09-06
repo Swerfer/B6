@@ -38,8 +38,8 @@ if (res.ok) {
 
 export const FACTORY_ABI = [
   // --------- Factory methods ----------
-  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8,string) payable returns(address)",
-  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)",
+  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint8,uint8,uint256,uint256,uint8,string) payable returns(address,string)",
+  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint8 roundPauseDuration,uint8 lastRoundPauseDuration,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)",
   // --------- Get missions views ----------
   "function getAllMissions() view returns(address[] missions, uint8[] statuses, string[] names)",
   "function getMissionsByStatus(uint8 status) view returns(address[] missions, uint8[] statuses, string[] names)",
@@ -86,6 +86,8 @@ export const MISSION_ABI = [
         uint256 enrollmentAmount,\
         uint8 enrollmentMinPlayers,\
         uint8 enrollmentMaxPlayers,\
+        uint8 roundPauseDuration,\
+        uint8 lastRoundPauseDuration,\
         uint256 missionStart,\
         uint256 missionEnd,\
         uint8 missionRounds,\
@@ -109,61 +111,63 @@ export const MISSION_ABI = [
 export const shorten = addr =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
 
-export function weiToCro(weiStr, decimals = null) {
-  // decimals === null  → legacy "trimmed" (up to 6 decimals, then trim)
-  // decimals is number → round to that many decimals, then trim trailing zeros
-  if (!weiStr) {
-    return decimals == null ? "0" : "0";
-  }
+// wei (string|bigint|number) → CRO string
+// decimals: null  => legacy (up to 6, trimmed zeros)
+//           number => round to that many decimals
+// fixed: keep exactly `decimals` digits (pads trailing zeros)
+export function weiToCro(weiStr, decimals = null, fixed = false) {
+  if (weiStr == null) return decimals ? (fixed && decimals > 0 ? `0.${"0".repeat(decimals)}` : "0") : "0";
 
   try {
-    const wei  = BigInt(weiStr);
-    const base = 10n ** 18n;
+    const wei = BigInt(String(weiStr));
 
-    // Legacy trimmed mode (unchanged)
+    // LEGACY: null → up to 6 decimals, trimmed zeros
     if (decimals == null) {
-      const i    = wei / base;
-      const fraw = (wei % base).toString().padStart(18, "0");
-      const f    = fraw.slice(0, 6).replace(/0+$/, "");
-      return f ? `${i}.${f}` : `${i}`;
+      const i = (wei / 10n**18n).toString();
+      const fraw = (wei % 10n**18n).toString().padStart(18, "0");
+      const f = fraw.slice(0, 6).replace(/0+$/, "");
+      return f ? `${i}.${f}` : i;
     }
 
-    const d = Math.max(0, Number(decimals));
+    // decimals specified → proper HALF-UP rounding
+    const d = Math.max(0, Number(decimals) | 0);
 
-    // Round half-up to d decimals (handle negatives safely)
-    let scaled;
+    if (d === 0) {
+      // nearest integer CRO
+      const half = 10n**17n; // 0.5 * 10^18
+      const whole = (wei + half) / 10n**18n;
+      return whole.toString();
+    }
+
     if (d <= 18) {
-      const pow  = 10n ** (18n - BigInt(d));   // wei per 10^-d CRO
-      const half = pow / 2n;
-      scaled = wei >= 0n ? (wei + half) / pow  : (wei - half) / pow;
+      const scaleDown = 10n ** BigInt(18 - d);
+      const half = scaleDown / 2n;
+      const scaled = (wei + half) / scaleDown;        // integer of CRO * 10^d
+      const powD   = 10n ** BigInt(d);
+      const int    = (scaled / powD).toString();
+      let frac     = (scaled % powD).toString().padStart(d, "0");
+      if (!fixed) frac = frac.replace(/0+$/, "");
+      return frac ? `${int}.${fixed ? frac : frac}`.replace(/\.$/, "") : int;
     } else {
-      // More digits than on-chain precision → exact expansion (no rounding possible)
-      const mul = 10n ** (BigInt(d) - 18n);
-      scaled = wei * mul;
+      // d > 18 → just append extra zeros; no extra precision exists beyond 18
+      const mul    = 10n ** BigInt(d - 18);
+      const scaled = wei * mul;
+      const powD   = 10n ** BigInt(d);
+      const int    = (scaled / powD).toString();
+      let frac     = (scaled % powD).toString().padStart(d, "0");
+      if (!fixed) frac = frac.replace(/0+$/, "");
+      return frac ? `${int}.${fixed ? frac : frac}`.replace(/\.$/, "") : int;
     }
-
-    if (d === 0) return scaled.toString();
-
-    const div      = 10n ** BigInt(d);
-    const intPart  = (scaled / div).toString();
-    let   fracPart = (scaled % div).toString().padStart(d, "0");
-
-    // Trim trailing zeros (so 212.010 → 212.01, 212.000 → 212)
-    fracPart = fracPart.replace(/0+$/, "");
-    return fracPart ? `${intPart}.${fracPart}` : intPart;
-
   } catch {
-    // Fallback for non-BigIntable inputs
+    // Fallback for environments without BigInt support
     const n = Number(weiStr) / 1e18;
-    if (!Number.isFinite(n)) return String(weiStr);
-
+    if (!isFinite(n)) return "0";
     if (decimals == null) {
-      const s = n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
-      return s;
-    } else {
-      const s = n.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
+      const s = n.toFixed(6).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
       return s;
     }
+    const s = n.toFixed(Math.max(0, Number(decimals) | 0));
+    return fixed ? s : s.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
   }
 }
 
@@ -340,7 +344,7 @@ export function setBtnLoading(btn, state = true, label = "", restore = true) {
   }
 }
 
-// #region ---------- DOM caches ---------- */
+// #region DOM caches
 const modalOverlay = document.getElementById("modalOverlay");
 const confirmModal = document.getElementById("confirmModal");
 const modalMsg     = document.getElementById("modalMessage");

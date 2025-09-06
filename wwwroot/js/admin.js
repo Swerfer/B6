@@ -76,6 +76,8 @@ const validate = () => {
   const rounds = valNum(f.rounds);                  // ≥ 5
   const minP   = valNum(f.minPlayers);              // ≥ rounds
   const maxP   = valNum(f.maxPlayers);              // ≥ minP
+  const rpd    = valNum(f.roundPauseDuration);
+  const lrpd   = valNum(f.lastRoundPauseDuration);
   const fee    = parseFloat(f.enrollmentAmount.value);
   const sEraw  = f.enrollmentStart.value;
   const eEraw  = f.enrollmentEnd.value;
@@ -87,14 +89,16 @@ const validate = () => {
   const mE     = mEraw ? new Date(mEraw) : NaN;
 
   /* ---- mandatory & range checks ---- */
-  if(isNaN(rounds)         || rounds < 5)            bad.push(f.rounds);
-  if(isNaN(minP)           || minP   < rounds)       bad.push(f.minPlayers);
-  if(isNaN(maxP)           || maxP   < minP)         bad.push(f.maxPlayers);
-  if(!sEraw)                                         bad.push(f.enrollmentStart);
-  if(!eEraw  || !(sE < eE))                          bad.push(f.enrollmentEnd);
-  if(!mSraw  || !(mS >= eE))                         bad.push(f.missionStart);
-  if(!mEraw  || !(mE >  mS))                         bad.push(f.missionEnd);
-  if(isNaN(fee)            || fee   <= 0)            bad.push(f.enrollmentAmount);
+  if(isNaN(rounds)  || rounds < 5)              bad.push(f.rounds);
+  if(isNaN(minP)    || minP   < rounds)         bad.push(f.minPlayers);
+  if(isNaN(maxP)    || maxP   < minP)           bad.push(f.maxPlayers);
+  if(isNaN(rpd)     || rpd  < 60 || rpd  > 255) bad.push(f.roundPauseDuration);     // 1 minute to 4 minute 15
+  if(isNaN(lrpd)    || lrpd < 60 || lrpd > 255) bad.push(f.lastRoundPauseDuration); // 1 minute to 4 minute 15 
+  if(!sEraw)                                    bad.push(f.enrollmentStart);
+  if(!eEraw         || !(sE < eE))              bad.push(f.enrollmentEnd);
+  if(!mSraw         || !(mS >= eE))             bad.push(f.missionStart);
+  if(!mEraw         || !(mE >  mS))             bad.push(f.missionEnd);
+  if(isNaN(fee)     || fee   <= 0)              bad.push(f.enrollmentAmount);
 
   return { ok: bad.length === 0, bad };
 };
@@ -167,6 +171,8 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       enrollmentAmount,
       enrollmentMinPlayers,
       enrollmentMaxPlayers,
+      roundPauseDuration,
+      lastRoundPauseDuration,
       missionStart,
       missionEnd,
       missionRounds,
@@ -201,6 +207,8 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       `<tr><th>Mission End</th>        <td>${formatLocalDateTime(missionEnd)}</td></tr>`,
       `<tr><th>Min Players</th>        <td>${enrollmentMinPlayers}</td></tr>`,
       `<tr><th>Max Players</th>        <td>${enrollmentMaxPlayers}</td></tr>`,
+      `<tr><th>Round Pause</th>        <td>${formatSecondsToDHMS(Number(roundPauseDuration))}</td></tr>`,
+      `<tr><th>Final Round Pause</th>  <td>${formatSecondsToDHMS(Number(lastRoundPauseDuration))}</td></tr>`,
       `<tr><th>Rounds</th>             <td>${missionRounds}</td></tr>`,
       `<tr><th>Mission round Count</th><td>${roundCount}</td></tr>`,
       `<tr><th>Enrollment Amount</th>  <td>${ethers.utils.formatEther(enrollmentAmount)} CRO</td></tr>`,
@@ -1146,6 +1154,8 @@ form?.addEventListener("submit", async e => {
       eth.parseEther(f.enrollmentAmount.value),// enrollmentAmount
       parseInt(f.minPlayers.value),            // min players
       parseInt(f.maxPlayers.value),            // max players
+      parseInt(f.roundPauseDuration.value),    // roundPauseDuration  (uint8)
+      parseInt(f.lastRoundPauseDuration.value),// lastRoundPauseDuration (uint8)
       toUnix(f.missionStart.value),            // missionStart
       toUnix(f.missionEnd.value),              // missionEnd
       parseInt(f.rounds.value),                // missionRounds

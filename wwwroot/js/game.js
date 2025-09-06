@@ -62,7 +62,7 @@ const MISSION_ERROR_ABI   = [
 ];
 const __missionErrIface   = new ethers.utils.Interface(MISSION_ERROR_ABI);
 const __mcIface           = new ethers.utils.Interface([
-  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)"
+  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint8 roundPauseDuration,uint8 lastRoundPauseDuration,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)"
 ]);
 const connectBtn          = document.getElementById("connectWalletBtn");
 const sectionBoxes        = document.querySelectorAll(".section-box");
@@ -513,6 +513,80 @@ function        computeBankNowWei(mission, lastBankTs, now = Math.floor(Date.now
   }
 }
 
+function        counterColorForWei(mission, accruedWei){
+  try {
+    const feeWei   = BigInt(String(mission?.enrollment_amount_wei || "0"));
+    const baseWei  = BigInt(String(mission?.cro_start_wei || "0"));
+    const roundsBN = BigInt(String(mission?.mission_rounds_total ?? mission?.mission_rounds ?? 1) || "1");
+    const perRoundWei = (roundsBN > 0n) ? (baseWei / roundsBN) : baseWei;
+
+    let v = BigInt(String(accruedWei || "0"));
+    if (v < 0n) v = 0n;
+
+    // BigInt-safe fraction → [0,1]
+    const unit = 10000n;
+    const toT = (num, den) => {
+      if (den <= 0n) return 0;
+      const q = (num * unit) / den;
+      return Number(q) / Number(unit);
+    };
+
+    // HSL → HEX
+    const hslToHex = (h, s, l) => {
+      h = Math.max(0, Math.min(360, h));
+      s = Math.max(0, Math.min(100, s));
+      l = Math.max(0, Math.min(100, l));
+      const c = (1 - Math.abs(2*l/100 - 1)) * (s/100);
+      const hp = h/60;
+      const x = c * (1 - Math.abs(hp % 2 - 1));
+      let r=0, g=0, b=0;
+      if      (0 <= hp && hp < 1) { r=c; g=x; b=0; }
+      else if (1 <= hp && hp < 2) { r=x; g=c; b=0; }
+      else if (2 <= hp && hp < 3) { r=0; g=c; b=x; }
+      else if (3 <= hp && hp < 4) { r=0; g=x; b=c; }
+      else if (4 <= hp && hp < 5) { r=x; g=0; b=c; }
+      else if (5 <= hp && hp < 6) { r=c; g=0; b=x; }
+      const m = l/100 - c/2;
+      const to255 = v => Math.round((v + m) * 255);
+      const hex = (n) => n.toString(16).padStart(2, '0');
+      return `#${hex(to255(r))}${hex(to255(g))}${hex(to255(b))}`;
+    };
+
+    const lerp = (a,b,t) => a + (b-a)*t;
+
+    if (feeWei === 0n && perRoundWei === 0n) return "#cfe8ff"; // neutral fallback
+
+    if (feeWei > 0n && v <= feeWei) {
+      // 0 → Enrollment Fee: blue-grey → almost-green (tealish)
+      const t = toT(v, feeWei);
+      const h = lerp(210, 135, t); // 210° (slate-blue) → 135° (near-green teal)
+      const s = lerp(30, 80,  t);
+      const l = lerp(78, 70,  t);
+      return hslToHex(h, s, l);
+    } else {
+      // Enrollment Fee → PoolStart/Rounds: green → yellow → orange → red
+      const denom = (perRoundWei > feeWei) ? (perRoundWei - feeWei) : 1n;
+      const t = toT((v - feeWei < 0n) ? 0n : (v - feeWei), denom);
+      const h = Math.max(0, 120 - 120 * t); // 120° (green) → 0° (red)
+      const s = 92;
+      const l = 68;
+      return hslToHex(h, s, l);
+    }
+  } catch {
+    return "#d0e1ff";
+  }
+}
+
+function        applyCounterColor(el, mission, accruedWei){
+  const col = counterColorForWei(mission, accruedWei);
+  el.style.fill = col;
+  // subtle outline so text stays readable on your background
+  el.style.paintOrder = "stroke fill";
+  el.style.stroke = "rgba(0,0,0,0.35)";
+  el.style.strokeWidth = "1px";
+  return col;
+}
+
 function        cooldownInfo(mission, now = Math.floor(Date.now()/1000)){
   const st          = Number(mission?.status);
   const isPaused    = (st === 4);
@@ -640,6 +714,21 @@ function        failureReasonFor(mission){
   return null;
 }
 
+function        prettyStatusForList(status, md, failedRefundCount = 0) { // status: number (0..7), md: Mission.MissionData, failedRefundCount?: number
+  // Enum: 0 Pending, 1 Enrolling, 2 Arming, 3 Active, 4 Paused, 5 PartlySuccess, 6 Success, 7 Failed
+  if (status === 7) { // Failed
+    if (!md || (Array.isArray(md.players) && md.players.length === 0)) {
+      return { label: "Cancelled", css: "badge-cancelled", title: "No enrollments; game didn’t run." };
+    }
+    if (failedRefundCount > 0) {
+      return { label: "Refunds pending", css: "badge-refund-pending", title: "Some refunds are still being retried." };
+    }
+    return { label: "Refunded", css: "badge-refunded", title: "All enrollments have been refunded." };
+  }
+  // fall through to your existing mapping for other statuses…
+  return null;
+}
+
 // #endregion
 
 
@@ -755,7 +844,7 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
       if (st === 3 && !eligible) label =  "Prize pool right now:";  // Active view-only
       if (st === 4) label =               "Prize pool accruing:";   // Paused
 
-      el.textContent = `${label} ${cro} CRO`;
+      applyCounterColor(el, missionObj, wei);
     });
 
     // NEW: update Paused cooldown mm:ss
@@ -823,10 +912,11 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
             const m2 = { ...missionObj, status: next };
 
             setStageStatusImage(statusSlug(next));
+            // Instant, optimistic pill flip so UI matches CTA/title immediately
+            buildStageLowerHudForStatus(m2);
+            // Then pull chain-truth without throttle for correctness
             if (next === 1 || next === 2) {
-              await rehydratePillsFromChain(m2, "deadlineFlip");
-            } else {
-              buildStageLowerHudForStatus(m2);
+              rehydratePillsFromChain(m2, "deadlineFlip", true).catch(()=>{});
             }
             await bindRingToMission(m2);
             await bindCenterTimerToMission(m2);
@@ -873,11 +963,15 @@ function        statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute
   );
   const min = Number(m.enrollment_min_players ?? 0);
 
-  if (now < es) return 0;                                              // Pending
-  if (now < ee) return 1;                                              // Enrolling
-  if (now < ms) return (cur >= min ? 2 : 7);                           // Arming OR Failed if min not met
-  if (now < me) return (m.pause_timestamp ? 4 : 3);                    // Paused vs Active
-  return (m.status >= 5 ? m.status : 6);                               // Ended bucket (keep subtype if present)
+  if (now < es)                           return 0;                               // Pending
+  if (now < ee)                           return 1;                               // Enrolling
+  if (now < ms) {
+    const GRACE = 30; // seconds
+    if (cur < min && (now - ee) <= GRACE) return 2;                               // Arming (grace period)          
+                                          return (cur >= min ? 2 : 7);            // Arming vs Failed (not enough players)
+  }
+  if (now < me)                           return (m.pause_timestamp ? 4 : 3);     // Paused vs Active
+                                          return (m.status >= 5 ? m.status : 6);  // Ended bucket (keep subtype if present)
 }
 
 async function  bindCenterTimerToMission(mission){
@@ -1173,10 +1267,9 @@ async function  startHub() { // SignalR HUB
 
         await maybeShowMissionEndPopup(mLocal);
 
+        buildStageLowerHudForStatus(mLocal);
         if (target === 1 || target === 2) {
-          await rehydratePillsFromChain(mLocal, "statusChanged");
-        } else {
-          buildStageLowerHudForStatus(mLocal);
+          rehydratePillsFromChain(mLocal, "statusChanged", true).catch(()=>{});
         }
 
         setTimeout(() => refreshOpenStageFromServer(2), 800);
@@ -1843,13 +1936,13 @@ const PILL_SETS = { // Which pills to show per status (0..7) — only using fiel
 
 // Pills refresher:
 
-async function  rehydratePillsFromChain(missionOverride = null, why = "") {
+async function  rehydratePillsFromChain(missionOverride = null, why = "", force = false) {
   try {
     if (!currentMissionAddr) return;
 
     // throttle to ~1 call per 2.5s
     const now = Date.now();
-    if (__pillsHydrateBusy || (now - __pillsHydrateLast) < 2500) return;
+    if (!force && (__pillsHydrateBusy || (now - __pillsHydrateLast) < 2500)) return;
     __pillsHydrateBusy = true;
 
     // 1) Read players from chain (source of truth)
@@ -1857,6 +1950,12 @@ async function  rehydratePillsFromChain(missionOverride = null, why = "") {
     const mc = new ethers.Contract(currentMissionAddr, MISSION_ABI, ro);
     const md = await mc.getMissionData();
     const tuple = md?.[0] || md;
+    if (tuple && typeof tuple.roundPauseDuration !== "undefined") {
+      roundPauseDuration = Number(tuple.roundPauseDuration);
+    }
+    if (tuple && typeof tuple.lastRoundPauseDuration !== "undefined") {
+      lastRoundPauseDuration = Number(tuple.lastRoundPauseDuration);
+    }
     const playersArr = Array.isArray(tuple?.players) ? tuple.players : [];
     const playersCnt = playersArr.length;
 
@@ -2508,10 +2607,13 @@ function        renderCtaActive         (host, mission)   {
 
   const lastTs = getLastBankTs(mission, mission?.rounds);
   const weiNow = computeBankNowWei(mission, lastTs);
-  const croNow = weiToCro(String(weiNow), 2);
+  const croNow = weiToCro(String(weiNow), 2, true);
   const label  = eligible ? "Bank this round to claim:" : "Current round prize pool:";
   bank.textContent = `${label} ${croNow} CRO`;
+  // apply progressive color based on how much has accrued
+  applyCounterColor(bank, mission, weiNow);
   host.appendChild(bank);
+
 }
 
 function        renderCtaPaused         (host, mission)   {
@@ -2590,10 +2692,13 @@ function        renderCtaPaused         (host, mission)   {
   bank.setAttribute("text-anchor", "middle");
   bank.setAttribute("class", "cta-note");
   bank.setAttribute("data-bank-now", "1");
+  
   const lastTs = getLastBankTs(mission, mission?.rounds);
   const weiNow = computeBankNowWei(mission, lastTs);
-  const croNow = weiToCro(String(weiNow), 2);
+  const croNow = weiToCro(String(weiNow), 2, true);
   bank.textContent = `Accumulating: ${croNow} CRO`;
+  // apply progressive color based on how much has accrued
+  applyCounterColor(bank, mission, weiNow);
   host.appendChild(bank);
 }
 
@@ -2708,6 +2813,8 @@ function        renderRoundBankedNotice (roundNo, winner, amountWei) {
   host.appendChild(g);
 }
 
+// Ended panel:
+
 async function  maybeShowMissionEndPopup(mission){
   try{
     if (!mission) return;
@@ -2773,8 +2880,6 @@ async function  maybeShowMissionEndPopup(mission){
 
   } catch {/* silent */}
 }
-
-// Ended panel:
 
 async function  renderStageEndedPanelIfNeeded(mission){
   const host = document.getElementById("stageEndedGroup");
@@ -2921,8 +3026,12 @@ function        renderAllMissions       (missions = []) {
 
     // live status (same concurrent approach you used already)
     const stNum   = Number(m.status ?? 0);
-    const stText  = statusText(stNum);
-    const stClass = statusColorClass(stNum);
+    const mdShim  = { players: Array.from({ length: Number(m.current_players || 0) }) };
+    const pretty  = prettyStatusForList(stNum, mdShim, Number(m.failed_refund_count || 0));
+
+    const stText  = pretty ? pretty.label : statusText(stNum);
+    const stClass = pretty ? pretty.css   : statusColorClass(stNum);
+    const stTitle = pretty ? pretty.title : "";
 
     // compute “next timebox” values for the mini rows
     const enrollStart = Number(m.enrollment_start || 0);
@@ -2983,7 +3092,7 @@ function        renderAllMissions       (missions = []) {
         <div class="mission-title">
           <span class="title-text">${m.name || m.mission_address}</span>
         </div>
-        <span class="status-pill ${stClass}">${stText}</span>
+        <span class="status-pill ${stClass}" title="${stTitle}">${stText}</span>
       </div>
 
       <div class="mini-row">
@@ -3120,6 +3229,15 @@ function        renderMyMissions        (items){
 
   const list = (items || []).slice().reverse(); // newest on top
   for (const m of list){
+    const prettyMM = prettyStatusForList(
+      Number(m.status),
+      { players: [{}] },                             // at least one player (me)
+      Number(m.failed_refund_count || 0)
+    );
+
+    const myStText  = prettyMM ? prettyMM.label : statusText(m.status);
+    const myStClass = prettyMM ? prettyMM.css   : statusColorClass(m.status);
+    const myStTitle = prettyMM ? prettyMM.title : "";
     const title   = m.name || copyableAddr(m.mission_address);
     const rounds  = `${m.round_count}/${m.mission_rounds_total}`;
 
@@ -3150,7 +3268,7 @@ function        renderMyMissions        (items){
       <div class="mini-row">
         <span class="label">Status:</span>
         <span class="value">
-          <span class="status-pill status-${m.status}">${statusText(m.status)}</span>
+          <span class="status-pill ${myStClass}" title="${myStTitle}">${myStText}</span>
           ${m.status === 7 && m.failure_reason
             ? `<span class="small text-muted ms-2">${m.failure_reason}</span>`
             : ""}
@@ -3256,6 +3374,15 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
   const maxP = Number(safe?.enrollment_max_players ?? mission.enrollment_max_players ?? 0);
   const joinedCls   = (joinedPlayers >= minP) ? "text-success" : "text-error";
 
+  const prettyDet = prettyStatusForList(
+    Number(mission.status),
+    mission,                                      // detail has the full object
+    Number(mission.failed_refund_count || 0)
+  );
+  const statusLbl  = prettyDet ? prettyDet.label : statusText(mission.status);
+  const statusCls2 = prettyDet ? prettyDet.css   : statusColorClass(mission.status);
+  const statusTtl  = prettyDet ? prettyDet.title : "";
+
   els.missionCore.innerHTML = `
     <div class="row g-3">
       <!-- Legend chips under the title (keep yours) -->
@@ -3289,7 +3416,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
           <div class="value">${missionTypeName[mission.mission_type] ?? mission.mission_type}</div>
 
           <div class="label">Mission status</div>
-          <div class="value"><span class="${statusCls}">${statusText(mission.status)}</span></div>
+          <div class="value"><span class="${statusCls2}" title="${statusTtl}">${statusLbl}</span></div>
 
           <div class="label">Rounds played</div>
           <div class="value">${mission.round_count}/${mission.mission_rounds_total}</div>
@@ -3595,11 +3722,17 @@ async function  hydrateAllMissionsRealtime(listEl){
 
       try {
         const c  = new ethers.Contract(addr, MISSION_ABI, provider);
-        const rt = Number(await c.getRealtimeStatus());
+        const rt   = Number(await c.getRealtimeStatus());
         const pill = li.querySelector(".status-pill");
-        if (pill){
-          pill.textContent = statusText(rt);
-          pill.className   = `status-pill ${statusColorClass(rt)}`;
+        if (pill) {
+          // read the current players count shown on the card to build a tiny md shim
+          const curPlayers = Number(li.querySelector('.players-count .current')?.dataset.current || 0);
+          const mdShim     = { players: Array.from({ length: curPlayers }) };
+          const pretty     = prettyStatusForList(rt, mdShim, 0);   // no per-mission refund count here
+
+          pill.textContent = pretty ? pretty.label : statusText(rt);
+          pill.className   = `status-pill ${pretty ? pretty.css : statusColorClass(rt)}`;
+          if (pretty?.title) pill.title = pretty.title; else pill.removeAttribute('title');
         }
       } catch (err) {
         console.warn("realtime status failed:", addr, err?.message || err);
