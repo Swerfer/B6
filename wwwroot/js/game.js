@@ -111,6 +111,7 @@ const JOIN_CACHE_KEY        = "_b6joined";
 const MISSION_CACHE_TTL_MS  = 15000;
 let __missionSnapCache      = { addr:"", ts:0, data:null };
 const __missionInflight     = new Map();
+const API_SOFT_THROTTLE_MS = 1200;
 
 // miscellaneous 
 let   staleWarningShown     = false;
@@ -1601,6 +1602,15 @@ async function apiMission(addr, force = false) {
     return __missionInflight.get(lcAddr);
   }
 
+  // Soft throttle: if we *just* fetched this on the stage, reuse the snapshot
+  if (onStage) {
+    const sameAddr = (__missionSnapCache.addr === lcAddr);
+    const ageMs    = sameAddr ? (now - (__missionSnapCache.ts || 0)) : Number.POSITIVE_INFINITY;
+    if (!force && sameAddr && ageMs >= 0 && ageMs < API_SOFT_THROTTLE_MS && __missionSnapCache.data) {
+      return __missionSnapCache.data;
+    }
+  }
+
   const p = (async () => {
     const r = await fetch(`/api/missions/mission/${addr}`);
     if (!r.ok) throw new Error("/api/missions/mission failed");
@@ -1723,10 +1733,17 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
     dbg("refreshOpenStageFromServer FAILED", e?.message || e);
     scheduleRetry(retries);
   } finally {
-    stageRefreshBusy = false;
     if (stageRefreshPending) {
       stageRefreshPending = false;
-      setTimeout(() => refreshOpenStageFromServer(1, Math.max(2500, delay)), 750);
+      // Only refetch if the last stage snapshot isn't super fresh yet
+      const lastTs = (__missionSnapCache.addr === (currentMissionAddr || "").toLowerCase())
+        ? (__missionSnapCache.ts || 0) : 0;
+      const ageMs = Date.now() - lastTs;
+      if (ageMs > API_SOFT_THROTTLE_MS) {
+        setTimeout(() => refreshOpenStageFromServer(1, Math.max(2500, delay)), 750);
+      } else {
+        // fresh enough → skip the redundant follow-up
+      }
     }
   }
 
