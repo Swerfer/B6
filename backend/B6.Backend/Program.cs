@@ -102,6 +102,7 @@ app.MapGet("/config",                         (IConfiguration cfg) => {
     return Results.Ok(new { rpc, factory });
 });
 
+// /api/rpc -> reverse-proxy JSON-RPC to Cronos node (to avoid CORS issues)
 app.MapPost("/rpc",                     async (HttpRequest req, IHttpClientFactory f, IConfiguration cfg) => {
     using var reader = new StreamReader(req.Body);
     var body = await reader.ReadToEndAsync();
@@ -130,6 +131,7 @@ app.MapPost("/rpc",                     async (HttpRequest req, IHttpClientFacto
 
 });
 
+// /api/secrets -> list all Key Vault secrets (for admin use only)
 app.MapGet("/secrets", async (HttpRequest req, IConfiguration cfg) =>{
     // --- 1) Ask the browser for Basic credentials if none present
     var auth = req.Headers["Authorization"].ToString();
