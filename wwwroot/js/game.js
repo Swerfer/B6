@@ -1170,6 +1170,7 @@ async function  startHub() { // SignalR HUB
         showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${round}!`, "success");
       } else {
         showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
+        // ToDo: Sound effect?
       }
 
       if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
