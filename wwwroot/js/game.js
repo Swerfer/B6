@@ -110,6 +110,7 @@ const __missionCreatedCache = new Map();
 const JOIN_CACHE_KEY        = "_b6joined";
 const MISSION_CACHE_TTL_MS  = 15000;
 let __missionSnapCache      = { addr:"", ts:0, data:null };
+const __missionInflight     = new Map();
 
 // miscellaneous 
 let   staleWarningShown     = false;
@@ -1588,22 +1589,31 @@ async function apiMission(addr, force = false) {
   const now     = Date.now();
   const onStage = !!(document.getElementById('gameMain')?.classList.contains('stage-mode'));
 
-  // serve cache only in stage-mode
+  // Stage cache (unchanged behavior)
   if (onStage && !force) {
     if (__missionSnapCache.addr === lcAddr && __missionSnapCache.data && (now - __missionSnapCache.ts) < MISSION_CACHE_TTL_MS) {
       return __missionSnapCache.data;
     }
   }
 
-  const r = await fetch(`/api/missions/mission/${addr}`); // allow HTTP caching / 304
-  if (!r.ok) throw new Error("/api/missions/mission failed");
-  const data = r.json();
-
-  // store only in stage-mode
-  if (onStage) {
-    __missionSnapCache = { addr: lcAddr, ts: now, data };
+  // Coalesce concurrent requests for the same address (even if force=true)
+  if (__missionInflight.has(lcAddr)) {
+    return __missionInflight.get(lcAddr);
   }
-  return data;
+
+  const p = (async () => {
+    const r = await fetch(`/api/missions/mission/${addr}`);
+    if (!r.ok) throw new Error("/api/missions/mission failed");
+    const data = await r.json(); // ← await the JSON
+    if (onStage) {
+      __missionSnapCache = { addr: lcAddr, ts: Date.now(), data };
+    }
+    return data;
+  })();
+
+  __missionInflight.set(lcAddr, p);
+  try { return await p; }
+  finally { __missionInflight.delete(lcAddr); }
 }
 
 // #endregion
@@ -1707,7 +1717,7 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
 
       scheduleRetry(Math.min(retries, 1));
     } else {
-      scheduleRetry(retries);
+      scheduleRetry(0);
     }
   } catch (e) {
     dbg("refreshOpenStageFromServer FAILED", e?.message || e);
