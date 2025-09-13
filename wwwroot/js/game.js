@@ -97,6 +97,7 @@ let   stageRefreshPending   = false;
 let   roundPauseDuration    = 60;		// READ FROM BLOCKCHAIN INSTEAD
 let   lastRoundPauseDuration= 60;		// READ FROM BLOCKCHAIN INSTEAD
 const __endPopupShown       = new Set();
+let   __bankingInFlight     = null;
 // All missions cache & filters:
 let   __allMissionsCache    = [];     // last fetched list (raw objects)
 let   __allFilterOpen       = false;
@@ -563,11 +564,11 @@ function        counterColorForWei(mission, accruedWei){
     if (feeWei === 0n && perRoundWei === 0n) return "#cfe8ff"; // neutral fallback
 
     if (feeWei > 0n && v <= feeWei) {
-      // 0 → Enrollment Fee: blue-grey → almost-green (tealish)
+      // 0 → Enrollment Fee: stay grey-ish blue (no green tint); jump to green at fee
       const t = toT(v, feeWei);
-      const h = lerp(210, 135, t); // 210° (slate-blue) → 135° (near-green teal)
-      const s = lerp(30, 80,  t);
-      const l = lerp(78, 70,  t);
+      const h = lerp(210, 195, t); // 210° (slate-blue) → 195° (cyan-blue), safely away from green
+      const s = lerp(24, 42,  t);  // keep saturation modest for a muted look
+      const l = lerp(78, 72,  t);  // slightly darker as it grows
       return hslToHex(h, s, l);
     } else {
       // Enrollment Fee → PoolStart/Rounds: green → yellow → orange → red
@@ -752,58 +753,6 @@ function        setStageStatusImage(slug){ /* Load + size the status word image 
 
 // Center timer core:
 
-function        stopStageTimer(){ 
-  if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } 
-}
-
-function        formatStageShort(leftSec){
-  const s = Math.max(0, Math.floor(leftSec));
-  if (s > 36*3600) return Math.round(s/86400) + "D";   // > 36h → days
-  if (s > 90*60)   return Math.round(s/3600)  + "H";   // > 90m → hours
-  if (s > 90)      return Math.round(s/60)    + "M";   // > 90s  → minutes
-  return s + "S";                                      // ≤ 90s → seconds
-}
-
-function        stageUnitFor(leftSec){ // Unit classifier used by the center text and the ring "reset" windows
-  const s = Math.max(0, Math.floor(leftSec));
-  if (s > 36*3600) return "d";
-  if (s > 90*60)   return "h";
-  if (s > 90)      return "m";
-  return "s";
-}
-
-function        ringWindowForUnit(unit, phaseStart, endTs){
-  if (!endTs) return [0,0];
-
-  const now = Math.floor(Date.now()/1000);
-
-  /*
-  const H36 = 36 * 3600;
-  const M90 = 90 * 60;
-  const S90 = 90;
-
-  // phaseStart is: creation (pending) / enroll_start / enroll_end (arming) / mission_start
-  // If creation couldn’t be fetched, you already fall back when computing phaseStartTs.
-  const start = phaseStart || (endTs - H36); // safe fallback to keep D/H sane
-  const phaseLen = Math.max(0, endTs - start);
-
-  if (unit === "d") {
-    return [start, endTs];
-  }
-  if (unit === "h") {
-    const S = (phaseLen < H36) ? start : (endTs - H36);
-    return [S, endTs];
-  }
-  if (unit === "m") {
-    const S = (phaseLen < M90) ? start : (endTs - M90);
-    return [S, endTs];
-  }
-  // seconds unit stays a fixed trailing window
-  return [endTs - S90, endTs];
-  */
-  return [now, endTs];
-}
-
 async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
   stopStageTimer();
   const node = document.getElementById("vaultTimerText");
@@ -827,12 +776,13 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
       el.textContent = ts ? formatCountdown(ts) : "—";
     });
 
-    // NEW: update Bank-now (Active only; 2 decimals)
+    // Tick the live prize label (Active/Paused). Rewrites text + color each second.
     document.querySelectorAll('#stageCtaGroup [data-bank-now]').forEach(el => {
       if (!missionObj) return;
+
       const last = getLastBankTs(missionObj, missionObj?.rounds);
       const wei  = computeBankNowWei(missionObj, last, now);
-      const cro  = weiToCro(String(wei), 2);
+      const cro  = weiToCro(String(wei), 2, true); // fixed 2 decimals to avoid jitter
 
       const st   = Number(missionObj?.status);
       const me   = (walletAddress || "").toLowerCase();
@@ -846,10 +796,12 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
       }));
       const eligible = !!walletAddress && joined && !alreadyWon;
 
-      let label =                         "Bank this round to claim:";       // Active & eligible
-      if (st === 3 && !eligible) label =  "Prize pool right now:";  // Active view-only
-      if (st === 4) label =               "Prize pool accruing:";   // Paused
+      // Match the initial render labels used in renderCtaActive/Paused
+      let label =                         "Bank this round to claim:";
+      if (st === 3 && !eligible) label =  "Current round prize pool:";
+      if (st === 4) label =               "Accumulating:"; // Paused version
 
+      el.textContent = `${label} ${cro} CRO`;
       applyCounterColor(el, missionObj, wei);
     });
 
@@ -944,6 +896,51 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
   stageTicker = setInterval(paint, 1000);
 }
 
+function        stopStageTimer(){ 
+  if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } 
+}
+
+function        formatStageShort(leftSec){
+  const s = Math.max(0, Math.floor(leftSec));
+  if (s > 36*3600) return Math.round(s/86400) + "D";   // > 36h → days
+  if (s > 90*60)   return Math.round(s/3600)  + "H";   // > 90m → hours
+  if (s > 90)      return Math.round(s/60)    + "M";   // > 90s  → minutes
+  return s + "S";                                      // ≤ 90s → seconds
+}
+
+function        stageUnitFor(leftSec){ // Unit classifier used by the center text and the ring "reset" windows
+  const s = Math.max(0, Math.floor(leftSec));
+  if (s > 36*3600) return "d";
+  if (s > 90*60)   return "h";
+  if (s > 90)      return "m";
+  return "s";
+}
+
+function        ringWindowForUnit(unit, phaseStart, endTs){
+  if (!endTs) return [0,0];
+  const start   = Number(phaseStart || 0);
+  const H36     = 36 * 3600;
+  const M90     = 90 * 60;
+  const S90     = 90;
+
+  // If start is missing, fall back so "d/h/m" still look sane
+  const S0      = start || (endTs - H36);
+  const phaseLen= Math.max(0, endTs - S0);
+
+  if (unit === "d") return [S0, endTs];
+
+  if (unit === "h") {
+    const S = (phaseLen < H36) ? S0 : (endTs - H36);
+    return [S, endTs];
+  }
+  if (unit === "m") {
+    const S = (phaseLen < M90) ? S0 : (endTs - M90);
+    return [S, endTs];
+  }
+  // unit === "s" → last 90 seconds
+  return [endTs - S90, endTs];
+}
+
 // Deadline routing:
 
 function        nextDeadlineFor(m){ // Choose the deadline shown in the vault center per status
@@ -981,8 +978,21 @@ function        statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute
 }
 
 async function  bindCenterTimerToMission(mission){
-  const endTs = nextDeadlineFor(mission);
-  const startTs = Math.floor(Date.now()/1000);    // start windows from NOW
+  const endTs  = nextDeadlineFor(mission);
+  const st     = Number(mission?.status);
+  let   startTs= 0;
+
+  if (st === 0) {                                // Pending
+    startTs = Number(mission.enrollment_start || mission.mission_start || 0);
+  } else if (st === 1) {                         // Enrolling
+    startTs = Number(mission.enrollment_start || 0);
+  } else if (st === 2) {                         // Arming
+    startTs = Number(mission.enrollment_end   || 0);
+  } else if (st === 3 || st === 4) {             // Active / Paused
+    startTs = Number(mission.mission_start    || 0); // <- key change
+  } else {
+    startTs = 0;
+  }
 
   // Below is for start from 'start' times. See also function ringWindowForUnit
 
@@ -1049,24 +1059,27 @@ function        bindRingToWindow(startSec, endSec, tickMs = 1000){
 
 async function  bindRingToMission(m){ /* Map mission.status to the correct time window */
   const st = Number(m?.status ?? -1);
-  const now = Math.floor(Date.now()/1000);
-  let   E   = 0;
 
-  if (st === 0) {                       // Pending
+  let S = 0, E = 0;
+  if (st === 0) {                               // Pending
+    S = 0;
     E = Number(m.enrollment_start || m.mission_start || 0);
-  } else if (st === 1) {                // Enrolling
-    E = Number(m.enrollment_end || 0);
-  } else if (st === 2) {                // Arming
-    E = Number(m.mission_start || 0);
-  } else if (st === 3 || st === 4) {    // Active / Paused
-    E = Number(m.mission_end || 0);
+  } else if (st === 1) {                        // Enrolling
+    S = Number(m.enrollment_start || 0);
+    E = Number(m.enrollment_end   || 0);
+  } else if (st === 2) {                        // Arming
+    S = Number(m.enrollment_end   || 0);
+    E = Number(m.mission_start    || 0);
+  } else if (st === 3 || st === 4) {            // Active / Paused
+    S = Number(m.mission_start    || 0);
+    E = Number(m.mission_end      || 0);
   } else {
     setRingProgress(100);
     return;
   }
 
-  if (E && E > now) {
-    bindRingToWindow(now, E);           // ring window: NOW → deadline
+  if (S && E && E > S) {
+    bindRingToWindow(S, E);                     // phase start → phase end
   } else {
     setRingProgress(st >= 5 ? 100 : 0);
   }
@@ -1163,6 +1176,15 @@ async function  startHub() { // SignalR HUB
     hubConnection.on("RoundResult", async (addr, round, winner, amountWei) => {
       __lastPushTs = Date.now();
       dbg("RoundResult PUSH", { addr, round, winner, amountWei, currentMissionAddr, groups: Array.from(subscribedGroups) });
+
+      // mark that a result landed for the active banking session (any winner)
+      try {
+        const aLc = String(addr || "").toLowerCase();
+        if (__bankingInFlight && __bankingInFlight.mission === aLc) {
+          __bankingInFlight.hadResult = true;
+        }
+      } catch {}
+
       const me  = (walletAddress || "").toLowerCase();
       const win = String(winner || "").toLowerCase();
       const cro = weiToCro(String(amountWei), 2);
@@ -1203,15 +1225,29 @@ async function  startHub() { // SignalR HUB
       if (gameMain && gameMain.classList.contains('stage-mode')) {
         const me  = (walletAddress || "").toLowerCase();
         const win = String(winner || "").toLowerCase();
-      if (win !== me) {
-        renderRoundBankedNotice(Number(round), String(winner || ""), String(amountWei || "0"));
-      }
+        if (win !== me) {
+          renderRoundBankedNotice(Number(round), String(winner || ""), String(amountWei || "0"));
+        }
 
-      // 1) Fast: grab chain-truth so “Pool (current)” is instant for spectators
-      try { await rehydratePillsFromChain(null, "roundResult"); } catch {}
+        // 0) Ultra-fast optimistic paint: bump round pill and subtract payout from pool now
+        try {
+          const data = await apiMission(currentMissionAddr, false);
+          const m0   = enrichMissionFromApi(data);
+          const played = Math.max(Number(m0.round_count || 0), Number(round || 0));
+          let croAfter = m0.cro_current_wei;
+          try {
+            const prev = BigInt(String(m0.cro_current_wei ?? m0.cro_start_wei ?? "0"));
+            croAfter   = (prev - BigInt(String(amountWei || "0"))).toString();
+          } catch {}
+          const mFast = { ...m0, round_count: played, cro_current_wei: croAfter };
+          buildStageLowerHudForStatus(mFast);   // <- paints pills immediately
+        } catch {}
 
-      // 2) Keep the regular reconcile (API snapshot, etc.)
-      await refreshOpenStageFromServer(2);
+        // 1) Fast: grab chain-truth so “Pool (current)” is instant for spectators
+        try { await rehydratePillsFromChain(null, "roundResult"); } catch {}
+
+        // 2) Keep the regular reconcile (API snapshot, etc.)
+        await refreshOpenStageFromServer(2);
       }
 
     });
@@ -1970,7 +2006,22 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
     Number(optimisticGuard?.players || 0)
   )},
   rounds:         { label: "Rounds",           value: m => Number(m?.mission_rounds_total ?? 0) },
-  roundsOff:      { label: "Rounds",           value: m => `${Number(m?.round_count ?? 0)}/${Number(m?.mission_rounds_total ?? 0)}` },
+  roundsOff: { 
+    label: "Round", 
+    value: m => {
+      const cur = Number(m?.round_count ?? 0);
+      const total = Number(m?.mission_rounds_total ?? 0);
+      return `${Math.min(cur + 1, total)}/${total}`;
+    }
+  },
+  roundsBanked: {
+    label: "Rounds banked",
+    value: m => {
+      const played = Number(m?.round_count ?? 0);
+      const total  = Number(m?.mission_rounds_total ?? 0);
+      return `${played}/${total}`;
+    }
+  },
   playersAllStats: {label: "Players",          value: m => {
     const { min, joined, max } = playersAllStatsParts(m);
       return `${joined} (Min ${min}/Max ${max})`;
@@ -2005,7 +2056,7 @@ const PILL_SETS = { // Which pills to show per status (0..7) — only using fiel
   2:        ["poolStart","players","rounds","startsIn","duration"],                                                 // Arming
   3:        ["poolCurrent","players","roundsOff","endsIn"],                                                         // Active
   4:        ["poolCurrent","players","roundsOff","endsIn"],                                                         // Paused
-  default:  ["poolCurrent","players","roundsOff"],                                                                  // Ended variants
+  default:  ["poolCurrent","players","roundsBanked"],                                                               // Ended variants
 };
 
 // Pills refresher:
@@ -2342,39 +2393,30 @@ async function  handleBankItClick(mission){
   const signer = getSigner?.();
   if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
 
+  // Show immediately for the clicking player (prevents race with fast RoundResult)
+  showAlert("Round called. Waiting for result…", "info");
+
   try {
-    const c = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
-    // No callStatic probe here → immediate wallet popup
-    const tx = await c.callRound();
+    const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
+    const tx  = await c.callRound();
     await tx.wait();
 
-    // Phase 1: immediate feedback
-    showAlert("Round called. Waiting for result…", "info");
+    // Pull pool from chain immediately in case push is slow
+    rehydratePillsFromChain(mission, "post-callRound", true).catch(()=>{});
 
-    // Phase 2: if *you* win, show the amount as soon as the push arrives
-    try {
-      const me = (await signer.getAddress()).toLowerCase();
-      const missionLc = String(mission.mission_address || "").toLowerCase();
-      const res = await waitForMyRoundWin(me, missionLc, 25000);
-      const cro = weiToCro(String(res.amountWei), 2);
-      showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${res.round}!`, "success");
-    } catch {
-      // no win / no push within the window → keep the generic info alert
-    }
-
-    // keep the regular reconcile
+    // Lightweight reconcile; the authoritative result popup comes via RoundResult
     await refreshOpenStageFromServer(2);
 
   } catch (err) {
+    // Replace the waiting info with a clear outcome on failure/cancel
     if (err?.code === 4001 || err?.code === "ACTION_REJECTED") {
       showAlert("Banking canceled.", "warning");
     } else {
       const custom = missionCustomErrorMessage(err);
-      const msg = custom || `Bank it failed: ${decodeError(err)}`;
+      const msg    = custom || `Bank it failed: ${decodeError(err)}`;
       showAlert(msg, custom ? "warning" : "error");
 
-      // Fallback: if the revert is Cooldown, flip UI to Paused now.
-      // This covers the case where the button still showed BANK IT.
+      // If revert indicates cooldown, flip UI to Paused optimistically
       if (stageCurrentStatus === 3 && (isCooldownError(err) || /Cooldown/i.test(custom || ""))) {
         await flipStageToPausedOptimistic(mission);
       }
@@ -2767,7 +2809,10 @@ function        renderCtaPaused         (host, mission)   {
     tVal.setAttribute("data-cooldown-end", String(info.pauseEnd));
     tVal.textContent = formatMMSS(info.secsLeft);
   } else {
-    tVal.textContent = "00:00";
+    const now = Math.floor(Date.now()/1000);
+    const fallbackEnd = now + info.secsTotal;
+    tVal.setAttribute("data-cooldown-end", String(fallbackEnd));
+    tVal.textContent = formatMMSS(info.secsTotal);
   }
 
   tVal.style.fontWeight = "700";
@@ -2817,14 +2862,16 @@ function        renderCtaPaused         (host, mission)   {
   host.appendChild(bank);
 }
 
-async function  flipStageToPausedOptimistic(mission){ // Flip the open stage to Paused immediately; reconcile from API afterwards
+async function  flipStageToPausedOptimistic(mission){
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
 
-  const m2 = { ...mission, status: 4 };     // Paused now (UI only)
+  const now = Math.floor(Date.now()/1000);
+  const m2  = { ...mission, status: 4, pause_timestamp: now }; // synthesize pause ts
 
   const info = cooldownInfo(m2);
   __pauseUntilSec = info.pauseEnd || 0;
+  __lastPauseTs   = now;
 
   setStageStatusImage(statusSlug(4));
   buildStageLowerHudForStatus(m2);
@@ -2834,7 +2881,6 @@ async function  flipStageToPausedOptimistic(mission){ // Flip the open stage to 
   await renderStageEndedPanelIfNeeded(m2);
   stageCurrentStatus = 4;
 
-  // Pick up real pause_timestamp on the next API tick
   refreshOpenStageFromServer(2);
 }
 
@@ -2945,12 +2991,11 @@ async function  maybeShowMissionEndPopup(mission){
     let rounds      = Array.isArray(mission.rounds)      ? mission.rounds      : null;
     if (!enrollments || !rounds){
       try{
-        const data = await apiMission(addr, false);
+        // Force fresh so role detection and any “you won” copy reflect the final round
+        const data = await apiMission(addr, true);
         enrollments = data?.enrollments || [];
         rounds      = data?.rounds      || [];
       } catch {}
-    } else {
-      // Keep as-is
     }
 
     const me = (walletAddress || "").toLowerCase();
@@ -3046,7 +3091,8 @@ async function  renderStageEndedPanelIfNeeded(mission){
   // Partly Success / Success (5/6) — “Top winners” + subtype note
   let enrollments = [], rounds = [];
   try {
-    const data = await apiMission(mission.mission_address, false);
+    // Force a fresh snapshot so the last-banked round is included
+    const data = await apiMission(mission.mission_address, true);
     enrollments = data?.enrollments || [];
     rounds      = data?.rounds       || [];
   } catch { /* keep empty */ }
@@ -3101,10 +3147,16 @@ async function  renderStageEndedPanelIfNeeded(mission){
   link.textContent = "View all winners";
   link.addEventListener("click", async () => {
     stageReturnTo = "stage";
-    await openMission(mission.mission_address);
-    els.missionDetail.classList.add("overlay");
-    els.missionDetail.style.display = "block";
-    lockScroll();
+    try {
+      const data = await apiMission(mission.mission_address, true);
+      renderMissionDetail(data);
+      els.missionDetail.classList.add("overlay");
+      els.missionDetail.style.display = "block";
+      lockScroll();
+    } catch {
+      // fallback if fetch fails
+      await openMission(mission.mission_address);
+    }
   });
 
   g.appendChild(link);

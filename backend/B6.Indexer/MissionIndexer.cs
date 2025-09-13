@@ -153,13 +153,19 @@ namespace B6.Indexer
 
         private async Task                              PollRealtimeStatusesAsync   (CancellationToken token) {
 
-            // 1) Load missions that are "not ended" per DB (status < 5)
+            // 1) Load missions that need a realtime refresh:
+            //    - Not ended (status < 5) → always poll
+            //    - Ended (5 or 7) but realtime_status doesn't match yet → keep polling until it matches
             var missions = new List<string>();
             await using (var c = new NpgsqlConnection(_pg))
             {
                 await c.OpenAsync(token);
-                await using var cmd = new NpgsqlCommand(
-                    "select mission_address from missions where coalesce(status,0) < 5 order by mission_address;", c);
+                await using var cmd = new NpgsqlCommand(@"
+                    select mission_address
+                    from missions
+                    where coalesce(status,0) < 5
+                    or (coalesce(status,0) in (5,6,7) and coalesce(realtime_status, 0) not in (6,7))
+                    order by mission_address;", c);
                 await using var rd = await cmd.ExecuteReaderAsync(token);
                 while (await rd.ReadAsync(token))
                     missions.Add((rd["mission_address"] as string ?? "").ToLowerInvariant());
@@ -760,10 +766,8 @@ namespace B6.Indexer
                                     insert into mission_enrollments (mission_address, player_address, refunded, refund_tx_hash)
                                     values (@a,@p, true, @tx)
                                     on conflict (mission_address, player_address) do update set
-                                        refunded                = true,
-                                        refund_tx_hash          = excluded.refund_tx_hash,
-                                        round_pause_secs        = excluded.round_pause_secs,
-                                        last_round_pause_secs   = excluded.last_round_pause_secs;", conn, tx);
+                                        refunded       = true,
+                                        refund_tx_hash = excluded.refund_tx_hash;", conn, tx);
                                 u.Parameters.AddWithValue("a",  addr);
                                 u.Parameters.AddWithValue("p",  p);
                                 u.Parameters.AddWithValue("tx", txh);
@@ -1118,6 +1122,16 @@ namespace B6.Indexer
                 || (ex.InnerException != null && IsTransient(ex.InnerException));
         }
 
+        private static bool                             IsRateLimited              (Exception ex) {
+            if (ex == null) return false;
+            var msg = ex.Message ?? string.Empty;
+            if (msg.IndexOf("429", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (msg.IndexOf("Too Many Requests", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return ex.InnerException != null && IsRateLimited(ex.InnerException);
+        }
+
+        private static readonly TimeSpan                RATE_LIMIT_COOLDOWN        = TimeSpan.FromSeconds(30);
+
         private async Task<T>                           RunRpc<T>                   (Func<Web3, Task<T>> fn, string context) {
             var kind = NormalizeKind(context);
             var sw = Stopwatch.StartNew();
@@ -1131,6 +1145,14 @@ namespace B6.Indexer
             catch (Exception ex) when (IsTransient(ex))
             {
                 sw.Stop();
+
+                // NEW: if provider rate-limits us, cool down briefly before switching/retrying
+                if (IsRateLimited(ex))
+                {
+                    _log.LogWarning(ex, "{ctx} hit rate limit (429); cooling down {sec}s", context, (int)RATE_LIMIT_COOLDOWN.TotalSeconds);
+                    try { await Task.Delay(RATE_LIMIT_COOLDOWN); } catch { /* ignore */ }
+                }
+
                 if (logRpcCalls) RpcFileLog(kind, $"{context} ↻ transient: {ex.GetType().Name}: {ex.Message} (attempting switch)");
 
                 var switched = false;
@@ -1472,19 +1494,21 @@ namespace B6.Indexer
         }
 
         private async Task<bool>                        NeedsAutoFinalizeAsync      (string mission, CancellationToken token) {
-            // 1) Quick DB guard: only while “not ended” in DB (your API defines not-ended as status < 5)
+            // 1) DB guard: skip only if already fully final (status in 6,7)
+            short? dbStatus = null;
             await using (var c = new NpgsqlConnection(_pg))
             {
                 await c.OpenAsync(token);
-                const string sql = @"select 1 from missions where mission_address=@a and status < 5 limit 1;";
+                const string sql = @"select status from missions where mission_address=@a limit 1;";
                 await using var cmd = new NpgsqlCommand(sql, c);
                 cmd.Parameters.AddWithValue("a", mission);
-                var notEnded = await cmd.ExecuteScalarAsync(token) != null;
-                if (!notEnded) return false;
+                var v = await cmd.ExecuteScalarAsync(token);
+                if (v is short s) dbStatus = s;
             }
+            // If DB already fully final or refunded, no need to finalize.
+            if (dbStatus == 6 || dbStatus == 7) return false;
 
-            // 2) On-chain realtime view is authoritative for the condition:
-            //    finalize iff getRealtimeStatus() reports PartlySuccess (5).
+            // 2) finalize iff getRealtimeStatus() reports PartlySuccess (5).
             var rt = await RunRpc(
                 w => w.Eth.GetContractQueryHandler<GetRealtimeStatusFunction>()
                         .QueryAsync<byte>(mission, new GetRealtimeStatusFunction()),
