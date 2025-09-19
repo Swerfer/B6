@@ -75,28 +75,6 @@ async function waitForConfirmations(txOrHash, confirmations = 5, timeoutMs = 300
   }
 }
 
-async function verifyWithRetry(address, constructorArguments = [], label = "", tries = 5) {
-  for (let i = 1; i <= tries; i++) {
-    try {
-      console.log(`🔎 Verifying ${label || address} (attempt ${i}/${tries})…`);
-      await hre.run("verify:verify", { address, constructorArguments });
-      console.log(`✅ Verified ${label || address}`);
-      return;
-    } catch (e) {
-      const msg = String(e?.message || e);
-      if (/Already Verified/i.test(msg)) {
-        console.log(`✅ Already verified: ${label || address}`);
-        return;
-      }
-      const retryable = /try again later|not deployed|not currently available|timeout|UND_ERR_HEADERS_TIMEOUT|Headers Timeout/i.test(msg);
-      if (i === tries && !retryable) throw e;
-      const waitMs = 15_000 * i;
-      console.log(`⏳ Explorer not ready / network hiccup. Waiting ${waitMs/1000}s…`);
-      await sleep(waitMs);
-    }
-  }
-}
-
 async function main() {
   console.log("🚀 Starting full project deployment…");
 
@@ -144,8 +122,6 @@ async function main() {
 
   // 5) Verify (with retries)
   await sleep(10_000);
-  await verifyWithRetry(missionImplAddress, [], "Mission implementation");
-  await verifyWithRetry(missionFactoryAddress, [missionImplAddress], "MissionFactory");
 
   console.log("🎉 All done!");
 }

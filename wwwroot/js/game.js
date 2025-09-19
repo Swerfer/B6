@@ -2927,7 +2927,7 @@ function        renderRoundBankedNotice (roundNo, winner, amountWei) {
   txt.textContent = `Round ${roundNo} banked by ${short} for ${cro} CRO!`;
   g.appendChild(txt);
 
-  // Clickable icons (copy address + open on Cronoscan)
+  // Clickable icons (copy address + open on Cronos Explorer)
   if (winner){
     // Copy icon (inline vector)
     const icoCopy = document.createElementNS(SVG_NS, "g");
@@ -2954,7 +2954,7 @@ function        renderRoundBankedNotice (roundNo, winner, amountWei) {
     icoLink.setAttribute("tabindex", "0");
     icoLink.style.cursor = "pointer";
     icoLink.addEventListener("click", () => {
-      try { window.open(`https://cronoscan.com/address/${winner}`, "_blank", "noopener"); } catch {}
+      try { window.open(`https://explorer.cronos.org/address/${winner}`, "_blank", "noopener"); } catch {}
     });
     g.appendChild(icoLink);
   }

@@ -189,11 +189,11 @@ export function extLinkIcon(url, title = "Open in new tab"){
 }
 
 export function txLinkIcon(txHash){
-  return txHash ? extLinkIcon(`https://cronoscan.com/tx/${txHash}`, "Open on Cronoscan") : "";
+  return txHash ? extLinkIcon(`https://explorer.cronos.org/tx/${txHash}`, "Open on Cronos Explorer") : "";
 }
 
 export function addrLinkIcon(addr){
-  return addr ? extLinkIcon(`https://cronoscan.com/address/${addr}`, "Open on Cronoscan") : "";
+  return addr ? extLinkIcon(`https://explorer.cronos.org/address/${addr}`, "Open on Cronos Explorer") : "";
 }
 
 export function statusColorClass(s) {
