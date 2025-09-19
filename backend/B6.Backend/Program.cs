@@ -555,23 +555,43 @@ app.MapGet("/debug/factory",            async (IConfiguration cfg) => {
 
 /* ---------- DEBUG: SINGLE MISSION PROBE ---------- */
 app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg) => {
+    // basic address validation to avoid noisy calls
+    if (string.IsNullOrWhiteSpace(addr) || !addr.StartsWith("0x") || addr.Length != 42)
+        return Results.Json(new { error = true, message = "Invalid address format" });
+
     var rpc = cfg["Cronos:Rpc"] ?? "https://evm.cronos.org";
     var web3 = new Web3(rpc);
 
-    var wrap = await web3.Eth.GetContractQueryHandler<GetMissionDataFunction>()
-        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
-            new GetMissionDataFunction(), addr, null);
-    var md = wrap.Data; // tuple payload
+    try
+    {
+        var wrap = await web3.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+            .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                new GetMissionDataFunction(), addr, null);
 
-    return Results.Ok(new {
-        addr,
-        players    = md.Players?.Count ?? 0,
-        missionType= (int)md.MissionType,     // byte → int for readability
-        roundsTotal= (int)md.MissionRounds,   // byte → int
-        roundCount = (int)md.RoundCount,      // byte → int
-        croStartWei= md.EthStart.ToString(),
-        croCurrWei = md.EthCurrent.ToString()
-    });
+        if (wrap == null)
+            return Results.Json(new { error = true, message = "No response from getMissionData (wrap == null)" });
+
+        if (wrap.Data == null)
+            return Results.Json(new { error = true, message = "getMissionData returned null Data (not a Mission contract?)" });
+
+        var md = wrap.Data; // tuple payload
+
+        return Results.Ok(new {
+            addr,
+            players    = md.Players?.Count ?? 0,
+            missionType= (int)md.MissionType,     // byte → int for readability
+            roundsTotal= (int)md.MissionRounds,   // byte → int
+            roundCount = (int)md.RoundCount,      // byte → int
+            croStartWei= md.CroStart.ToString(),
+            croCurrWei = md.CroCurrent.ToString()
+        });
+    }
+    catch (Exception ex)
+    {
+        var msg = $"{ex.GetType().FullName}: {ex.Message}";
+        // Always return 200 JSON so IIS doesn't hide it
+        return Results.Json(new { error = true, message = msg });
+    }
 });
 
 // Debug: ping a group to verify client subscription
@@ -621,8 +641,90 @@ app.MapGet("/debug/env",                      (IHostEnvironment env) => {
     });
 });
 
+
+// backend/B6.Backend/Program.cs  // locator: HUB & push routes section
+
 /* ---------- HUB ---------- */
 app.MapHub<GameHub>("/hub/game");
+
+var bankPingThrottle = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+app.MapPost("/events/banked", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushFanout fan) => {
+    string mission = null;
+    string txHash  = null;
+
+    try
+    {
+        using var doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
+        var root = doc.RootElement;
+
+        mission = root.TryGetProperty("mission", out var m) ? m.GetString() : null;
+        txHash  = root.TryGetProperty("txHash",  out var h) ? h.GetString() : null;
+    }
+    catch
+    {
+        return Results.BadRequest("Invalid JSON");
+    }
+
+    if (string.IsNullOrWhiteSpace(mission) || string.IsNullOrWhiteSpace(txHash))
+        return Results.BadRequest("Missing mission or txHash");
+
+    mission = mission.ToLowerInvariant();
+
+    // Throttle: once per ~2s per mission (light abuse protection)
+    var now = DateTime.UtcNow;
+    if (bankPingThrottle.TryGetValue(mission, out var prev) && (now - prev) < TimeSpan.FromSeconds(2))
+        return Results.Ok(new { pushed = false, reason = "throttled" });
+    bankPingThrottle[mission] = now;
+
+    var rpc = cfg["Cronos:Rpc"] ?? "https://evm.cronos.org";
+    var web3 = new Nethereum.Web3.Web3(rpc);
+
+    // Verify the tx exists, is to this mission, and succeeded
+    var tx = await web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(txHash);
+    if (tx == null) return Results.BadRequest("Transaction not found");
+
+    var txTo = (tx.To ?? string.Empty).ToLowerInvariant();
+    if (txTo != mission) return Results.BadRequest("Transaction target mismatch");
+
+    var rc = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+    if (rc == null || rc.Status == null || rc.Status.Value != 1)
+        return Results.BadRequest("Transaction not successful");
+
+    // Emit immediate MissionUpdated to the mission group; spectators will refresh
+    await hub.Clients.Group(mission).SendAsync("MissionUpdated", mission);
+    await fan.OnMissionUpdatedAsync(mission);
+
+    // NEW: enqueue a kick for the indexer and NOTIFY listeners to wake immediately
+    try
+    {
+        var cs = cfg.GetConnectionString("Db");
+        await using var conn = new Npgsql.NpgsqlConnection(cs);
+        await conn.OpenAsync();
+
+        await using (var cmd = new Npgsql.NpgsqlCommand(@"
+            insert into indexer_kicks (mission_address, tx_hash)
+            values (@m, @h);", conn))
+        {
+            cmd.Parameters.AddWithValue("m", mission);
+            cmd.Parameters.AddWithValue("h", txHash);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        await using (var cmd2 = new Npgsql.NpgsqlCommand("NOTIFY b6_indexer_kick, @payload;", conn))
+        {
+            cmd2.Parameters.AddWithValue("payload", mission);
+            await cmd2.ExecuteNonQueryAsync();
+        }
+    }
+    catch (Exception ex)
+    {
+        // non-fatal: kick/notify failing should not break the push path
+        Console.WriteLine($"indexer kick failed for {mission}: {ex.Message}");
+    }
+
+    return Results.Ok(new { pushed = true });
+});
 
 app.MapPost("/push/mission",            async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushMissionDto body,  PushFanout fan) => {
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
@@ -653,5 +755,3 @@ app.MapPost("/push/round",              async (HttpRequest req, IConfiguration c
 });
 
 app.Run();
-
-

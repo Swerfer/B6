@@ -64,6 +64,9 @@ namespace B6.Indexer
         private int                                     _circuitTrips = 0;
         private readonly int                            _maxCircuitTrips;           // default 12
 
+        private volatile bool _kickRequested = false;
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _kickMissions = new();
+
         [Function("refundPlayers")]
         public class RefundPlayersFunction : FunctionMessage {
             // no args
@@ -1266,6 +1269,9 @@ namespace B6.Indexer
                 // NEW: if configured, make sure factory cursor >= (deployBlock - 1)
                 if (_factoryDeployBlock > 0)
                     await EnsureFactoryCursorMinAsync(_factoryDeployBlock - 1, token);
+
+                // NEW: start a lightweight listener for DB kicks
+                _ = Task.Run(() => ListenForKicksAsync(token), token);
             }
             catch (Exception ex)
             {
@@ -1280,6 +1286,25 @@ namespace B6.Indexer
                 {
                     try { await Task.Delay(TimeSpan.FromSeconds(5), token); } catch { }
                     continue;
+                }
+
+                if (_kickRequested || !_kickMissions.IsEmpty)
+                {
+                    _kickRequested = false;
+
+                    // In case NOTIFY failed, sweep pending rows too
+                    await ProcessPendingKicksAsync(token);
+
+                    try
+                    {
+                        var latest = await GetLatestBlockAsync();
+                        await ScanMissionEventsAsync(token, latestOverride: latest);
+                        // (No need to force a specific mission; ScanMissionEventsAsync picks up any with work)
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogDebug(ex, "Kick-triggered scan failed");
+                    }
                 }
 
                 try
@@ -1550,6 +1575,78 @@ namespace B6.Indexer
             {
                 _log.LogError(ex, "forceFinalizeMission() failed for {mission}", mission);
                 // best-effort; loop/RT poll will retry later.
+            }
+        }
+
+        private async Task                              ListenForKicksAsync         (CancellationToken token) {
+            try
+            {
+                await using var conn = new Npgsql.NpgsqlConnection(_pg);
+                await conn.OpenAsync(token);
+
+                // Ensure the table exists is handled by API migration; just LISTEN here
+                await using (var cmd = new Npgsql.NpgsqlCommand("LISTEN b6_indexer_kick;", conn))
+                    await cmd.ExecuteNonQueryAsync(token);
+
+                conn.Notification += async (_, e) =>
+                {
+                    try
+                    {
+                        var mission = (e.Payload ?? string.Empty).ToLowerInvariant();
+                        if (!string.IsNullOrWhiteSpace(mission))
+                            _kickMissions.Enqueue(mission);
+
+                        _kickRequested = true;
+                        // Optional: also sweep pending kick rows to be safe
+                        await ProcessPendingKicksAsync(CancellationToken.None);
+                    }
+                    catch { /* swallow */ }
+                };
+
+                // Wait loop to receive notifications
+                while (!token.IsCancellationRequested)
+                {
+                    await conn.WaitAsync(token);
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Kick listener failed; continuing without NOTIFY/LISTEN");
+            }
+        }
+
+        private async Task                              ProcessPendingKicksAsync    (CancellationToken token) {
+            try
+            {
+                await using var conn = new Npgsql.NpgsqlConnection(_pg);
+                await conn.OpenAsync(token);
+
+                // Fetch and delete pending kicks (best-effort dedupe)
+                var kicks = new List<string>();
+                await using (var cmd = new Npgsql.NpgsqlCommand(@"
+                    delete from indexer_kicks
+                    where id in (
+                        select id from indexer_kicks
+                        order by id
+                        limit 200
+                    )
+                    returning mission_address;", conn))
+                await using (var rd = await cmd.ExecuteReaderAsync(token))
+                {
+                    while (await rd.ReadAsync(token))
+                        kicks.Add((rd.GetString(0) ?? string.Empty).ToLowerInvariant());
+                }
+
+                foreach (var m in kicks)
+                    _kickMissions.Enqueue(m);
+
+                if (kicks.Count > 0)
+                    _kickRequested = true;
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "ProcessPendingKicksAsync failed");
             }
         }
 

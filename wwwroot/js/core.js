@@ -92,8 +92,8 @@ export const MISSION_ABI = [
         uint256 missionEnd,\
         uint8 missionRounds,\
         uint8 roundCount,\
-        uint256 ethStart,\
-        uint256 ethCurrent,\
+        uint256 croStart,\
+        uint256 croCurrent,\
         (address,uint256)[] playersWon,\
         uint256 pauseTimestamp,\
         address[] refundedPlayers\

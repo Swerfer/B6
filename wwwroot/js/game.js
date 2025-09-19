@@ -870,11 +870,16 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
             const m2 = { ...missionObj, status: next };
 
             setStageStatusImage(statusSlug(next));
-            // Instant, optimistic pill flip so UI matches CTA/title immediately
-            buildStageLowerHudForStatus(m2);
-            // Then pull chain-truth without throttle for correctness
-            if (next === 1 || next === 2) {
-              rehydratePillsFromChain(m2, "deadlineFlip", true).catch(()=>{});
+            // If we’re flipping into Active, pull chain truth first to avoid flashing old values
+            if (next === 3) {
+              await rehydratePillsFromChain(m2, "deadlineFlip-arming→active", true);
+              buildStageLowerHudForStatus({ ...m2, status: 3 });
+            } else {
+              // keep existing behavior for other statuses
+              buildStageLowerHudForStatus(m2);
+              if (next === 1 || next === 2) {
+                rehydratePillsFromChain(m2, "deadlineFlip", true).catch(()=>{});
+              }
             }
             await bindRingToMission(m2);
             await bindCenterTimerToMission(m2);
@@ -1311,9 +1316,14 @@ async function  startHub() { // SignalR HUB
 
         await maybeShowMissionEndPopup(mLocal);
 
-        buildStageLowerHudForStatus(mLocal);
-        if (target === 1 || target === 2) {
-          rehydratePillsFromChain(mLocal, "statusChanged", true).catch(()=>{});
+        if (target === 3) {
+          await rehydratePillsFromChain(mLocal, "statusChanged-→active", true);
+          buildStageLowerHudForStatus(mLocal);
+        } else {
+          buildStageLowerHudForStatus(mLocal);
+          if (target === 1 || target === 2) {
+            rehydratePillsFromChain(mLocal, "statusChanged", true).catch(()=>{});
+          }
         }
 
         // setTimeout(() => refreshOpenStageFromServer(2), 800);
@@ -2092,7 +2102,7 @@ async function  rehydratePillsFromChain(missionOverride = null, why = "", force 
     }
 
     // 3) Pool: prefer chain truth, else derive
-    const chainNow = tuple?.ethCurrent != null ? String(tuple.ethCurrent) : "";
+    const chainNow = tuple?.croCurrent != null ? String(tuple.croCurrent) : "";
     const feeWei   = BigInt(String(mSnap.enrollment_amount_wei || "0"));
     const startWei = BigInt(String(mSnap.cro_start_wei        || "0"));
     const derived  = (startWei + feeWei * BigInt(playersCnt)).toString();
@@ -2398,8 +2408,17 @@ async function  handleBankItClick(mission){
 
   try {
     const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
-    const tx  = await c.callRound();
+    const tx = await c.callRound();
     await tx.wait();
+
+    // NEW: tell backend to push spectators immediately (lightly verified + throttled)
+    try {
+      fetch("/api/events/banked", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mission: mission.mission_address, txHash: tx.hash })
+      }).catch(()=>{});
+    } catch { /* non-fatal */ }
 
     // Pull pool from chain immediately in case push is slow
     rehydratePillsFromChain(mission, "post-callRound", true).catch(()=>{});
@@ -2457,7 +2476,7 @@ async function  renderStageCtaForStatus (mission) {
   // Enrolling → show a disabled JOIN immediately, then refine gating async.
   if (st === 1) {
     host.innerHTML = "";
-    renderJoinPlaceholder(host, mission);           // instant, no-await
+    renderJoinPlaceholder(host);                    // instant, no-await
     (async () => {                                  // refine without removing the CTA
       try { await renderCtaEnrolling(host, mission); } catch (e) { console.warn(e); }
     })();
@@ -2471,7 +2490,7 @@ async function  renderStageCtaForStatus (mission) {
   if (st === 4) return renderCtaPaused (host, mission);
 }
 
-function        renderJoinPlaceholder   (host, mission){
+function        renderJoinPlaceholder   (host){
   const { xCenter, topY } = CTA_LAYOUT;
   const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_JOIN;
 
@@ -3016,7 +3035,7 @@ async function  maybeShowMissionEndPopup(mission){
 
     if (myWins.length){
       const last = myWins[myWins.length - 1];
-      const roundNo = Number(last.round_no || last.round || 0);
+      const roundNo = Number(last.round_number ?? last.round_no ?? last.round ?? 0);
       const cro = weiToCro(String(last.payout_wei || last.amountWei || "0"), 2);
       // Winners: celebratory copy + brief reason line
       showAlert(`🎉 Congratulations!<br/>You won round ${roundNo} and claimed <b>${cro} CRO</b>.<br/><small>${reasonText}</small>`, "success");
@@ -3720,13 +3739,12 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
       <div class="d-flex justify-content-between align-items-center">
         <div class="text-bold">
           ${copyableAddr(addr)} ${addrLinkIcon(addr)}
-          <div class="small">
-            ${won ? `<i class="fa-solid fa-trophy ms-2 text-warning" title="Winner"></i>
-                    <span class="small ms-1">${wonLabel}</span>` : ""}
-          </div>
+          ${won ? `<span class="small ms-2">
+                    <i class="fa-solid fa-trophy text-warning" title="Winner"></i>
+                    ${wonLabel}
+                  </span>` : ""}
         </div>
         <div class="text-end small">
-          ${e.enrolled_at ? formatLocalDateTime(e.enrolled_at) : "—"}
           ${e.refunded ? `<div class="text-warning">Refunded ${txLinkIcon(e.refund_tx_hash)}</div>` : ""}
         </div>
       </div>
@@ -4012,21 +4030,32 @@ async function  subscribeToMission(addr){
 }
 
 async function  triggerRoundCurrentMission(mission){
-  try {
-    const signer = getSigner();
-    if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
+  const signer = getSigner?.();
+  if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
 
+  try {
     const c = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
 
-    // Optional probe to avoid a revert dialog:
-    try { await c.callStatic.callRound(); } catch { 
-      showAlert("Round not available yet (cooldown or status).", "warning");
+    // confirm admin rights via signer
+    const owner = await c.owner();
+    const me = await signer.getAddress();
+    if (owner.toLowerCase() !== me.toLowerCase()) {
+      showAlert("Only the mission owner can trigger a round.", "warning");
       return;
     }
 
     setBtnLoading(document.getElementById("btnTrigger"), true, "Triggering…", true);
     const tx = await c.callRound();
     await tx.wait();
+
+    // NEW: ping backend to push spectators immediately
+    try {
+      fetch("/api/events/banked", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mission: mission.mission_address, txHash: tx.hash })
+      }).catch(()=>{});
+    } catch { /* non-fatal */ }
 
     showAlert("Round triggered!", "success");
     const data = await apiMission(mission.mission_address, true);

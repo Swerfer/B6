@@ -177,8 +177,8 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       missionEnd,
       missionRounds,
       roundCount,
-      ethStart,
-      ethCurrent,
+      croStart,
+      croCurrent,
       playersWon,
       pauseTimestamp,
       refundedPlayers
@@ -212,8 +212,8 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       `<tr><th>Rounds</th>             <td>${missionRounds}</td></tr>`,
       `<tr><th>Mission round Count</th><td>${roundCount}</td></tr>`,
       `<tr><th>Enrollment Amount</th>  <td>${ethers.utils.formatEther(enrollmentAmount)} CRO</td></tr>`,
-      `<tr><th>CRO Start</th>          <td>${ethers.utils.formatEther(ethStart)} CRO</td></tr>`,
-      `<tr><th>CRO Current</th>        <td>${ethers.utils.formatEther(ethCurrent)} CRO</td></tr>`,
+      `<tr><th>CRO Start</th>          <td>${ethers.utils.formatEther(croStart)} CRO</td></tr>`,
+      `<tr><th>CRO Current</th>        <td>${ethers.utils.formatEther(croCurrent)} CRO</td></tr>`,
       `<tr><th>Players Won</th>        <td>${playersWon.length}</td></tr>`,
       `<tr><th>Refunded Players</th>   <td>${refundedPlayers.length}</td></tr>`
     ];
