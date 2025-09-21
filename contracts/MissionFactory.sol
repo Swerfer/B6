@@ -1449,11 +1449,11 @@ contract Mission        is Ownable, ReentrancyGuard {
         if (!enrolled[msg.sender])                                  revert NotJoined();                                 // Ensure the player is enrolled in the mission
         if (_missionData.roundCount >= _missionData.missionRounds)  revert AllRoundsDone();                             // Ensure all rounds have not been claimed yet
 
-        uint256 progress = (nowTs - _missionData.missionStart) * 100                                                    // Calculate the progress percentage of the mission
+        uint256 progress = (nowTs - _missionData.missionStart) * 1e18                                                   // Calculate mission progress as a fixed-point number (1e18 = 100%)
                         / (_missionData.missionEnd - _missionData.missionStart);
 
         uint256 paidSoFar    = _missionData.croStart - _missionData.croCurrent;                                         // total already paid
-        uint256 expectedPaid = (_missionData.croStart * progress) / 100;                                                // what should be paid at this progress
+        uint256 expectedPaid = (_missionData.croStart * progress) / 1e18;                                               // total expected to be paid by now
         require(expectedPaid >= paidSoFar, "Progress regression");
 
         uint256 payout = expectedPaid - paidSoFar;

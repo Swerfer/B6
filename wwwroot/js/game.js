@@ -988,7 +988,8 @@ async function  bindCenterTimerToMission(mission){
   let   startTs= 0;
 
   if (st === 0) {                                // Pending
-    startTs = Number(mission.enrollment_start || mission.mission_start || 0);
+    startTs = await getMissionCreationTs(mission);
+    if (!startTs) startTs = Number(mission.updated_at || 0);
   } else if (st === 1) {                         // Enrolling
     startTs = Number(mission.enrollment_start || 0);
   } else if (st === 2) {                         // Arming
@@ -1067,7 +1068,8 @@ async function  bindRingToMission(m){ /* Map mission.status to the correct time 
 
   let S = 0, E = 0;
   if (st === 0) {                               // Pending
-    S = 0;
+    S = m?.mission_address ? await getMissionCreationTs(m) : 0;
+    if (!S) S = Number(m.updated_at || 0);
     E = Number(m.enrollment_start || m.mission_start || 0);
   } else if (st === 1) {                        // Enrolling
     S = Number(m.enrollment_start || 0);
@@ -1088,41 +1090,6 @@ async function  bindRingToMission(m){ /* Map mission.status to the correct time 
   } else {
     setRingProgress(st >= 5 ? 100 : 0);
   }
-
-  /*
-  let S = 0, E = 0;
-
-  if (st === 0) {                         // Pending: MissionCreated → enrollment_start
-    E = Number(m.enrollment_start || 0);
-
-    // MissionCreated event timestamp (cached). Fallback: updated_at.
-    S = m?.mission_address ? await getMissionCreationTs(m) : 0;
-    if (!S) S = Number(m.updated_at || 0);
-
-    if (S && E && E > S) { bindRingToWindow(S, E); }
-    else { setRingProgress(0); }
-    return;
-  } else if (st === 1) {                  // Enrolling
-    S = Number(m.enrollment_start || 0);
-    E = Number(m.enrollment_end   || 0);
-  } else if (st === 2) {                  // Arming
-    S = Number(m.enrollment_end   || 0);
-    E = Number(m.mission_start    || 0);
-  } else if (st === 3 || st === 4) {      // Active / Paused
-    S = Number(m.mission_start    || 0);
-    E = Number(m.mission_end      || 0);
-  } else {
-    // Ended variants
-    setRingProgress(100);
-    return;
-  }
-
-  if (S && E && E > S) {
-    bindRingToWindow(S, E);
-  } else {
-    setRingProgress(st >= 5 ? 100 : 0);
-  }
-    */
 }
 
 // Page scroll lock:
@@ -2142,10 +2109,22 @@ function        applyChainNoRegress(m){
   try {
     const st = Number(m?.status);
     if (st === 1 || st === 2) {
+      const merged   = { ...m };
       const apiCro   = BigInt(String(m?.cro_current_wei ?? m?.cro_start_wei ?? "0"));
       const chainCro = BigInt(String(__lastChainCroWei || "0"));
-      const merged   = { ...m };
+
+      // 1) Never regress vs last chain truth
       if (chainCro > apiCro) merged.cro_current_wei = chainCro.toString();
+
+      // 2) During the optimism window, never regress vs optimistic croNow
+      if (Date.now() < (optimisticGuard?.untilMs || 0)) {
+        try {
+          const optCro = BigInt(String(optimisticGuard?.croNow || "0"));
+          const curCro = BigInt(String(merged?.cro_current_wei ?? merged?.cro_start_wei ?? "0"));
+          if (optCro > curCro) merged.cro_current_wei = optCro.toString();
+        } catch {}
+      }
+
       return merged;
     }
   } catch {}
@@ -2406,10 +2385,37 @@ async function  handleBankItClick(mission){
   // Show immediately for the clicking player (prevents race with fast RoundResult)
   showAlert("Round called. Waiting for result…", "info");
 
+  // Mark a short local “banking in flight” window for this mission
+  try {
+    __bankingInFlight = {
+      mission: String(mission.mission_address || "").toLowerCase(),
+      startedAt: Math.floor(Date.now()/1000),
+      hadResult: false
+    };
+  } catch {}
+
   try {
     const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
     const tx = await c.callRound();
     await tx.wait();
+
+    // 1) Flip UI to Paused immediately, using current snapshot values (prevents Pool(start) flash)
+    await flipStageToPausedOptimistic(mission);
+
+    // 2) (keep) nudge backend to notify spectators
+    try {
+      fetch("/api/events/banked", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mission: mission.mission_address, txHash: tx.hash })
+      }).catch(()=>{});
+    } catch {}
+
+    // 3) (optional but okay) quick chain rehydrate; the optimistic Paused UI stays visible
+    rehydratePillsFromChain(mission, "post-callRound", true).catch(()=>{});
+
+    // 4) (keep) quick reconcile so DB fields catch up
+    await refreshOpenStageFromServer(2);
 
     // NEW: tell backend to push spectators immediately (lightly verified + throttled)
     try {
@@ -2427,6 +2433,9 @@ async function  handleBankItClick(mission){
     await refreshOpenStageFromServer(2);
 
   } catch (err) {
+    // clear the local “banking in flight” marker on failure/cancel
+    __bankingInFlight = null;
+
     // Replace the waiting info with a clear outcome on failure/cancel
     if (err?.code === 4001 || err?.code === "ACTION_REJECTED") {
       showAlert("Banking canceled.", "warning");
@@ -2464,8 +2473,28 @@ async function  renderStageCtaForStatus (mission) {
 
   const st = uiStatusFor(mission);
 
-  // Ignore stale snapshots that would repaint an older CTA (prevents JOIN flicker)
+  // Ignore stale snapshots that would repaint an older CTA
   if (typeof stageCurrentStatus === "number") {
+    const now = Math.floor(Date.now()/1000);
+
+    // While local cooldown is ticking, ignore 4→3 attempts
+    if (Number(stageCurrentStatus) === 4 && st === 3) {
+      if (__pauseUntilSec && now < __pauseUntilSec) {
+        console.debug("[CTA] 4→3 ignored during cooldown");
+        return;
+      }
+    }
+
+    // Just after cooldown, ignore stale 3→4 unless it’s a NEW pause (higher pause_timestamp)
+    if (Number(stageCurrentStatus) === 3 && st === 4) {
+      const pauseTs = Number(mission?.pause_timestamp || 0);
+      const looksStale = !pauseTs || pauseTs <= __lastPauseTs;
+      if (__postCooldownUntilSec && now < __postCooldownUntilSec && looksStale) {
+        console.debug("[CTA] 3→4 ignored post-cooldown (stale pause)");
+        return;
+      }
+    }
+
     const toggle34 = (st === 3 && stageCurrentStatus === 4) || (st === 4 && stageCurrentStatus === 3);
     if (st < stageCurrentStatus && !toggle34) {
       console.debug("[CTA] stale snapshot ignored", { st, stageCurrentStatus });
@@ -3003,6 +3032,19 @@ async function  maybeShowMissionEndPopup(mission){
 
     const addr = String(mission.mission_address || currentMissionAddr || "").toLowerCase();
     if (!addr || __endPopupShown.has(addr)) return;
+
+    // Suppress for the local last banker: if we just called a round and haven’t seen RoundResult yet
+    try {
+      if (__bankingInFlight && __bankingInFlight.mission === addr) {
+        const now = Math.floor(Date.now()/1000);
+        const age = now - Number(__bankingInFlight.startedAt || 0);
+        if (!__bankingInFlight.hadResult && age <= 12) {
+          console.debug("[EndPopup] Suppressed during local bank result race");
+          return;
+        }
+      }
+    } catch {}
+
     __endPopupShown.add(addr);
 
     // Ensure we have enrollments + rounds for role detection
