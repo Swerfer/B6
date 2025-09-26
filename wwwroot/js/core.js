@@ -10,12 +10,7 @@ let __readProvider = null;
 
 export function getReadProvider() {
   if (__readProvider) return __readProvider;
-  if (window.ethereum) {
-    try {
-      __readProvider = new ethers.providers.Web3Provider(window.ethereum);
-      return __readProvider;
-    } catch (err) {console.log(err);}
-  }
+  // Always go through our reverse-proxied RPC for reads (stable, CORS-safe)
   __readProvider = new ethers.providers.JsonRpcBatchProvider(READ_ONLY_RPC);
   return __readProvider;
 }

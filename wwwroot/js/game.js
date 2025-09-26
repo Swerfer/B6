@@ -102,6 +102,7 @@ let   __bankingInFlight     = null;
 let   __allMissionsCache    = [];     // last fetched list (raw objects)
 let   __allFilterOpen       = false;
 let   __allSelected         = null;   // null  → all statuses; otherwise Set<number> of allowed statuses
+let __allMissionsRenderVersion = 0;
 // Realtime:
 let   __lastPushTs          = 0;      // updated on any hub push we care about
 // Optimistic:
@@ -3324,8 +3325,21 @@ function        renderAllMissions       (missions = []) {
 
     // clicking opens detail
     li.addEventListener("click", () => openMission(m.mission_address));
-
+    li.style.visibility = "hidden";
     ul.appendChild(li);
+  }
+
+  // Reveal the cards one-by-one across 1 second total
+  const cards = [...ul.querySelectorAll("li.mission-card")];
+  if (cards.length) {
+    const ver = ++__allMissionsRenderVersion;           // cancel older runs
+    const stepMs = Math.ceil(500 / cards.length);      // e.g. 10 → 100ms, 5 → 200ms
+    cards.forEach((el, i) => {
+      setTimeout(() => {
+        if (ver !== __allMissionsRenderVersion) return; // aborted by a newer render
+        el.style.visibility = "";                       // show
+      }, i * stepMs);
+    });
   }
 
   // re-use the global ticker to keep countdowns + players color live
