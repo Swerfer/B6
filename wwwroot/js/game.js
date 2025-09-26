@@ -867,20 +867,41 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
           const cur  = Number(missionObj.status);
           if (typeof next === "number" && next !== cur) {
             pillFlipDone = true;
+
+            // Start from current snapshot
             const m2 = { ...missionObj, status: next };
 
-            setStageStatusImage(statusSlug(next));
-            // If we’re flipping into Active, pull chain truth first to avoid flashing old values
             if (next === 3) {
+              // Arming → Active: hydrate before painting
               await rehydratePillsFromChain(m2, "deadlineFlip-arming→active", true);
               buildStageLowerHudForStatus({ ...m2, status: 3 });
+            } else if (next === 2) {
+              // Enrolling → Arming:
+              // Ensure Pool (start) equals the *final* enrollment pool immediately.
+              // If we already know cro_current_wei (from enrolling enrichment), use it to set cro_start_wei.
+              if (m2?.cro_current_wei != null) {
+                m2.cro_start_wei = String(m2.cro_current_wei);
+              } else {
+                // Fallback: derive from start + fee * joined (same formula as enrolling enrichment)
+                try {
+                  const startWei = BigInt(String(m2.cro_start_wei || "0"));
+                  const feeWei   = BigInt(String(m2.enrollment_amount_wei || "0"));
+                  const joined   = BigInt(Array.isArray(m2.enrollments) ? m2.enrollments.length : 0);
+                  m2.cro_start_wei = (startWei + feeWei * joined).toString();
+                } catch {}
+              }
+
+              // Paint immediately with corrected Pool (start), then hydrate to confirm
+              buildStageLowerHudForStatus(m2);
+              rehydratePillsFromChain(m2, "deadlineFlip-enrolling→arming", true).catch(()=>{});
             } else {
               // keep existing behavior for other statuses
               buildStageLowerHudForStatus(m2);
-              if (next === 1 || next === 2) {
+              if (next === 1) {
                 rehydratePillsFromChain(m2, "deadlineFlip", true).catch(()=>{});
               }
             }
+
             await bindRingToMission(m2);
             await bindCenterTimerToMission(m2);
             renderStageCtaForStatus(m2);
@@ -1110,6 +1131,17 @@ function        unlockScroll(){
   window.scrollTo(0, -top);
 }
 
+// State helpers:
+
+function resetMissionLocalState() {
+  // Clear cross-mission, “no-regress” caches so pills won’t bleed
+  __lastChainPlayers = 0;
+  __lastChainCroWei  = "0";
+  optimisticGuard    = { untilMs: 0, players: 0, croNow: "0" };
+  __pillsHydrateBusy = false;
+  __pillsHydrateLast = 0;
+}
+
 // #endregion
 
 
@@ -1192,14 +1224,8 @@ async function  startHub() { // SignalR HUB
         } 
       } catch (err) {console.log("startHub RoundResult error: " + err)}
 
-      // show inline “Round N banked by …” on the stage + rebuild the stage
       const gameMain = document.getElementById('gameMain');
       if (gameMain && gameMain.classList.contains('stage-mode')) {
-        const me  = (walletAddress || "").toLowerCase();
-        const win = String(winner || "").toLowerCase();
-        if (win !== me) {
-          renderRoundBankedNotice(Number(round), String(winner || ""), String(amountWei || "0"));
-        }
 
         // 0) Ultra-fast optimistic paint: bump round pill and subtract payout from pool now
         try {
@@ -1825,7 +1851,7 @@ const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg" );
 
 
 
-// #region Stage entry
+// #region Stage utilities
 
 async function  showGameStage(missionRaw){
   const mission = enrichMissionFromApi({ mission: missionRaw, enrollments: missionRaw.enrollments, rounds: missionRaw.rounds });
@@ -2068,12 +2094,25 @@ async function  rehydratePillsFromChain(missionOverride = null, why = "", force 
       mSnap = enrichMissionFromApi(data);
     }
 
-    // 3) Pool: prefer chain truth, else derive
+    // 3) Pool: prefer chain truth; avoid enrollment fallback in Active/Paused
     const chainNow = tuple?.croCurrent != null ? String(tuple.croCurrent) : "";
     const feeWei   = BigInt(String(mSnap.enrollment_amount_wei || "0"));
     const startWei = BigInt(String(mSnap.cro_start_wei        || "0"));
     const derived  = (startWei + feeWei * BigInt(playersCnt)).toString();
-    const croNow   = chainNow || derived;
+
+    let croNow;
+    const stNum = Number(mSnap?.status);
+    if (chainNow) {
+      croNow = chainNow;
+    } else if (stNum === 1) {
+      // Enrolling only: start + fee * joined
+      croNow = derived;
+    } else {
+      // keep last known current (don’t pass empty string through)
+      croNow = (mSnap.cro_current_wei != null && mSnap.cro_current_wei !== "")
+              ? String(mSnap.cro_current_wei)
+              : String(__lastChainCroWei || ""); // or leave undefined to show "—"
+    }
 
     // NEW: keep a cache of the last chain-truth so UI never regresses
     try {
@@ -2439,6 +2478,12 @@ async function  handleBankItClick(mission){
     // Replace the waiting info with a clear outcome on failure/cancel
     if (err?.code === 4001 || err?.code === "ACTION_REJECTED") {
       showAlert("Banking canceled.", "warning");
+      // keep a brief suppression so a transient ended snapshot doesn't pop a wrong modal
+      __bankingInFlight = { mission: String(mission.mission_address||"").toLowerCase(),
+                            startedAt: Math.floor(Date.now()/1000),
+                            hadResult: false };
+      setTimeout(() => { __bankingInFlight = null; }, 12000);
+      return;
     } else {
       const custom = missionCustomErrorMessage(err);
       const msg    = custom || `Bank it failed: ${decodeError(err)}`;
@@ -2455,12 +2500,16 @@ async function  handleBankItClick(mission){
 async function  refreshStageCtaIfOpen(){
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
-  if (!currentMissionAddr) {
-        return;
-      }
+  if (!currentMissionAddr) return;
   try {
     const data = await apiMission(currentMissionAddr, false);
     const m = enrichMissionFromApi(data);
+
+    // ensure walletAddress is fresh from walletConnect before painting
+    if (window.walletAddress) {
+      m._viewerAddr = (window.walletAddress || "").toLowerCase();
+    }
+
     renderStageCtaForStatus(m);
   } catch {}
 }
@@ -2721,7 +2770,7 @@ function        renderCtaActive         (host, mission)   {
   const y = topY;
 
   // --- NEW: pre-render gating for view-only states ---
-  const me = (walletAddress || "").toLowerCase();
+  const me = (mission._viewerAddr || (walletAddress || "")).toLowerCase();
 
   // joined?
   const joined = !!(me && (mission?.enrollments || []).some(e => {
@@ -2930,96 +2979,6 @@ async function  flipStageToPausedOptimistic(mission){
   stageCurrentStatus = 4;
 
   refreshOpenStageFromServer(2);
-}
-
-// Round notice:
-
-function        renderRoundBankedNotice (roundNo, winner, amountWei) {
-  const host = document.getElementById("stageNoticeGroup");
-  if (!host) return;
-
-  // Clear any previous notice
-  host.innerHTML = "";
-
-  // Capsule positioned between the prize line and the top HUD pills
-  // (just above the first pill row)
-  const { xCenter } = CTA_LAYOUT;
-  const { yFirst, rectH, gapY }  = HUD;
-  const W = 360;
-  const H = 26;
-  const x = xCenter - Math.round(W/2);
-  const y = Math.max(0, yFirst + (2 * (rectH + gapY)) - H - 12);     // <-- new position (above 2 lines of pills)
-
-  const g = document.createElementNS(SVG_NS, "g");
-  g.setAttribute("fill", stageTextFill());
-
-  // Background capsule
-  const bg = document.createElementNS(SVG_NS, "rect");
-  bg.setAttribute("x", String(x));
-  bg.setAttribute("y", String(y));
-  bg.setAttribute("width",  String(W));
-  bg.setAttribute("height", String(H));
-  bg.setAttribute("rx", "12");
-  bg.setAttribute("ry", "12");
-  bg.setAttribute("fill", "rgba(6,29,45,85)");
-  bg.setAttribute("stroke", "rgba(72,221,255,35)");
-  g.appendChild(bg);
-
-  // Main text: "Round N banked by 0x1234...1234 for ## CRO!"
-  const cro = weiToCro(String(amountWei || "0"), 2);
-  const txt = document.createElementNS(SVG_NS, "text");
-  txt.setAttribute("x", String(x + 12));
-  txt.setAttribute("y", String(y + 17));
-  txt.setAttribute("class", "notice-text");
-  const short = winner ? shorten(winner) : "";
-  txt.textContent = `Round ${roundNo} banked by ${short} for ${cro} CRO!`;
-  g.appendChild(txt);
-
-  // Clickable icons (copy address + open on Cronos Explorer)
-  if (winner){
-    // Copy icon (inline vector)
-    const icoCopy = document.createElementNS(SVG_NS, "g");
-    icoCopy.setAttribute("transform", `translate(${x + W - 56},${y + 6})`);
-    icoCopy.setAttribute("role", "button");
-    icoCopy.setAttribute("tabindex", "0");
-    icoCopy.style.cursor = "pointer";
-    // two overlapped rectangles → "copy" glyph
-    const r1 = document.createElementNS(SVG_NS, "rect");
-    r1.setAttribute("x", "3"); r1.setAttribute("y", "3");
-    r1.setAttribute("width", "10"); r1.setAttribute("height", "10");
-    r1.setAttribute("fill", "none"); r1.setAttribute("stroke", "#bfefff"); r1.setAttribute("stroke-width", "1.2");
-    const r2 = document.createElementNS(SVG_NS, "rect");
-    r2.setAttribute("x", "7"); r2.setAttribute("y", "7");
-    r2.setAttribute("width", "10"); r2.setAttribute("height", "10");
-    r2.setAttribute("fill", "none"); r2.setAttribute("stroke", "#bfefff"); r2.setAttribute("stroke-width", "1.2");
-    icoCopy.appendChild(r1); icoCopy.appendChild(r2);
-    icoCopy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(winner); } catch {} });
-    g.appendChild(icoCopy);
-
-    // External link icon (re-use addrLinkIcon from core.js)
-    const icoLink = svgImage(addrLinkIcon(winner), x + W - 36, y + 5, 14, 14);
-    icoLink.setAttribute("role", "button");
-    icoLink.setAttribute("tabindex", "0");
-    icoLink.style.cursor = "pointer";
-    icoLink.addEventListener("click", () => {
-      try { window.open(`https://explorer.cronos.org/address/${winner}`, "_blank", "noopener"); } catch {}
-    });
-    g.appendChild(icoLink);
-  }
-
-  // Close ×
-  const tClose = document.createElementNS(SVG_NS, "text");
-  tClose.setAttribute("x", String(x + W - 16));
-  tClose.setAttribute("y", String(y + 17));
-  tClose.setAttribute("class", "notice-text");
-  tClose.setAttribute("role", "button");
-  tClose.setAttribute("tabindex", "0");
-  tClose.style.cursor = "pointer";
-  tClose.textContent = "×";
-  tClose.addEventListener("click", () => { host.innerHTML = ""; });
-  g.appendChild(tClose);
-
-  host.appendChild(g);
 }
 
 // Ended panel:
@@ -3568,6 +3527,10 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
     // placeholder: wire up later to the in-mission HUD
     btn.addEventListener("click", async () => {
       await cleanupMissionDetail();
+
+      // ↓↓↓ prevent pill bleed from previous mission
+      resetMissionLocalState();
+
       currentMissionAddr = String(mission.mission_address).toLowerCase();
       await startHub();
       await subscribeToMission(currentMissionAddr);
@@ -3575,6 +3538,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
       // pass enrollments/rounds so CTA can gate immediately
       await showGameStage({ ...mission, enrollments, rounds });
     });
+
   }
 
   els.missionDetail.classList.add("overlay");
