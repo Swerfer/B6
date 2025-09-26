@@ -242,3 +242,5 @@ body.scroll-lock{
   background: rgba(156, 163, 175, 0.15);/* gray-400 bg tint */
   color: #9ca3af;                       /* gray-400 text */
 }
+
+.countdown-time { color: #eea648; /* pick your color */ }

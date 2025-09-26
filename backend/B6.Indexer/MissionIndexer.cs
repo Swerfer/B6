@@ -222,7 +222,8 @@ namespace B6.Indexer
                     }
 
                     var potChanged = await RefreshPotFromChainAsync(a, token);
-                    if (potChanged)
+                    var fixedPlayers = await ReconcileEnrollmentsFromChainAsync(a, token); // ← add this
+                    if (potChanged || fixedPlayers)
                         await NotifyMissionUpdatedAsync(a, token);
                 }
                 catch (Exception ex)
@@ -502,7 +503,7 @@ namespace B6.Indexer
                     }
 
                     // ======= CHANGED: retry logic without goto =======
-                    for (var attempt = 0; attempt < 2; attempt++)
+                    for (var attempt = 0; attempt < 3; attempt++)
                     {
                         try
                         {
@@ -861,8 +862,11 @@ namespace B6.Indexer
                                 if (missionUpdated)
                                     await NotifyMissionUpdatedAsync(addr, token);
 
+                                // Backfill enrollments from tuple in case a provider returned partial logs
+                                var fixedPlayers = await ReconcileEnrollmentsFromChainAsync(addr, token);
+
                                 var potChanged = await RefreshPotFromChainAsync(addr, token);
-                                if (potChanged && !missionUpdated)
+                                if ((potChanged || fixedPlayers) && !missionUpdated)
                                     await NotifyMissionUpdatedAsync(addr, token);
                             } catch (Exception ex) {
                                 _log.LogWarning(ex, "Notify failed for {addr}", addr); 
@@ -1465,6 +1469,64 @@ namespace B6.Indexer
 
             var rows = await up.ExecuteNonQueryAsync(token);
             return rows > 0; // true → pot changed and DB was updated
+        }
+
+        private async Task<bool>                        ReconcileEnrollmentsFromChainAsync(string addr, CancellationToken token) {
+            // read on-chain players
+            var wrap = await RunRpc(
+                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                            new GetMissionDataFunction(), addr, null),
+                "Call.getMissionData");
+            var md = wrap.Data;
+
+            // build set of chain players (lowercased)
+            var chain = new HashSet<string>(StringComparer.InvariantCulture);
+            foreach (var p in md.Players)
+            {
+                var s = (p ?? "").ToLower(System.Globalization.CultureInfo.InvariantCulture);
+                if (!string.IsNullOrEmpty(s)) chain.Add(s);
+            }
+            if (chain.Count == 0) return false;
+
+            // read DB players
+            var db = new HashSet<string>(StringComparer.InvariantCulture);
+            await using (var c = new NpgsqlConnection(_pg))
+            {
+                await c.OpenAsync(token);
+                await using var cmd = new NpgsqlCommand(
+                    "select player_address from mission_enrollments where mission_address=@a;", c);
+                cmd.Parameters.AddWithValue("a", addr);
+                await using var rd = await cmd.ExecuteReaderAsync(token);
+                while (await rd.ReadAsync(token))
+                {
+                    var s = (rd[0] as string ?? "").ToLower(System.Globalization.CultureInfo.InvariantCulture);
+                    if (!string.IsNullOrEmpty(s)) db.Add(s);
+                }
+            }
+
+            // insert missing
+            var insertedAny = false;
+            await using (var c2 = new NpgsqlConnection(_pg))
+            {
+                await c2.OpenAsync(token);
+                await using var tx = await c2.BeginTransactionAsync(token);
+                foreach (var p in chain)
+                {
+                    if (db.Contains(p)) continue;
+                    await using var ins = new NpgsqlCommand(@"
+                        insert into mission_enrollments
+                            (mission_address, player_address, enrolled_at, refunded, refund_tx_hash)
+                        values (@a, @p, now(), false, null)
+                        on conflict (mission_address, player_address) do nothing;", c2, tx);
+                    ins.Parameters.AddWithValue("a", addr);
+                    ins.Parameters.AddWithValue("p", p);
+                    var rows = await ins.ExecuteNonQueryAsync(token);
+                    if (rows > 0) insertedAny = true;
+                }
+                await tx.CommitAsync(token);
+            }
+            return insertedAny;
         }
 
         private async Task<bool>                        HasAnyRefundsRecordedAsync  (string mission, CancellationToken token) {

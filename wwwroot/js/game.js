@@ -3560,10 +3560,25 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
   els.missionTitle.textContent = mission.name || mission.mission_address;
 
   const st = Number(mission.status); // 0..7
-  const showEnrollStartCountdown = st <= 0; // <= Pending
-  const showEnrollEndCountdown   = st <= 1; // <= Enrolling
-  const showMissionStartCountdown= st <= 2; // <= Arming
-  const showMissionEndCountdown  = st <= 4; // <= Paused
+
+  // Show only ONE countdown at most:
+  // Pending   → Enrollment start
+  // Enrolling → Enrollment end
+  // Arming    → Mission start
+  // Active    → Mission end
+  // Paused    → Mission end
+  // Ended     → none (all fixed)
+  let countdownKey = null;
+  if (st === 0)          countdownKey = "enrollStart";
+  else if (st === 1)     countdownKey = "enrollEnd";
+  else if (st === 2)     countdownKey = "missionStart";
+  else if (st === 3 || st === 4) countdownKey = "missionEnd";
+  // st >= 5 → ended → keep countdownKey = null
+
+  const showEnrollStartCountdown  = (countdownKey === "enrollStart");
+  const showEnrollEndCountdown    = (countdownKey === "enrollEnd");
+  const showMissionStartCountdown = (countdownKey === "missionStart");
+  const showMissionEndCountdown   = (countdownKey === "missionEnd");
 
   const statusCls = statusColorClass(mission.status);
 
@@ -3636,28 +3651,28 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
           <div class="label">Enrollment Start</div>
           <div class="value">
             ${showEnrollStartCountdown
-              ? `<span id="enrollStartCountdown">${formatCountdown(mission.enrollment_start)}</span>`
+              ? `<span id="enrollStartCountdown" class="countdown-time">${formatCountdown(mission.enrollment_start)}</span>`
               : `${formatLocalDateTime(mission.enrollment_start)}`}
           </div>
 
           <div class="label">Enrollment End</div>
           <div class="value">
             ${showEnrollEndCountdown
-              ? `<span id="enrollEndCountdown">${formatCountdown(mission.enrollment_end)}</span>`
+              ? `<span id="enrollEndCountdown" class="countdown-time">${formatCountdown(mission.enrollment_end)}</span>`
               : `${formatLocalDateTime(mission.enrollment_end)}`}
           </div>
 
           <div class="label">Mission Start</div>
           <div class="value">
             ${showMissionStartCountdown
-              ? `<span id="missionStartCountdown">${formatCountdown(mission.mission_start)}</span>`
+              ? `<span id="missionStartCountdown" class="countdown-time">${formatCountdown(mission.mission_start)}</span>`
               : `${formatLocalDateTime(mission.mission_start)}`}
           </div>
 
           <div class="label">Mission End</div>
           <div class="value">
             ${showMissionEndCountdown
-              ? `<span id="missionEndCountdown">${formatCountdown(mission.mission_end)}</span>`
+              ? `<span id="missionEndCountdown" class="countdown-time">${formatCountdown(mission.mission_end)}</span>`
               : `${formatLocalDateTime(mission.mission_end)}`}
           </div>
 
