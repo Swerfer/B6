@@ -98,6 +98,7 @@ let   roundPauseDuration    = 60;		// READ FROM BLOCKCHAIN INSTEAD
 let   lastRoundPauseDuration= 60;		// READ FROM BLOCKCHAIN INSTEAD
 const __endPopupShown       = new Set();
 let   __bankingInFlight     = null;
+const __viewerWonOnce       = new Set(); // missions the current viewer has already won in this session
 // All missions cache & filters:
 let   __allMissionsCache    = [];     // last fetched list (raw objects)
 let   __allFilterOpen       = false;
@@ -460,40 +461,22 @@ function        statusSlug(s){
 
 // Round helpers:
 
-function        waitForMyRoundWin(meAddrLc, missionAddrLc, timeoutMs = 25000){
-  return new Promise((resolve, reject) => {
-    if (!hubConnection) { reject(new Error("hub not started")); return; }
-
-    const onRR = (addr, round, winner, amountWei) => {
-      try {
-        const a = String(addr||"").toLowerCase();
-        const w = String(winner||"").toLowerCase();
-        if (a === missionAddrLc && w === meAddrLc) {
-          cleanup();
-          resolve({ round: Number(round), amountWei: String(amountWei || "0") });
-        }
-      } catch { /* ignore parse errors */ }
-    };
-
-    const cleanup = () => {
-      try { hubConnection.off("RoundResult", onRR); } catch {}
-      clearTimeout(to);
-    };
-
-    const to = setTimeout(() => { cleanup(); reject(new Error("timeout")); }, timeoutMs);
-    hubConnection.on("RoundResult", onRR);
-  });
-}
-
 function        getLastBankTs(mission, rounds){
   const t0 = Number(mission?.mission_start || 0);
   let last = t0;
+
+  // include any recorded round times
   if (Array.isArray(rounds)) {
     for (const r of rounds) {
       const t = Number(r?.created_at || r?.played_at || 0);
       if (t > last) last = t;
     }
   }
+
+  // ALSO include latest pause (a bank just happened)
+  const pz = Number(mission?.pause_timestamp || 0);
+  if (pz > last) last = pz;
+
   return last;
 }
 
@@ -791,10 +774,16 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
         const p = String(e?.player_address || e?.address || e?.player || "").toLowerCase();
         return p === me;
       }));
-      const alreadyWon = !!(me && (missionObj?.rounds || []).some(r => {
-        const w = String(r?.winner_address || "").toLowerCase();
-        return w === me;
-      }));
+
+      const addrLc = String(missionObj?.mission_address || "").toLowerCase();
+      const alreadyWon = !!(me && (
+        __viewerWonOnce.has(addrLc) ||
+        (missionObj?.rounds || []).some(r => {
+          const w = String(r?.winner_address || "").toLowerCase();
+          return w === me;
+        })
+      ));
+
       const eligible = !!walletAddress && joined && !alreadyWon;
 
       // Match the initial render labels used in renderCtaActive/Paused
@@ -1199,7 +1188,7 @@ async function  startHub() { // SignalR HUB
         showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
         // ToDo: Sound effect?
       }
-
+      __viewerWonOnce.add(aLc); // aLc is the lowercased mission address computed above
       if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
         return;
       }
@@ -2438,7 +2427,7 @@ async function  handleBankItClick(mission){
     const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
     const tx = await c.callRound();
     await tx.wait();
-
+    try { __viewerWonOnce.add(String(mission.mission_address || "").toLowerCase()); } catch {}
     // 1) Flip UI to Paused immediately, using current snapshot values (prevents Pool(start) flash)
     await flipStageToPausedOptimistic(mission);
 
@@ -2780,10 +2769,14 @@ function        renderCtaActive         (host, mission)   {
   }));
 
   // already won any round?
-  const alreadyWon = !!(me && (mission?.rounds || []).some(r => {
-    const w = String(r?.winner_address || "").toLowerCase();
-    return w === me;
-  }));
+  const addrLc = String(mission?.mission_address || "").toLowerCase();
+  const alreadyWon = !!(me && (
+    __viewerWonOnce.has(addrLc) ||
+    (mission?.rounds || []).some(r => {
+      const w = String(r?.winner_address || "").toLowerCase();
+      return w === me;
+    })
+  ));
 
   let blockReason = "";
   if (!walletAddress)        blockReason = "Connect your wallet to bank";
