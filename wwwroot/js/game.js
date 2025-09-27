@@ -2562,7 +2562,7 @@ async function  handleEnrollClick       (mission){
 
 }
 
-async function  handleBankItClick(mission){
+async function  handleBankItClick       (mission){
   const signer = getSigner?.();
   if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
 
@@ -2646,7 +2646,7 @@ async function  handleBankItClick(mission){
   }
 }
 
-async function  refreshStageCtaIfOpen(){
+async function  refreshStageCtaIfOpen   (){
   const gameMain = document.getElementById('gameMain');
   if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
   if (!currentMissionAddr) return;
@@ -2660,6 +2660,7 @@ async function  refreshStageCtaIfOpen(){
     }
 
     renderStageCtaForStatus(m);
+    updateVaultImageFor(m);
   } catch {}
 }
 
@@ -2942,11 +2943,13 @@ function        renderCtaActive         (host, mission)   {
   else if (!joined)          blockReason = "You did not join this mission";
   else if (alreadyWon)       blockReason = "View only. You already won a round";
 
+  const extraY = alreadyWon ? 18 : 0; // NEW shift when “View only…” is shown
+
   if (blockReason) {
     // Centered message in the CTA area, no button rendered
     const msg = document.createElementNS(SVG_NS, "text");
     msg.setAttribute("x", String(xCenter));
-    msg.setAttribute("y", String(y + Math.round(btnH / 2) + 7));
+    msg.setAttribute("y", String(y + Math.round(btnH / 2) + 7 + extraY));
     msg.setAttribute("text-anchor", "middle");
     msg.setAttribute("class", "cta-note");
     msg.textContent = blockReason;
@@ -2981,7 +2984,7 @@ function        renderCtaActive         (host, mission)   {
   // Line 1: "Ends in …" (auto-ticked by [data-countdown])
   const line = document.createElementNS(SVG_NS, "text");
   line.setAttribute("x", String(xCenter));
-  line.setAttribute("y", String(y + btnH + 20));
+  line.setAttribute("y", String(y + btnH + 20 + extraY));
   line.setAttribute("text-anchor", "middle");
   line.setAttribute("class", "cta-note");
 
@@ -3004,7 +3007,7 @@ function        renderCtaActive         (host, mission)   {
   // Line 2: live bank/prize label (updates via [data-bank-now])
   const bank = document.createElementNS(SVG_NS, "text");
   bank.setAttribute("x", String(xCenter));
-  bank.setAttribute("y", String(y + btnH + 36));
+  bank.setAttribute("y", String(y + btnH + 36 + extraY));
   bank.setAttribute("text-anchor", "middle");
   bank.setAttribute("class", "cta-note");
   bank.setAttribute("data-bank-now", "1");
@@ -3023,92 +3026,106 @@ function        renderCtaActive         (host, mission)   {
 
 }
 
-function        renderCtaPaused         (host, mission)   {
+function        renderCtaPaused         (host, mission){
   const { xCenter, topY } = CTA_LAYOUT;
-  const { bg, btnW, btnH } = CTA_ACTIVE; // reuse the wide button art
+  const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_ACTIVE; // keep sizes
+
   const x = xCenter - Math.round(btnW / 2);
   const y = topY;
 
+  // NEW: if viewer already won → no future CTA, only info lines (shifted lower)
+  const me  = (walletAddress || "").toLowerCase();
+  const addrLc = String(mission?.mission_address || "").toLowerCase();
+  const alreadyWon = !!(me && (
+    __viewerWonOnce?.has?.(addrLc) ||
+    (mission?.rounds || []).some(r => String(r?.winner_address || "").toLowerCase() === me)
+  ));
+
+  if (alreadyWon) {
+    
+    const extraY = 18;
+
+    // 1) Center “View only. You already won a round”
+    const msg = document.createElementNS(SVG_NS, "text");
+    msg.setAttribute("class", "cta-block");
+    msg.setAttribute("x", String(xCenter));
+    msg.setAttribute("y", String(Math.round(y + btnH/2) + txtDy + extraY));
+    msg.setAttribute("text-anchor", "middle");
+    msg.setAttribute("dominant-baseline", "middle");
+    msg.textContent = "View only. You already won a round";
+    host.appendChild(msg);
+
+    // 2) Lines one step lower (+18 px)
+    const line = document.createElementNS(SVG_NS, "text");
+    line.setAttribute("class", "cta-sub");
+    line.setAttribute("x", String(xCenter));
+    line.setAttribute("y", String(y + btnH + 20 + extraY));
+    line.setAttribute("text-anchor", "middle");
+    line.setAttribute("dominant-baseline", "middle");
+    line.innerHTML = `Ends in <tspan data-countdown="${Number(mission?.end_timestamp)||0}">—</tspan>`;
+    host.appendChild(line);
+
+    const bank = document.createElementNS(SVG_NS, "text");
+    bank.setAttribute("class", "cta-sub");
+    bank.setAttribute("x", String(xCenter));
+    bank.setAttribute("y", String(y + btnH + 36 + extraY));
+    bank.setAttribute("text-anchor", "middle");
+    bank.setAttribute("dominant-baseline", "middle");
+    const nowWei = computeBankNowWei(mission, getLastBankTs(mission, mission?.rounds), Math.floor(Date.now()/1000));
+    bank.setAttribute("data-bank-now", "1"); // will tick every second
+    bank.textContent = `Accumulating: ${weiToCro(String(nowWei), 2, true)} CRO`;
+    host.appendChild(bank);
+
+    return; // important: no Cooldown button
+  }
+
+  // OLD path (unchanged): show disabled Cooldown button + normal lines
   const g = document.createElementNS(SVG_NS, "g");
   g.setAttribute("class", "cta-btn cta-disabled");
   g.setAttribute("transform", `translate(${x},${y})`);
 
-  // background only (no "BANK IT!" text)
-  g.appendChild(svgImage(bg, null, null, btnW, btnH));
+  const rect = document.createElementNS(SVG_NS, "rect");
+  rect.setAttribute("x", "0"); rect.setAttribute("y", "0");
+  rect.setAttribute("width", String(btnW));
+  rect.setAttribute("height", String(btnH));
+  rect.setAttribute("rx", "12");
+  rect.setAttribute("class", bg);
 
-  // Centered dynamic cooldown label inside the button
-  const cool = document.createElementNS(SVG_NS, "text");
-  cool.setAttribute("x", String(Math.round(btnW / 2)));
-  cool.setAttribute("y", String(Math.round(btnH / 2) + 5));
-  cool.setAttribute("text-anchor", "middle");
-  cool.setAttribute("font-family", "system-ui, Segoe UI, Arial");
-  cool.setAttribute("font-size", "14");
-  cool.setAttribute("fill", "#ffffff");
+  const label = document.createElementNS(SVG_NS, "text");
+  label.setAttribute("class", text);
+  label.setAttribute("x", String(Math.round(btnW/2)));
+  label.setAttribute("y", String(Math.round(btnH/2) + txtDy));
+  label.setAttribute("text-anchor", "middle");
+  label.setAttribute("dominant-baseline", "middle");
+  label.textContent = "Cooldown: ";
+  const t = document.createElementNS(SVG_NS, "tspan");
+  t.setAttribute("data-cooldown-end", String(mission?.pause_timestamp || 0));
+  t.textContent = "—";
+  label.appendChild(t);
 
-  const tLabel = document.createElementNS(SVG_NS, "tspan");
-  tLabel.textContent = "Cooldown: ";
-
-  const tVal = document.createElementNS(SVG_NS, "tspan");
-  const info = cooldownInfo(mission);
-  // remember the cooldown end so we can block 4→3 wobble
-  __pauseUntilSec = info.pauseEnd || 0;
-  // and remember which pause this is (lets us detect a truly new pause later)
-  __lastPauseTs = Number(mission?.pause_timestamp || 0);
-
-  if (info.pauseEnd) {
-    tVal.setAttribute("data-cooldown-end", String(info.pauseEnd));
-    tVal.textContent = formatMMSS(info.secsLeft);
-  } else {
-    const now = Math.floor(Date.now()/1000);
-    const fallbackEnd = now + info.secsTotal;
-    tVal.setAttribute("data-cooldown-end", String(fallbackEnd));
-    tVal.textContent = formatMMSS(info.secsTotal);
-  }
-
-  tVal.style.fontWeight = "700";
-  cool.appendChild(tLabel);
-  cool.appendChild(tVal);
-  g.appendChild(cool);
-
+  g.appendChild(rect);
+  g.appendChild(label);
   host.appendChild(g);
 
-  // Under-button: "Ends in …"
+  // Lines unchanged for non-winners:
   const line = document.createElementNS(SVG_NS, "text");
+  line.setAttribute("class", "cta-sub");
   line.setAttribute("x", String(xCenter));
   line.setAttribute("y", String(y + btnH + 20));
   line.setAttribute("text-anchor", "middle");
-  line.setAttribute("class", "cta-note");
-
-  const eLabel = document.createElementNS(SVG_NS, "tspan");
-  eLabel.textContent = "Ends in ";
-
-  const eVal = document.createElementNS(SVG_NS, "tspan");
-  const endTs = Number(mission?.mission_end || 0);
-  if (endTs > 0) {
-    eVal.setAttribute("data-countdown", String(endTs));
-    eVal.textContent = formatCountdown(endTs);
-  } else {
-    eVal.textContent = "—";
-  }
-  eVal.style.fontWeight = "700";
-  line.appendChild(eLabel);
-  line.appendChild(eVal);
+  line.setAttribute("dominant-baseline", "middle");
+  line.innerHTML = `Ends in <tspan data-countdown="${Number(mission?.end_timestamp)||0}">—</tspan>`;
   host.appendChild(line);
 
-  // New line: live “Accumulating: … CRO” (ticks via [data-bank-now])
   const bank = document.createElementNS(SVG_NS, "text");
+  bank.setAttribute("class", "cta-sub");
   bank.setAttribute("x", String(xCenter));
   bank.setAttribute("y", String(y + btnH + 36));
   bank.setAttribute("text-anchor", "middle");
-  bank.setAttribute("class", "cta-note");
+  bank.setAttribute("dominant-baseline", "middle");
+  const nowWei = computeBankNowWei(mission, getLastBankTs(mission, mission?.rounds), Math.floor(Date.now()/1000));
   bank.setAttribute("data-bank-now", "1");
-  
-  const lastTs = getLastBankTs(mission, mission?.rounds);
-  const weiNow = computeBankNowWei(mission, lastTs);
-  const croNow = weiToCro(String(weiNow), 2, true);
-  bank.textContent = `Accumulating: ${croNow} CRO`;
-  // apply progressive color based on how much has accrued
-  applyCounterColor(bank, mission, weiNow);
+  bank.textContent = `Accumulating: ${weiToCro(String(nowWei), 2, true)} CRO`;
   host.appendChild(bank);
 }
 
@@ -4374,12 +4391,28 @@ async function  init(){
     if (walletAddress) enableGamePush(walletAddress);
   });
 
-  window.addEventListener("wallet:changed", () => {
-    fetchAndRenderAllMissions();
-    if (walletAddress) enableGamePush(walletAddress);
+  window.addEventListener("wallet:changed", async () => {
+    try { __viewerWins?.clear?.(); } catch {}
+    try { __viewerWonOnce?.clear?.(); } catch {}
+
+    // Reset vault state for the new viewer
+    try { __vaultIsOpen = false; } catch {}
+    try { setRingAndTimerVisible(true); } catch {}
+
+    updateConnectText();
+
+    // Repaint CTA and vault art for the currently open mission
+    try { await refreshStageCtaIfOpen(); } catch {}
   });
 
   window.addEventListener("wallet:disconnected", () => {
+    try { __viewerWins?.clear?.(); } catch {}
+    try { __viewerWonOnce?.clear?.(); } catch {}
+
+    // Reset vault state for the new viewer
+    try { __vaultIsOpen = false; } catch {}
+    try { setRingAndTimerVisible(true); } catch {}
+
     renderAllMissions([]);
     // optional: no-op (enableGamePush(null) returns early)
   });
