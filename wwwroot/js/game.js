@@ -734,9 +734,21 @@ function        prettyStatusForList(status, md, failedRefundCount = 0) { // stat
 
 // Stage background helpers:
 
-function        setVaultOpen(isOpen) {
+function setVaultOpen(isOpen) {
   if (!stageImg) return;
   stageImg.src = isOpen ? VAULT_IMG_OPEN : VAULT_IMG_CLOSED;
+
+  // Hide center countdown + ring when the vault is open
+  const timer = document.getElementById("vaultTimerText");
+  if (timer) timer.style.display = isOpen ? "none" : "";
+
+  // Ring pieces (ids used elsewhere in your code)
+  const ringCover = document.getElementById("ringCover");
+  if (ringCover) ringCover.style.display = isOpen ? "none" : "";
+
+  // If you have a visible track/base, hide it too when present
+  const ringTrack = document.getElementById("ringTrack");
+  if (ringTrack) ringTrack.style.display = isOpen ? "none" : "";
 }
 
 function        viewerHasWin(mission) {
