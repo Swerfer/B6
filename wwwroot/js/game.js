@@ -734,7 +734,10 @@ function        prettyStatusForList(status, md, failedRefundCount = 0) { // stat
 
 // Stage background helpers:
 
+let __vaultIsOpen = false; // NEW: remember open/closed
+
 function setVaultOpen(isOpen) {
+  __vaultIsOpen = !!isOpen; // NEW
   if (!stageImg) return;
   stageImg.src = isOpen ? VAULT_IMG_OPEN : VAULT_IMG_CLOSED;
 
@@ -1223,7 +1226,7 @@ async function  startHub() { // SignalR HUB
       const me  = (walletAddress || "").toLowerCase();
       const win = String(winner || "").toLowerCase();
       const cro = weiToCro(String(amountWei), 2);
-      
+
       if (win === me) {
         // If the vault video is running, defer opening and the popup to the video end.
         if (__vaultVideoFlowActive) {
@@ -1235,13 +1238,7 @@ async function  startHub() { // SignalR HUB
             finalizeVaultOpenVideoWin(); // video already ended → finish now
           }
         } else {
-          const aLc = String(addr || "").toLowerCase();
-          __viewerWins.add(aLc);
-          if (aLc === currentMissionAddr &&
-              document.getElementById('gameMain')?.classList.contains('stage-mode')) {
-            setVaultOpen(true);
-          }
-          showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${round}!`, "success");
+          showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
         }
       } else {
         showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
@@ -1922,6 +1919,7 @@ function closeAnyModals(){
 }
 
 function setRingAndTimerVisible(visible){
+  if (__vaultIsOpen && visible) return; // NEW: never turn HUD back on once vault is open
   const disp = visible ? "" : "none";
   const timer = document.getElementById("vaultTimerText");
   if (timer) timer.style.display = disp;
