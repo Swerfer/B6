@@ -99,6 +99,9 @@ let   lastRoundPauseDuration= 60;		// READ FROM BLOCKCHAIN INSTEAD
 const __endPopupShown       = new Set();
 let   __bankingInFlight     = null;
 const __viewerWonOnce       = new Set(); // missions the current viewer has already won in this session
+const __viewerWins          = new Set();
+const VAULT_IMG_CLOSED      = 'assets/images/Vault_bg_squared.png';
+const VAULT_IMG_OPEN        = 'assets/images/Vault_bg_squared_opened.png';
 // All missions cache & filters:
 let   __allMissionsCache    = [];     // last fetched list (raw objects)
 let   __allFilterOpen       = false;
@@ -432,6 +435,7 @@ async function  cleanupMissionDetail(){
   stopStageTimer();
   unbindRing();
   clearDetailRefresh();
+  setVaultOpen(false);
   staleWarningShown = false;
 
   if (hubConnection && subscribedGroups.size){
@@ -727,6 +731,31 @@ function        prettyStatusForList(status, md, failedRefundCount = 0) { // stat
 
 
 // #region Stage layout primitive
+
+// Stage background helpers:
+
+function        setVaultOpen(isOpen) {
+  if (!stageImg) return;
+  stageImg.src = isOpen ? VAULT_IMG_OPEN : VAULT_IMG_CLOSED;
+}
+
+function        viewerHasWin(mission) {
+  const me = (walletAddress || "").toLowerCase();
+  if (!me || !mission) return false;
+
+  const addrLc = String(mission.mission_address || "").toLowerCase();
+  if (__viewerWins.has(addrLc)) return true;
+
+  // Check API rounds (covers reload / revisit)
+  return (mission.rounds || []).some(r =>
+    String(r?.winner_address || "").toLowerCase() === me
+  );
+}
+
+function        updateVaultImageFor(mission) {
+  const ended = Number(mission?.status) >= 5;
+  setVaultOpen(!ended && viewerHasWin(mission));
+}
 
 // Statusimage:
 
@@ -1184,6 +1213,15 @@ async function  startHub() { // SignalR HUB
       const cro = weiToCro(String(amountWei), 2);
       if (win === me) {
         showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${round}!`, "success");
+        // If I actually won this round, remember it and open the vault (if I'm on this mission)
+        try {
+          const aLc = String(addr || "").toLowerCase();
+          __viewerWins.add(aLc);
+          if (aLc === currentMissionAddr &&
+              document.getElementById('gameMain')?.classList.contains('stage-mode')) {
+            setVaultOpen(true);
+          }
+        } catch {}
       } else {
         showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
         // ToDo: Sound effect?
@@ -1308,7 +1346,7 @@ async function  startHub() { // SignalR HUB
             rehydratePillsFromChain(mLocal, "statusChanged", true).catch(()=>{});
           }
         }
-
+        updateVaultImageFor(mLocal);
         // setTimeout(() => refreshOpenStageFromServer(2), 800);
         refreshOpenStageFromServer(2);
       } else {
@@ -1374,7 +1412,7 @@ async function  startHub() { // SignalR HUB
             } else {
               buildStageLowerHudForStatus(m);
             }
-
+            updateVaultImageFor(m);
             // setTimeout(() => refreshOpenStageFromServer(2), 1600);
             refreshOpenStageFromServer(2);
             return;
@@ -1863,6 +1901,8 @@ async function  showGameStage(missionRaw){
   // Scale image + overlay, then place everything from the vault center
   layoutStage();
   
+  updateVaultImageFor(mission);
+
   // Build lower HUD pills using chain for Enrolling/Arming
   if (Number(mission?.status) === 1 || Number(mission?.status) === 2) {
     await rehydratePillsFromChain(mission, "openStage");
@@ -2427,6 +2467,13 @@ async function  handleBankItClick(mission){
     const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
     const tx = await c.callRound();
     await tx.wait();
+
+    try {
+      const addrLc = String(mission.mission_address || "").toLowerCase();
+      __viewerWins.add(addrLc);
+      setVaultOpen(true);
+    } catch {}
+
     try { __viewerWonOnce.add(String(mission.mission_address || "").toLowerCase()); } catch {}
     // 1) Flip UI to Paused immediately, using current snapshot values (prevents Pool(start) flash)
     await flipStageToPausedOptimistic(mission);
