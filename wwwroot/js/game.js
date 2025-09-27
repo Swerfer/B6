@@ -1976,6 +1976,13 @@ function        layoutStage(){
     ringOverlay.style.width  = w + "px";
     ringOverlay.style.height = h + "px";
   }
+
+  // ▼ NEW: keep the video layer locked to the same box as #stageImg
+  const vLayer = document.getElementById('vaultVideoLayer');
+  if (vLayer){
+    vLayer.style.width  = w + "px";
+    vLayer.style.height = h + "px";
+  }
 }
 
 function        stageTextFill(){

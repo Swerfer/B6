@@ -75,6 +75,17 @@ body.scroll-lock{
   stroke: url(#metalGrad) !important;
 }
 
+/* Vault opening video — positioned in % so it matches #stageImg at any size */
+.vault-video {
+  position: absolute;
+  left:  var(--vv-left,  45%);   /* 900 / 2000 */
+  top:   var(--vv-top,   40%);   /* 800 / 2000 */
+  width: var(--vv-width, 41%);  /* 820 / 2000 */
+  height: auto;                 /* keep aspect */
+  object-fit: contain;
+  pointer-events: none;         /* pills/CTA stay clickable */
+}
+
 /* Title displayed at the top of the game stage */
 .stage-title{
   position:absolute;
