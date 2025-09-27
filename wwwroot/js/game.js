@@ -97,6 +97,7 @@ let   stageRefreshPending   = false;
 let   roundPauseDuration    = 60;		// READ FROM BLOCKCHAIN INSTEAD
 let   lastRoundPauseDuration= 60;		// READ FROM BLOCKCHAIN INSTEAD
 const __endPopupShown       = new Set();
+const __endPopupDeferred    = new Set(); // missions whose end popup is queued after video
 let   __bankingInFlight     = null;
 const __viewerWonOnce       = new Set(); // missions the current viewer has already won in this session
 const __viewerWins          = new Set();
@@ -736,8 +737,11 @@ function        prettyStatusForList(status, md, failedRefundCount = 0) { // stat
 
 let __vaultIsOpen = false; // NEW: remember open/closed
 
-function setVaultOpen(isOpen) {
-  __vaultIsOpen = !!isOpen; // NEW
+function        setVaultOpen(isOpen, force = false){
+  // Normally block OPEN while the video is taking over; allow only when forced.
+  if (__vaultVideoFlowActive && isOpen && !force) return;
+
+  __vaultIsOpen = !!isOpen;
   if (!stageImg) return;
   stageImg.src = isOpen ? VAULT_IMG_OPEN : VAULT_IMG_CLOSED;
 
@@ -745,11 +749,9 @@ function setVaultOpen(isOpen) {
   const timer = document.getElementById("vaultTimerText");
   if (timer) timer.style.display = isOpen ? "none" : "";
 
-  // Ring pieces (ids used elsewhere in your code)
   const ringCover = document.getElementById("ringCover");
   if (ringCover) ringCover.style.display = isOpen ? "none" : "";
 
-  // If you have a visible track/base, hide it too when present
   const ringTrack = document.getElementById("ringTrack");
   if (ringTrack) ringTrack.style.display = isOpen ? "none" : "";
 }
@@ -768,15 +770,27 @@ function        viewerHasWin(mission) {
 }
 
 function        updateVaultImageFor(mission) {
+  // While the video overlay is active, don’t touch the base art (prevents “open” flash)
+  if (__vaultVideoFlowActive) return;
+
   const ended = Number(mission?.status) >= 5;
   setVaultOpen(!ended && viewerHasWin(mission));
 }
 
 // Statusimage:
 
-function        setStageStatusImage(slug){ /* Load + size the status word image and center it under the title */
+function        setStageStatusImage(slug){
   if (!stageStatusImgSvg || !slug) return;
-  stageStatusImgSvg.setAttribute("href", `assets/images/statuses/${slug}.png`);
+  const path = `assets/images/statuses/${slug}.png`;
+
+  // Set both attributes like svgImage() does so browsers reliably repaint
+  stageStatusImgSvg.setAttribute("href", path);
+  stageStatusImgSvg.setAttributeNS("http://www.w3.org/1999/xlink", "href", path);
+
+  // Optional hard refresh for stubborn caches:
+  // const bust = path + `?t=${Date.now()}`;
+  // stageStatusImgSvg.setAttribute("href", bust);
+  // stageStatusImgSvg.setAttributeNS("http://www.w3.org/1999/xlink", "href", bust);
 }
 
 // Center timer core:
@@ -1167,7 +1181,7 @@ function        unlockScroll(){
 
 // State helpers:
 
-function resetMissionLocalState() {
+function        resetMissionLocalState() {
   // Clear cross-mission, “no-regress” caches so pills won’t bleed
   __lastChainPlayers = 0;
   __lastChainCroWei  = "0";
@@ -1246,6 +1260,7 @@ async function  startHub() { // SignalR HUB
         if (__vaultVideoFlowActive) {
           const layer = document.getElementById("vaultVideoLayer");
           if (layer) layer.style.display = "none";
+          setVaultOpen(false, /*force*/ true); // close art so HUD can reappear
           setRingAndTimerVisible(true);
           __vaultVideoFlowActive = false;
           __vaultVideoEndedAwaitingResult = false;
@@ -1608,7 +1623,7 @@ async function  fetchAndRenderAllMissions(){
       mission_address: a,
       status: Number(statuses[i]),
       name: names[i]
-    })).reverse();
+    }));
 
     // 3) Hydrate with details from your API (address → mission object)
     //    Only for the newest PRIMARY; older ones render lightweight (no detail call)
@@ -1619,7 +1634,6 @@ async function  fetchAndRenderAllMissions(){
     const details = await Promise.all(
       primaryRows.map(r => apiMission(r.mission_address, true).catch(() => null))
     );
-
     const primaryMissions = details.filter(Boolean).map(d => {
       const m = d.mission;
 
@@ -1634,16 +1648,13 @@ async function  fetchAndRenderAllMissions(){
       m.mission_fee      = m.enrollment_amount_wei;   // show fee in CRO via weiToCro
       return m;
     });
-
     // lightweight rows for the rest (no API call)
     const secondaryMissions = secondaryRows.map(r => ({
       mission_address: r.mission_address,
       status: r.status,
       name: r.name
     }));
-
     const missions = [...primaryMissions, ...secondaryMissions];
-
 
     // if you use the filtered cache path:
     if (typeof __allMissionsCache !== "undefined") {
@@ -1936,15 +1947,21 @@ function playVaultOpenVideoOnce(){
   __vaultVideoEndedAwaitingResult = false;
   __vaultVideoPendingWin = null;
 
-  // Hide center timer + ring during the animation
+  // Ensure CLOSED first, then force-open shortly after to avoid showing a closed vault
+  setVaultOpen(false);
   setRingAndTimerVisible(false);
 
   try {
-    vaultLayer.style.display = "";     // show overlay
-    vaultVideo.loop = false;           // play one time for the real flow
+    vaultLayer.style.display = "";
+    vaultVideo.loop = false;
     vaultVideo.currentTime = 0;
     vaultVideo.play().catch(()=>{});
   } catch {}
+
+  // Safety: show the OPEN vault art ~1s after video starts (until the real result lands)
+  setTimeout(() => {
+    if (__vaultVideoFlowActive) setVaultOpen(true, /*force*/ true);
+  }, 1000);
 
   const onEnded = () => {
     vaultVideo.removeEventListener("ended", onEnded);
@@ -2585,10 +2602,20 @@ async function  handleBankItClick       (mission){
 
     // ▶ Hide any “waiting for result” modal and play the vault animation once
     closeAnyModals();
+
+    // Mark self as already-won immediately so CTA hides and labels switch now
+    try {
+      const addrLc = String(mission.mission_address || "").toLowerCase();
+      __viewerWonOnce?.add?.(addrLc);
+    } catch {}
+
     playVaultOpenVideoOnce();
 
     // 1) Flip UI to Paused immediately, using current snapshot values (prevents Pool(start) flash)
     await flipStageToPausedOptimistic(mission);
+
+    // 1b) Quick chain hydrate to keep “Pool (current)” from lagging for the banker
+    try { rehydratePillsFromChain(mission, "bank:post-tx").catch(()=>{}); } catch {}
 
     // 2) (keep) nudge backend to notify spectators
     try {
@@ -2943,15 +2970,15 @@ function        renderCtaActive         (host, mission)   {
   else if (!joined)          blockReason = "You did not join this mission";
   else if (alreadyWon)       blockReason = "View only. You already won a round";
 
-  const extraY = alreadyWon ? 18 : 0; // NEW shift when “View only…” is shown
 
   if (blockReason) {
     // Centered message in the CTA area, no button rendered
     const msg = document.createElementNS(SVG_NS, "text");
     msg.setAttribute("x", String(xCenter));
-    msg.setAttribute("y", String(y + Math.round(btnH / 2) + 7 + extraY));
+    msg.setAttribute("y", String(y + Math.round(btnH / 2) + 7));
     msg.setAttribute("text-anchor", "middle");
-    msg.setAttribute("class", "cta-note");
+    msg.setAttribute("class", "cta-block");         // was cta-note
+    msg.style.fill = stageTextFill();               // paint now → no black flash
     msg.textContent = blockReason;
     host.appendChild(msg);
   } else {
@@ -2984,9 +3011,11 @@ function        renderCtaActive         (host, mission)   {
   // Line 1: "Ends in …" (auto-ticked by [data-countdown])
   const line = document.createElementNS(SVG_NS, "text");
   line.setAttribute("x", String(xCenter));
-  line.setAttribute("y", String(y + btnH + 20 + extraY));
+  line.setAttribute("y", String(y + btnH + 20));
   line.setAttribute("text-anchor", "middle");
-  line.setAttribute("class", "cta-note");
+  line.setAttribute("dominant-baseline", "middle");
+  line.setAttribute("class", "cta-sub");   // was cta-note
+  line.style.fill = stageTextFill();
 
   const tLabel = document.createElementNS(SVG_NS, "tspan");
   tLabel.textContent = "Ends in ";
@@ -2995,7 +3024,7 @@ function        renderCtaActive         (host, mission)   {
   const endTs = Number(mission?.mission_end || 0);
   if (endTs > 0) {
     tVal.setAttribute("data-countdown", String(endTs));
-    tVal.textContent = formatCountdown(endTs);
+    tVal.textContent = formatCountdown(endTs); // paint initial value, no dash flash
   } else {
     tVal.textContent = "—";
   }
@@ -3007,7 +3036,7 @@ function        renderCtaActive         (host, mission)   {
   // Line 2: live bank/prize label (updates via [data-bank-now])
   const bank = document.createElementNS(SVG_NS, "text");
   bank.setAttribute("x", String(xCenter));
-  bank.setAttribute("y", String(y + btnH + 36 + extraY));
+  bank.setAttribute("y", String(y + btnH + 46));
   bank.setAttribute("text-anchor", "middle");
   bank.setAttribute("class", "cta-note");
   bank.setAttribute("data-bank-now", "1");
@@ -3042,16 +3071,15 @@ function        renderCtaPaused         (host, mission){
   ));
 
   if (alreadyWon) {
-    
-    const extraY = 18;
 
     // 1) Center “View only. You already won a round”
     const msg = document.createElementNS(SVG_NS, "text");
     msg.setAttribute("class", "cta-block");
     msg.setAttribute("x", String(xCenter));
-    msg.setAttribute("y", String(Math.round(y + btnH/2) + txtDy + extraY));
+    msg.setAttribute("y", String(Math.round(y + btnH/2) + txtDy + 5));
     msg.setAttribute("text-anchor", "middle");
     msg.setAttribute("dominant-baseline", "middle");
+    msg.style.fill = stageTextFill(); // color immediately → no black flash
     msg.textContent = "View only. You already won a round";
     host.appendChild(msg);
 
@@ -3059,16 +3087,19 @@ function        renderCtaPaused         (host, mission){
     const line = document.createElementNS(SVG_NS, "text");
     line.setAttribute("class", "cta-sub");
     line.setAttribute("x", String(xCenter));
-    line.setAttribute("y", String(y + btnH + 20 + extraY));
+    line.setAttribute("y", String(y + btnH + 20));
     line.setAttribute("text-anchor", "middle");
     line.setAttribute("dominant-baseline", "middle");
-    line.innerHTML = `Ends in <tspan data-countdown="${Number(mission?.end_timestamp)||0}">—</tspan>`;
+    line.setAttribute("class", "cta-sub");
+    line.style.fill = stageTextFill();  // ensure colored
+    line.innerHTML = `Ends in <tspan data-countdown="${Number(mission?.mission_end)||0}">—</tspan>`;
     host.appendChild(line);
 
     const bank = document.createElementNS(SVG_NS, "text");
     bank.setAttribute("class", "cta-sub");
+    bank.style.fill = stageTextFill();  // ensure colored
     bank.setAttribute("x", String(xCenter));
-    bank.setAttribute("y", String(y + btnH + 36 + extraY));
+    bank.setAttribute("y", String(y + btnH + 46));
     bank.setAttribute("text-anchor", "middle");
     bank.setAttribute("dominant-baseline", "middle");
     const nowWei = computeBankNowWei(mission, getLastBankTs(mission, mission?.rounds), Math.floor(Date.now()/1000));
@@ -3094,7 +3125,7 @@ function        renderCtaPaused         (host, mission){
   const label = document.createElementNS(SVG_NS, "text");
   label.setAttribute("class", text);
   label.setAttribute("x", String(Math.round(btnW/2)));
-  label.setAttribute("y", String(Math.round(btnH/2) + txtDy));
+  label.setAttribute("y", String(Math.round(btnH/2) + txtDy + 5));
   label.setAttribute("text-anchor", "middle");
   label.setAttribute("dominant-baseline", "middle");
   label.textContent = "Cooldown: ";
@@ -3114,13 +3145,15 @@ function        renderCtaPaused         (host, mission){
   line.setAttribute("y", String(y + btnH + 20));
   line.setAttribute("text-anchor", "middle");
   line.setAttribute("dominant-baseline", "middle");
-  line.innerHTML = `Ends in <tspan data-countdown="${Number(mission?.end_timestamp)||0}">—</tspan>`;
+  line.style.fill = stageTextFill();
+  line.innerHTML = `Ends in <tspan data-countdown="${Number(mission?.mission_end)||0}">—</tspan>`;
   host.appendChild(line);
 
   const bank = document.createElementNS(SVG_NS, "text");
   bank.setAttribute("class", "cta-sub");
+  bank.style.fill = stageTextFill();
   bank.setAttribute("x", String(xCenter));
-  bank.setAttribute("y", String(y + btnH + 36));
+  bank.setAttribute("y", String(y + btnH + 46));
   bank.setAttribute("text-anchor", "middle");
   bank.setAttribute("dominant-baseline", "middle");
   const nowWei = computeBankNowWei(mission, getLastBankTs(mission, mission?.rounds), Math.floor(Date.now()/1000));
@@ -3141,7 +3174,7 @@ async function  flipStageToPausedOptimistic(mission){
   __lastPauseTs   = now;
 
   setStageStatusImage(statusSlug(4));
-  buildStageLowerHudForStatus(m2);
+  // Keep existing pills to avoid flashing older snapshot values during the video
   await bindRingToMission(m2);
   await bindCenterTimerToMission(m2);
   renderStageCtaForStatus(m2);
@@ -3149,6 +3182,7 @@ async function  flipStageToPausedOptimistic(mission){
   stageCurrentStatus = 4;
 
   refreshOpenStageFromServer(2);
+
 }
 
 // Ended panel:
@@ -3158,6 +3192,34 @@ async function  maybeShowMissionEndPopup(mission){
     if (!mission) return;
     const st = Number(mission.status ?? -1);
     if (st < 5 || st === 7) return; // only Success/Partly Success
+
+    // If the vault video is (or was just) playing, let it complete and then wait 5s
+    if (__vaultVideoFlowActive) {
+      const addr = String(mission.mission_address || currentMissionAddr || "").toLowerCase();
+      if (!addr) return;
+      if (__endPopupDeferred.has(addr)) return; // already queued
+
+      __endPopupDeferred.add(addr);
+
+      const trigger = () => {
+        setTimeout(() => {
+          __endPopupDeferred.delete(addr);
+          // Re-run with the same mission; it will pass this guard and show the popup.
+          maybeShowMissionEndPopup(mission);
+        }, 5000);
+      };
+
+      // If the video already ended (waiting for RoundResult), trigger now; else on "ended"
+      if (__vaultVideoEndedAwaitingResult) {
+        trigger();
+      } else if (typeof vaultVideo !== "undefined" && vaultVideo) {
+        vaultVideo.addEventListener("ended", trigger, { once: true });
+      } else {
+        // Fallback: if we somehow lack the element, still delay ~5s
+        trigger();
+      }
+      return;
+    }
 
     const addr = String(mission.mission_address || currentMissionAddr || "").toLowerCase();
     if (!addr || __endPopupShown.has(addr)) return;
@@ -3425,7 +3487,15 @@ function        renderAllMissions       (missions = []) {
       timeValAttr1 = `data-end="${missionEnd}"`;
       timeVal1 = missionEnd ? formatCountdown(missionEnd) : "—";
     } else {
-      timeKey1 = "";
+      timeKey1 = "Join from:";
+      timeValAttr1 = ""; // no ticker on a fixed datetime
+      timeVal1 = enrollStart ? formatLocalDateTime(enrollStart) : "—";
+      timeKey2 = "Join until:";
+      timeValAttr2 = ""; // no ticker on a fixed datetime
+      timeVal2 = enrollStart ? formatLocalDateTime(enrollEnd) : "—";
+      timeKey3 = "Start at:";
+      timeValAttr3 = ""; // no ticker on a fixed datetime
+      timeVal3 = enrollStart ? formatLocalDateTime(missionStart) : "—";
     }
 
     // Fallbacks keep it resilient if you ever reuse this with raw mission objects
@@ -3441,6 +3511,21 @@ function        renderAllMissions       (missions = []) {
 
     const playersPct = maxPlayers > 0 ? Math.min(100, Math.round((curPlayers / maxPlayers) * 100)) : 0;
 
+    // hide rules
+    const showDuration = duration > 0;
+    const showRounds   = (rounds > 0) || (maxRounds > 0);
+    const showFee      = Number(feeWei) > 0;
+    const showPlayers  = (maxPlayers > 0) || (curPlayers > 0) || (minPlayers > 0);
+
+    // build status badges (main + optional extras)
+    const statusBadges = (() => {
+      const main = `<span class="status-pill ${stClass}" title="${stTitle}">${stText}</span>`;
+      const extras = (pretty && Array.isArray(pretty.extra) && pretty.extra.length)
+        ? pretty.extra.map(e => `<span class="status-pill ${e.css}" title="${e.title||""}">${e.label}</span>`).join("")
+        : "";
+      return main + extras;
+    })();
+
     li.className = "mission-card";
     li.dataset.addr = (m.mission_address || "").toLowerCase();
 
@@ -3449,45 +3534,56 @@ function        renderAllMissions       (missions = []) {
         <div class="mission-title">
           <span class="title-text">${m.name || m.mission_address}</span>
         </div>
-        <span class="status-pill ${stClass}" title="${stTitle}">${stText}</span>
+        <div class="d-flex gap-2 align-items-center">${statusBadges}</div>
       </div>
 
+      ${ (showDuration || showRounds) ? `
       <div class="mini-row">
-        <div class="label">Duration:</div>
-        <div class="value">${formatDurationShort(duration)}</div>
-        <div class="ms-auto fw-bold">Rounds ${rounds}/${maxRounds}</div>
-      </div>
+        ${ showDuration ? `
+          <div class="label">Duration:</div>
+          <div class="value">${formatDurationShort(duration)}</div>
+        ` : `<div class="label"></div><div class="value"></div>`}
+        ${ showRounds ? `<div class="ms-auto fw-bold">Rounds ${rounds}/${maxRounds}</div>` : ``}
+      </div>` : ``}
 
+      ${ showFee ? `
       <div class="mini-row">
         <div class="label">Mission Fee:</div>
         <div class="value">${feeCro} CRO</div>
-      </div>
+      </div>` : ``}
 
-      ${timeKey1 ? `
+      ${timeKey1 && showPlayers ? `
       <div class="mini-row">
         <div class="label">${timeKey1}</div>
         <div class="value"><span ${timeValAttr1}>${timeVal1}</span></div>
       </div>` : ""}
 
-      ${timeKey2 ? `
+      ${timeKey2 && showPlayers ? `
       <div class="mini-row">
         <div class="label">${timeKey2}</div>
         <div class="value"><span ${timeValAttr2}>${timeVal2}</span></div>
       </div>` : ""}
 
-      ${timeKey3 ? `
+      ${timeKey3 && showPlayers ? `
       <div class="mini-row">
         <div class="label">${timeKey3}</div>
         <div class="value"><span ${timeValAttr3}>${timeVal3}</span></div>
       </div>` : ""}
 
+      ${timeKey3 && !showPlayers ? `
+      <div class="mini-row">
+        <div class="label">No details</div>
+      </div>` : ""}
+
+      ${ showPlayers ? `
       <div class="players-line">
         <div class="label me-2">Players</div>
         <div class="players-count">
-          <span class="current" data-current="${curPlayers}" data-min="${minPlayers}">${curPlayers}</span>/<span class="max">${maxPlayers}</span>
+          <span class="current" data-current="${curPlayers}" data-min="${minPlayers}">${curPlayers}</span>/<span class="max">${maxPlayers || "—"}</span>
         </div>
       </div>
-      <div class="progress-slim"><i style="--w:${playersPct}%"></i></div>
+      ${ maxPlayers > 0 ? `<div class="progress-slim"><i style="--w:${playersPct}%"></i></div>` : ``}
+      ` : ``}
     `;
 
     li.querySelector('.mission-title .title-text').title = m.name || m.mission_address;
