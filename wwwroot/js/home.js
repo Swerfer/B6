@@ -34,7 +34,7 @@ async function api(path){
 }
 
 async function loadBackendStats(){
-  // indexer summaries
+    // indexer summaries
     const [joinable, notEnded] = await Promise.all([
     api("/missions/joinable"),
     api("/missions/not-ended")
@@ -48,31 +48,52 @@ async function loadBackendStats(){
     ? notEnded
     : (notEnded?.missions || notEnded?.Missions || []);
 
-  els.statJoinable.textContent = String(joinableList.length);
+    els.statJoinable.textContent = String(joinableList.length);
 
-  // status 3 = Active
-  const activeCount = notEndedList.filter(m => Number(m.status ?? m.mission_status) === 3).length;
-  els.statActive.textContent = String(activeCount);
+    // status 3 = Active
+    const activeCount = notEndedList.filter(m => Number(m.status ?? m.mission_status) === 3).length;
+    els.statActive.textContent = String(activeCount);
 
-  // soonest future start
+    // soonest future start
     const now = Math.floor(Date.now()/1000);
     let soonest = 0;
+    let soonestAddr = null;
 
     // prefer actual upcoming mission starts from not-ended
     for (const m of notEndedList){
-    const start = Number(m.mission_start ?? m.MissionStart ?? 0);
-    if (start > now && (!soonest || start < soonest)) soonest = start;
+      const start = Number(m.mission_start ?? m.MissionStart ?? 0);
+      if (start > now && (!soonest || start < soonest)) {
+        soonest = start;
+        // try common field names for the address
+        soonestAddr = m.mission_address ?? m.address ?? null;
+      }
     }
 
     // fallback: use joinable missions' mission_start when not-ended gave none
     if (!soonest) {
-    for (const m of joinableList){
+      for (const m of joinableList){
         const start = Number(m.mission_start ?? m.MissionStart ?? 0);
-        if (start > now && (!soonest || start < soonest)) soonest = start;
-    }
+        if (start > now && (!soonest || start < soonest)) {
+          soonest = start;
+          soonestAddr = m.mission_address ?? m.address ?? null;
+        }
+      }
     }
 
     setCountdown(soonest || 0);
+
+    // Make countdown pill clickable if we found a mission address
+    const pill = document.querySelector(".countdown-pill");
+    if (pill) {
+      if (soonestAddr) {
+        pill.style.cursor = "pointer";
+        pill.onclick = () => { window.location.href = `game.html?mission=${soonestAddr}`; };
+      } else {
+        pill.style.cursor = "";
+        pill.onclick = null;
+      }
+    }
+
 }
 
 async function loadOnchainStats(){
@@ -89,13 +110,22 @@ async function loadOnchainStats(){
 
   els.statTotal.textContent = String(total || 0);
 
-  // clickable + copyable addresses (core.js handles [data-copy] click)
+  // render short, copyable addr (icon removed)
   els.factoryAddress.innerHTML =
-    `<span class="copy-wrap" data-copy="${FACTORY_ADDRESS}">${shorten(FACTORY_ADDRESS)}</span>${addrLinkIcon(FACTORY_ADDRESS)}`;
+    `<span class="copy-wrap" data-copy="${FACTORY_ADDRESS}">${shorten(FACTORY_ADDRESS)}</span>`;
+  // whole row clickable
+  els.factoryAddress.closest(".stat")?.addEventListener("click", () => {
+    window.open(`https://explorer.cronos.org/address/${FACTORY_ADDRESS}`, "_blank");
+  });
+
   if (impl){
     els.implAddress.innerHTML =
-      `<span class="copy-wrap" data-copy="${impl}">${shorten(impl)}</span>${addrLinkIcon(impl)}`;
+      `<span class="copy-wrap" data-copy="${impl}">${shorten(impl)}</span>`;
+    els.implAddress.closest(".stat")?.addEventListener("click", () => {
+      window.open(`https://explorer.cronos.org/address/${impl}`, "_blank");
+    });
   }
+
 }
 
 async function refreshAll(){
@@ -109,6 +139,25 @@ async function refreshAll(){
 els.refreshBtn?.addEventListener("click", refreshAll);
 refreshAll();
 setInterval(refreshAll, 15000);
+
+// Make homepage stats clickable with hand cursor
+const statTotal = document.getElementById("statTotal")?.closest(".stat");
+if (statTotal) {
+  statTotal.style.cursor = "pointer";
+  statTotal.addEventListener("click", () => { window.location.href = "game.html?view=all"; });
+}
+
+const statJoinable = document.getElementById("statJoinable")?.closest(".stat");
+if (statJoinable) {
+  statJoinable.style.cursor = "pointer";
+  statJoinable.addEventListener("click", () => { window.location.href = "game.html?view=joinable"; });
+}
+
+const statActive = document.getElementById("statActive")?.closest(".stat");
+if (statActive) {
+  statActive.style.cursor = "pointer";
+  statActive.addEventListener("click", () => { window.location.href = "game.html?view=active"; });
+}
 
 // ===== Overlays (Tutorial & FAQ) — unified wiring =====
 

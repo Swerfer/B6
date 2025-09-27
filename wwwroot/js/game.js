@@ -4222,7 +4222,52 @@ async function  init(){
   });
 
   buildAllFiltersUI();
-  
+
+  // ───────────────────────────────────────────────────────────────
+  // NEW: handle deep-links from homepage (?view=… or ?mission=…)
+  // ───────────────────────────────────────────────────────────────
+  try {
+    const q = new URLSearchParams(location.search);
+    const view = (q.get("view") || "").toLowerCase();
+    const missionAddr = q.get("mission");
+
+    if (missionAddr) {
+      // open a specific mission’s detail
+      await cleanupMissionDetail();
+      showOnlySection("missionDetailSection");
+      const data = await apiMission(missionAddr, true);
+      if (data) {
+        renderMissionDetail(data);
+      } else {
+        showAlert("Mission not found.", "warning");
+      }
+    } else if (view === "joinable") {
+      await cleanupMissionDetail();
+      showOnlySection("joinableSection");
+      const joinable = await apiJoinable();
+      renderJoinable(joinable);
+      startJoinableTicker();
+    } else if (view === "active") {
+      await cleanupMissionDetail();
+      showOnlySection("allMissionsSection");
+      // statuses 2,3,4 = Arming/Active/Paused in your UI filter
+      __allSelected = new Set([2,3,4]);
+      applyAllMissionFiltersAndRender();
+      // reflect checkbox if present
+      const fltActive = document.getElementById("fltActive");
+      if (fltActive) fltActive.checked = true;
+    } else if (view === "all") {
+      await cleanupMissionDetail();
+      showOnlySection("allMissionsSection");
+      __allSelected = null; // clear filters
+      // uncheck all checkboxes if present
+      const host = document.getElementById("allFilters");
+      host?.querySelectorAll('input[type="checkbox"]').forEach(i => i.checked = false);
+      applyAllMissionFiltersAndRender();
+    }
+  } catch {}
+  // ───────────────────────────────────────────────────────────────
+
   // event-based (if we add wallet events in walletConnect.js, see 1D)
   window.addEventListener("wallet:connected", () => {
     fetchAndRenderAllMissions();
