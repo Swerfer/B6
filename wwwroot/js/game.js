@@ -1223,22 +1223,39 @@ async function  startHub() { // SignalR HUB
       const me  = (walletAddress || "").toLowerCase();
       const win = String(winner || "").toLowerCase();
       const cro = weiToCro(String(amountWei), 2);
+      
       if (win === me) {
-        showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${round}!`, "success");
-        // If I actually won this round, remember it and open the vault (if I'm on this mission)
-        try {
+        // If the vault video is running, defer opening and the popup to the video end.
+        if (__vaultVideoFlowActive) {
+          const aLc = String(addr || "").toLowerCase();
+          __viewerWins.add(aLc);
+          __viewerWonOnce.add(aLc);
+          __vaultVideoPendingWin = { cro, round: Number(round) };
+          if (__vaultVideoEndedAwaitingResult) {
+            finalizeVaultOpenVideoWin(); // video already ended → finish now
+          }
+        } else {
           const aLc = String(addr || "").toLowerCase();
           __viewerWins.add(aLc);
           if (aLc === currentMissionAddr &&
               document.getElementById('gameMain')?.classList.contains('stage-mode')) {
             setVaultOpen(true);
           }
-        } catch {}
+          showAlert(`Congratulations!<br/>You banked ${cro} CRO in round ${round}!`, "success");
+        }
       } else {
         showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
-        // ToDo: Sound effect?
+        // If we were playing the video but didn't win, stop/hide it and restore the HUD.
+        if (__vaultVideoFlowActive) {
+          const layer = document.getElementById("vaultVideoLayer");
+          if (layer) layer.style.display = "none";
+          setRingAndTimerVisible(true);
+          __vaultVideoFlowActive = false;
+          __vaultVideoEndedAwaitingResult = false;
+          __vaultVideoPendingWin = null;
+        }
       }
-      __viewerWonOnce.add(aLc); // aLc is the lowercased mission address computed above
+
       if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
         return;
       }
@@ -1885,6 +1902,87 @@ const ringOverlay         = document.getElementById("ringOverlay"       );
 const stageTitleText      = document.getElementById("stageTitleText"    );    
 const stageStatusImgSvg   = document.getElementById("stageStatusImgSvg" );
 
+// --- Vault video wiring (preloaded; no header buttons) ---
+
+const vaultLayer = document.getElementById("vaultVideoLayer");
+const vaultVideo = document.getElementById("vaultVideo");
+if (vaultVideo) { try { vaultVideo.preload = "auto"; vaultVideo.load(); } catch {} }
+
+let __vaultVideoFlowActive = false;
+let __vaultVideoEndedAwaitingResult = false;
+let __vaultVideoPendingWin = null; // { cro, round }
+
+function closeAnyModals(){
+  const overlay = document.getElementById("modalOverlay");
+  const alertM  = document.getElementById("alertModal");
+  const confirmM= document.getElementById("confirmModal");
+  try { alertM?.classList.add("hidden"); } catch{}
+  try { confirmM?.classList.add("hidden"); } catch{}
+  try { overlay?.classList.remove("active"); } catch{}
+}
+
+function setRingAndTimerVisible(visible){
+  const disp = visible ? "" : "none";
+  const timer = document.getElementById("vaultTimerText");
+  if (timer) timer.style.display = disp;
+  const ringCover = document.getElementById("ringCover");
+  if (ringCover) ringCover.style.display = disp;
+  const ringTrack = document.getElementById("ringTrack");
+  if (ringTrack) ringTrack.style.display = disp;
+}
+
+function playVaultOpenVideoOnce(){
+  if (!vaultLayer || !vaultVideo) return;
+
+  __vaultVideoFlowActive = true;
+  __vaultVideoEndedAwaitingResult = false;
+  __vaultVideoPendingWin = null;
+
+  // Hide center timer + ring during the animation
+  setRingAndTimerVisible(false);
+
+  try {
+    vaultLayer.style.display = "";     // show overlay
+    vaultVideo.loop = false;           // play one time for the real flow
+    vaultVideo.currentTime = 0;
+    vaultVideo.play().catch(()=>{});
+  } catch {}
+
+  const onEnded = () => {
+    vaultVideo.removeEventListener("ended", onEnded);
+    if (__vaultVideoPendingWin){
+      finalizeVaultOpenVideoWin();     // we already know the win result
+    } else {
+      // Ended but result not in yet; wait until RoundResult arrives
+      __vaultVideoEndedAwaitingResult = true;
+      // Keep video hidden now (you asked to hide when it ends)
+      vaultLayer.style.display = "none";
+      // If ultimately not a win for the viewer, restore timer/ring later (see RoundResult else branch)
+    }
+  };
+  vaultVideo.addEventListener("ended", onEnded, { once:true });
+}
+
+function finalizeVaultOpenVideoWin(){
+  // Switch to opened vault art (this also keeps timer/ring hidden when open)
+  setVaultOpen(true);
+
+  // Hide video now
+  if (vaultLayer) vaultLayer.style.display = "none";
+
+  // Show the success popup a second later (with final amount)
+  const round = __vaultVideoPendingWin?.round ?? "?";
+  const cro   = __vaultVideoPendingWin?.cro   ?? "?";
+  setTimeout(() => {
+    try { showAlert(`Congratulations! You banked ${cro} CRO in round ${round}!`, "success"); } catch {}
+  }, 1000);
+
+  // Clear flags
+  __vaultVideoFlowActive = false;
+  __vaultVideoEndedAwaitingResult = false;
+  __vaultVideoPendingWin = null;
+}
+
 // #endregion
 
 
@@ -2487,13 +2585,10 @@ async function  handleBankItClick(mission){
     const tx = await c.callRound();
     await tx.wait();
 
-    try {
-      const addrLc = String(mission.mission_address || "").toLowerCase();
-      __viewerWins.add(addrLc);
-      setVaultOpen(true);
-    } catch {}
+    // ▶ Hide any “waiting for result” modal and play the vault animation once
+    closeAnyModals();
+    playVaultOpenVideoOnce();
 
-    try { __viewerWonOnce.add(String(mission.mission_address || "").toLowerCase()); } catch {}
     // 1) Flip UI to Paused immediately, using current snapshot values (prevents Pool(start) flash)
     await flipStageToPausedOptimistic(mission);
 

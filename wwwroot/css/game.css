@@ -75,12 +75,14 @@ body.scroll-lock{
   stroke: url(#metalGrad) !important;
 }
 
+.vault-controls .btn { margin-left: .5rem; }
+
 /* Vault opening video — positioned in % so it matches #stageImg at any size */
 .vault-video {
   position: absolute;
-  left:  var(--vv-left,  45%);   /* 900 / 2000 */
-  top:   var(--vv-top,   40%);   /* 800 / 2000 */
-  width: var(--vv-width, 41%);  /* 820 / 2000 */
+  left:  var(--vv-left,  34.74%); 
+  top:   var(--vv-top,   27.77%); 
+  width: var(--vv-width, 30.56%); 
   height: auto;                 /* keep aspect */
   object-fit: contain;
   pointer-events: none;         /* pills/CTA stay clickable */
