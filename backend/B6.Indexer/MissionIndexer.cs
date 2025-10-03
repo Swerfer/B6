@@ -54,7 +54,7 @@ namespace B6.Indexer
         private readonly int                            _maxWinTotal;
         private readonly string                         _ownerPk;                           // from Key Vault / config
         // ---- Realtime poll schedule -----------------------------------------------
-        private static readonly TimeSpan                _rtPollPeriod = TimeSpan.FromMinutes(5);
+        private static readonly TimeSpan                _rtPollPeriod = TimeSpan.FromMinutes(10);
         private DateTime                                _nextRtPollUtc = DateTime.MinValue;
         // ---- Circuit breaker -------------------------------------------------------
         private int                                     _consecErrors = 0;
@@ -136,12 +136,12 @@ namespace B6.Indexer
             _pg      = cfg.GetConnectionString("Db") 
                     ?? throw new InvalidOperationException("Missing connection string: Db");
 
-            _maxWinPerMission = int.TryParse(cfg["Indexer:MaxWindowsPerMissionPerCycle"], out var m) ? Math.Max(1, m) : 2;
-            _maxWinTotal      = int.TryParse(cfg["Indexer:MaxWindowsTotalPerCycle"],      out var t) ? Math.Max(1, t) : 200;
+            _maxWinPerMission = 1;
+            _maxWinTotal      = 50;
 
             // Circuit-breaker tuning (optional keys)
-            _maxConsecErrors  = int.TryParse(cfg["Indexer:MaxConsecErrors"], out var mce) ? Math.Max(1, mce) : 5;
-            _maxCircuitTrips  = int.TryParse(cfg["Indexer:MaxCircuitTripsBeforeRestart"], out var mct) ? Math.Max(1, mct) : 12;
+            _maxConsecErrors  = 5;
+            _maxCircuitTrips  = 12;
 
             // NEW: optional deploy block (0 means disabled)
             _factoryDeployBlock = long.TryParse(cfg["Indexer:FactoryDeployBlock"], out var fb) ? fb : 0L;
@@ -240,8 +240,15 @@ namespace B6.Indexer
                         await TryAutoRefundAsync(a, token);        // uses RefundPlayersFunction
                     }
 
-                    var fixedPlayers    = await ReconcileEnrollmentsFromChainAsync(a, token); // ← add this
-                    var potChanged      = await RefreshPotFromChainAsync(a, token);
+                    var fixedPlayers = false;
+                    var potChanged   = false;
+
+                    if (rt < 6) // only poll chain-heavy reconciliations for non-final states
+                    {
+                        fixedPlayers = await ReconcileEnrollmentsFromChainAsync(a, token);
+                        potChanged   = await RefreshPotFromChainAsync(a, token);
+                    }
+
                     if (potChanged || fixedPlayers)
                         await NotifyMissionUpdatedAsync(a, token);
                 }
@@ -1220,11 +1227,11 @@ namespace B6.Indexer
                 try
                 {
                     var block = await RunRpc(
-                        w => w.Eth.Blocks.GetBlockWithTransactionsByNumber.SendRequestAsync(
+                        w => w.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(
                                 new Nethereum.RPC.Eth.DTOs.BlockParameter(new Nethereum.Hex.HexTypes.HexBigInteger(bn))),
                         "GetBlock");
-
                     var unix = (long)block.Timestamp.Value;
+
                     var dt   = DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime;
                     _blockTsCache[bn] = dt;  // cache
                     result[bn]        = dt;
