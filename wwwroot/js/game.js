@@ -132,6 +132,7 @@ let __lastChainCroWei       = "0";
 let __pauseUntilSec         = 0;
 let __postCooldownUntilSec  = 0; 
 let __lastPauseTs           = 0;
+let __lastViewerAddr        = "";
 // #endregion
 
 
@@ -918,7 +919,7 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
 
             // Start from current snapshot
             const m2 = { ...missionObj, status: next };
-
+            setStageStatusImage(statusSlug(next));   // ← update the stage title/status image immediately
             if (next === 3) {
               // Arming → Active: hydrate before painting
               await rehydratePillsFromChain(m2, "deadlineFlip-arming→active", true);
@@ -940,8 +941,8 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
               }
 
               // Paint immediately with corrected Pool (start), then hydrate to confirm
+              await rehydratePillsFromChain(m2, "deadlineFlip-enrolling→arming", true);
               buildStageLowerHudForStatus(m2);
-              rehydratePillsFromChain(m2, "deadlineFlip-enrolling→arming", true).catch(()=>{});
             } else {
               // keep existing behavior for other statuses
               buildStageLowerHudForStatus(m2);
@@ -1242,15 +1243,20 @@ async function  startHub() { // SignalR HUB
       const cro = weiToCro(String(amountWei), 2);
 
       if (win === me) {
-        // If the vault video is running, defer opening and the popup to the video end.
-        if (__vaultVideoFlowActive) {
+        // If we already showed the local winner popup, skip duplicates
+        if (window.__winPopupSuppressUntil && Date.now() < window.__winPopupSuppressUntil) {
+          // still keep the video → finalize path
+          if (__vaultVideoFlowActive) {
+            __vaultVideoPendingWin = { cro, round: Number(round) };
+            if (__vaultVideoEndedAwaitingResult) finalizeVaultOpenVideoWin();
+          }
+          // no extra popup here
+        } else if (__vaultVideoFlowActive) {
           const aLc = String(addr || "").toLowerCase();
           __viewerWins.add(aLc);
           __viewerWonOnce.add(aLc);
           __vaultVideoPendingWin = { cro, round: Number(round) };
-          if (__vaultVideoEndedAwaitingResult) {
-            finalizeVaultOpenVideoWin(); // video already ended → finish now
-          }
+          if (__vaultVideoEndedAwaitingResult) finalizeVaultOpenVideoWin();
         } else {
           showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
         }
@@ -1382,6 +1388,13 @@ async function  startHub() { // SignalR HUB
           await rehydratePillsFromChain(mLocal, "statusChanged-→active", true);
           buildStageLowerHudForStatus(mLocal);
         } else {
+          if (target === 2) {
+            // Prevent pool regression flash: ensure Arming uses the final Enrolling pool
+            const cur = String(mLocal?.cro_current_wei ?? "");
+            if (cur) {
+              mLocal.cro_start_wei = cur;
+            }
+          }
           buildStageLowerHudForStatus(mLocal);
           if (target === 1 || target === 2) {
             rehydratePillsFromChain(mLocal, "statusChanged", true).catch(()=>{});
@@ -1947,7 +1960,7 @@ function playVaultOpenVideoOnce(){
   __vaultVideoEndedAwaitingResult = false;
   __vaultVideoPendingWin = null;
 
-  // Ensure CLOSED first, then force-open shortly after to avoid showing a closed vault
+  // Keep the vault CLOSED and HUD hidden before playback begins
   setVaultOpen(false);
   setRingAndTimerVisible(false);
 
@@ -1958,10 +1971,16 @@ function playVaultOpenVideoOnce(){
     vaultVideo.play().catch(()=>{});
   } catch {}
 
-  // Safety: show the OPEN vault art ~1s after video starts (until the real result lands)
-  setTimeout(() => {
-    if (__vaultVideoFlowActive) setVaultOpen(true, /*force*/ true);
-  }, 1000);
+  // Only switch the base art to OPEN after the video is actually playing.
+  // (Prevents the pre-start flash of the open image.)
+  const onPlaying = () => {
+    vaultVideo.removeEventListener("playing", onPlaying);
+    if (__vaultVideoFlowActive) {
+      // small cushion so the first video frames are already on screen
+      setTimeout(() => { if (__vaultVideoFlowActive) setVaultOpen(true, /*force*/ true); }, 300);
+    }
+  };
+  vaultVideo.addEventListener("playing", onPlaying, { once: true });
 
   const onEnded = () => {
     vaultVideo.removeEventListener("ended", onEnded);
@@ -1970,9 +1989,8 @@ function playVaultOpenVideoOnce(){
     } else {
       // Ended but result not in yet; wait until RoundResult arrives
       __vaultVideoEndedAwaitingResult = true;
-      // Keep video hidden now (you asked to hide when it ends)
       vaultLayer.style.display = "none";
-      // If ultimately not a win for the viewer, restore timer/ring later (see RoundResult else branch)
+      // If ultimately not a win for the viewer, restore HUD later (RoundResult else branch)
     }
   };
   vaultVideo.addEventListener("ended", onEnded, { once:true });
@@ -1985,12 +2003,15 @@ function finalizeVaultOpenVideoWin(){
   // Hide video now
   if (vaultLayer) vaultLayer.style.display = "none";
 
-  // Show the success popup a second later (with final amount)
+  // Show the success popup a second later (with final amount), unless we already showed it
   const round = __vaultVideoPendingWin?.round ?? "?";
   const cro   = __vaultVideoPendingWin?.cro   ?? "?";
   setTimeout(() => {
-    try { showAlert(`Congratulations! You banked ${cro} CRO in round ${round}!`, "success"); } catch {}
+    if (!window.__winPopupSuppressUntil || Date.now() >= window.__winPopupSuppressUntil) {
+      try { showAlert(`Congratulations! You banked ${cro} CRO in round ${round}!`, "success"); } catch {}
+    }
   }, 1000);
+
 
   // Clear flags
   __vaultVideoFlowActive = false;
@@ -2022,6 +2043,18 @@ async function  showGameStage(missionRaw){
 
   stageCurrentStatus = Number(mission?.status ?? -1);
   __lastPushTs = Date.now();
+
+  // Remember which wallet the stage is currently painted for
+  __lastViewerAddr = (window.walletAddress || "").toLowerCase();
+
+  // If we enter while paused, initialize the local cooldown window
+  if (stageCurrentStatus === 4) {
+    const info = cooldownInfo(mission);
+    __pauseUntilSec   = info.pauseEnd || 0;
+    __lastPauseTs     = Number(mission.pause_timestamp || 0);
+    // allow post-cooldown guard to function after resume
+    __postCooldownUntilSec = 0;
+  }
 
   // Scale image + overlay, then place everything from the vault center
   layoutStage();
@@ -2609,12 +2642,35 @@ async function  handleBankItClick       (mission){
       __viewerWonOnce?.add?.(addrLc);
     } catch {}
 
-    playVaultOpenVideoOnce();
+    // --- NEW: compute the just-banked amount now and reflect it immediately ---
+    const lastTs   = getLastBankTs(mission, mission?.rounds);
+    const winWei   = computeBankNowWei(mission, lastTs);                   // on-chain math you already use
+    const winCro   = weiToCro(String(winWei), 2);
+    const nextRnd  = Number(mission.round_count || 0) + 1;
 
-    // 1) Flip UI to Paused immediately, using current snapshot values (prevents Pool(start) flash)
+    // Show the winner popup NOW (don’t wait for RoundResult)
+    window.__winPopupSuppressUntil = Date.now() + 16000;                   // guard to avoid double-pop later
+    showAlert(`Congratulations! You banked ${winCro} CRO in round ${nextRnd}!`, "success");
+
+    // Optimistically drop the pool by the payout right away
+    let croAfter = mission.cro_current_wei;
+    try {
+      const prev = BigInt(String(mission.cro_current_wei ?? mission.cro_start_wei ?? "0"));
+      croAfter   = (prev - BigInt(String(winWei || "0"))).toString();
+    } catch {}
+    optimisticGuard = { untilMs: Date.now() + 15000, players: optimisticGuard.players, croNow: croAfter };
+
+    // Also bump round_count locally so “Round” pill stays in sync with pool
+    const nextRoundCount = Number(mission.round_count || 0) + 1;
+
+    // Paint HUD with both new pool + incremented round
+    buildStageLowerHudForStatus({ ...mission, cro_current_wei: croAfter, round_count: nextRoundCount });
+
+    // Keep your video + optimistic pause flip
+    playVaultOpenVideoOnce();
     await flipStageToPausedOptimistic(mission);
 
-    // 1b) Quick chain hydrate to keep “Pool (current)” from lagging for the banker
+    // Quick chain hydrate to lock in truth (still fine if slow)
     try { rehydratePillsFromChain(mission, "bank:post-tx").catch(()=>{}); } catch {}
 
     // 2) (keep) nudge backend to notify spectators
@@ -2686,10 +2742,33 @@ async function  refreshStageCtaIfOpen   (){
       m._viewerAddr = (window.walletAddress || "").toLowerCase();
     }
 
+    // If the viewer changed (e.g., user switched accounts), force the base vault art
+    const curViewer = (window.walletAddress || "").toLowerCase();
+    if (curViewer !== __lastViewerAddr) {
+      __lastViewerAddr = curViewer;
+      // Decide open/closed strictly from the *new* viewer’s wins
+      const shouldOpen = (Number(m.status) < 5) && viewerHasWin(m);
+      // Force base art even if a previous video flow flag was set
+      setVaultOpen(shouldOpen, /*force*/ true);
+    }
+
     renderStageCtaForStatus(m);
     updateVaultImageFor(m);
+
   } catch {}
 }
+
+try {
+  // When the app regains focus, refresh CTA + vault art for the current viewer
+  window.addEventListener("focus", () => { 
+    try { refreshStageCtaIfOpen(); } catch {}
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      try { refreshStageCtaIfOpen(); } catch {}
+    }
+  });
+} catch {}
 
 // CTA router:
 
@@ -2969,7 +3048,7 @@ function        renderCtaActive         (host, mission)   {
   if (!walletAddress)        blockReason = "Connect your wallet to bank";
   else if (!joined)          blockReason = "You did not join this mission";
   else if (alreadyWon)       blockReason = "View only. You already won a round";
-
+  else if (__vaultIsOpen)    blockReason = "View only. You already won a round";  // never show BANK IT when vault is open
 
   if (blockReason) {
     // Centered message in the CTA area, no button rendered
@@ -3011,7 +3090,7 @@ function        renderCtaActive         (host, mission)   {
   // Line 1: "Ends in …" (auto-ticked by [data-countdown])
   const line = document.createElementNS(SVG_NS, "text");
   line.setAttribute("x", String(xCenter));
-  line.setAttribute("y", String(y + btnH + 20));
+  line.setAttribute("y", String(y + btnH + 38));
   line.setAttribute("text-anchor", "middle");
   line.setAttribute("dominant-baseline", "middle");
   line.setAttribute("class", "cta-sub");   // was cta-note
@@ -3036,7 +3115,7 @@ function        renderCtaActive         (host, mission)   {
   // Line 2: live bank/prize label (updates via [data-bank-now])
   const bank = document.createElementNS(SVG_NS, "text");
   bank.setAttribute("x", String(xCenter));
-  bank.setAttribute("y", String(y + btnH + 46));
+  bank.setAttribute("y", String(y + btnH + 64));
   bank.setAttribute("text-anchor", "middle");
   bank.setAttribute("class", "cta-note");
   bank.setAttribute("data-bank-now", "1");
@@ -3087,19 +3166,33 @@ function        renderCtaPaused         (host, mission){
     const line = document.createElementNS(SVG_NS, "text");
     line.setAttribute("class", "cta-sub");
     line.setAttribute("x", String(xCenter));
-    line.setAttribute("y", String(y + btnH + 20));
+    line.setAttribute("y", String(y + btnH + 38));
     line.setAttribute("text-anchor", "middle");
     line.setAttribute("dominant-baseline", "middle");
-    line.setAttribute("class", "cta-sub");
-    line.style.fill = stageTextFill();  // ensure colored
-    line.innerHTML = `Ends in <tspan data-countdown="${Number(mission?.mission_end)||0}">—</tspan>`;
+    line.style.fill = stageTextFill();
+
+    const tLabel = document.createElementNS(SVG_NS, "tspan");
+    tLabel.textContent = "Ends in ";
+    line.appendChild(tLabel);
+
+    const tVal = document.createElementNS(SVG_NS, "tspan");
+    const endTs = Number(mission?.mission_end || 0);
+    if (endTs > 0) {
+      tVal.setAttribute("data-countdown", String(endTs));
+      tVal.textContent = formatCountdown(endTs);   // set initial value now (no dash flash)
+    } else {
+      tVal.textContent = "—";
+    }
+    tVal.style.fontWeight = "700";
+    line.appendChild(tVal);
+
     host.appendChild(line);
 
     const bank = document.createElementNS(SVG_NS, "text");
     bank.setAttribute("class", "cta-sub");
     bank.style.fill = stageTextFill();  // ensure colored
     bank.setAttribute("x", String(xCenter));
-    bank.setAttribute("y", String(y + btnH + 46));
+    bank.setAttribute("y", String(y + btnH + 64));
     bank.setAttribute("text-anchor", "middle");
     bank.setAttribute("dominant-baseline", "middle");
     const nowWei = computeBankNowWei(mission, getLastBankTs(mission, mission?.rounds), Math.floor(Date.now()/1000));
@@ -3130,7 +3223,9 @@ function        renderCtaPaused         (host, mission){
   label.setAttribute("dominant-baseline", "middle");
   label.textContent = "Cooldown: ";
   const t = document.createElementNS(SVG_NS, "tspan");
-  t.setAttribute("data-cooldown-end", String(mission?.pause_timestamp || 0));
+  // Use the real cooldown end (pause_timestamp + pause duration)
+  const info = cooldownInfo(mission);
+  t.setAttribute("data-cooldown-end", String(info.pauseEnd || 0));
   t.textContent = "—";
   label.appendChild(t);
 
@@ -3142,18 +3237,33 @@ function        renderCtaPaused         (host, mission){
   const line = document.createElementNS(SVG_NS, "text");
   line.setAttribute("class", "cta-sub");
   line.setAttribute("x", String(xCenter));
-  line.setAttribute("y", String(y + btnH + 20));
+  line.setAttribute("y", String(y + btnH + 38));
   line.setAttribute("text-anchor", "middle");
   line.setAttribute("dominant-baseline", "middle");
   line.style.fill = stageTextFill();
-  line.innerHTML = `Ends in <tspan data-countdown="${Number(mission?.mission_end)||0}">—</tspan>`;
+
+  const tLabel = document.createElementNS(SVG_NS, "tspan");
+  tLabel.textContent = "Ends in ";
+  line.appendChild(tLabel);
+
+  const tVal = document.createElementNS(SVG_NS, "tspan");
+  const endTs = Number(mission?.mission_end || 0);
+  if (endTs > 0) {
+    tVal.setAttribute("data-countdown", String(endTs));
+    tVal.textContent = formatCountdown(endTs);   // set initial value now (no dash flash)
+  } else {
+    tVal.textContent = "—";
+  }
+  tVal.style.fontWeight = "700";
+  line.appendChild(tVal);
+
   host.appendChild(line);
 
   const bank = document.createElementNS(SVG_NS, "text");
   bank.setAttribute("class", "cta-sub");
   bank.style.fill = stageTextFill();
   bank.setAttribute("x", String(xCenter));
-  bank.setAttribute("y", String(y + btnH + 46));
+  bank.setAttribute("y", String(y + btnH + 64));
   bank.setAttribute("text-anchor", "middle");
   bank.setAttribute("dominant-baseline", "middle");
   const nowWei = computeBankNowWei(mission, getLastBankTs(mission, mission?.rounds), Math.floor(Date.now()/1000));
@@ -3174,15 +3284,18 @@ async function  flipStageToPausedOptimistic(mission){
   __lastPauseTs   = now;
 
   setStageStatusImage(statusSlug(4));
-  // Keep existing pills to avoid flashing older snapshot values during the video
+
+  // 1) Render CTA first so the timer's immediate paint can find data-countdown nodes.
+  renderStageCtaForStatus(m2);
+
+  // 2) Then bind ring and timer (startStageTimer runs paint() immediately)
   await bindRingToMission(m2);
   await bindCenterTimerToMission(m2);
-  renderStageCtaForStatus(m2);
+
   await renderStageEndedPanelIfNeeded(m2);
   stageCurrentStatus = 4;
 
   refreshOpenStageFromServer(2);
-
 }
 
 // Ended panel:
@@ -3236,8 +3349,6 @@ async function  maybeShowMissionEndPopup(mission){
       }
     } catch {}
 
-    __endPopupShown.add(addr);
-
     // Ensure we have enrollments + rounds for role detection
     let enrollments = Array.isArray(mission.enrollments) ? mission.enrollments : null;
     let rounds      = Array.isArray(mission.rounds)      ? mission.rounds      : null;
@@ -3259,24 +3370,35 @@ async function  maybeShowMissionEndPopup(mission){
     const isAllBanked = Number(mission?.round_count ?? -1) == Number(mission?.mission_rounds_total ?? -1);
     const reasonText  = isAllBanked ? "All rounds were banked." : "The mission timer ran out.";
 
-    // If the viewer won any round, show their latest win
+    // Winner detection — prefer local truth first, then API
+    const hasLocalWin = !!(addr && (__viewerWonOnce.has(addr) || __viewerWins.has(addr)));
     let myWins = [];
     if (me && Array.isArray(rounds)){
       myWins = rounds.filter(r => String(r.winner_address || "").toLowerCase() === me)
                      .sort((a,b) => Number(a.round_no || a.round || 0) - Number(b.round_no || b.round || 0));
     }
 
-    if (myWins.length){
-      const last = myWins[myWins.length - 1];
-      const roundNo = Number(last.round_number ?? last.round_no ?? last.round ?? 0);
-      const cro = weiToCro(String(last.payout_wei || last.amountWei || "0"), 2);
-      // Winners: celebratory copy + brief reason line
-      showAlert(`🎉 Congratulations!<br/>You won round ${roundNo} and claimed <b>${cro} CRO</b>.<br/><small>${reasonText}</small>`, "success");
+    // If we know locally that the viewer won but API hasn't caught up, retry later instead of showing a wrong “didn’t bank” message.
+    if (hasLocalWin && myWins.length === 0) {
+      setTimeout(() => { maybeShowMissionEndPopup(mission); }, 4000);
+      return;
+    }
+
+    if (hasLocalWin || myWins.length){
+      __endPopupShown.add(addr); // mark only when we are about to show something
+      const last = myWins.length ? myWins[myWins.length - 1] : null;
+      const roundNo = last ? Number(last.round_number ?? last.round_no ?? last.round ?? 0) : "";
+      const cro = last ? weiToCro(String(last.payout_wei || last.amountWei || "0"), 2)
+                       : ""; // local-only: amount may be unknown here
+      const winMsg = last
+        ? `🎉 Congratulations!<br/>You won round ${roundNo} and claimed <b>${cro} CRO</b>.<br/><small>${reasonText}</small>`
+        : `🎉 Congratulations!<br/>You won a round!<br/><small>${reasonText}</small>`;
+      showAlert(winMsg, "success");
       return;
     }
 
     if (joined){
-      // Non-winning player: supportive copy, reason-tailored
+      __endPopupShown.add(addr);
       const msg = isAllBanked
         ? "🏁 Mission complete.<br/>All rounds were banked and you didn’t bank a round this time.<br/><small>Better luck next mission!</small>"
         : "⏱️ Mission complete.<br/>Time’s up, and you didn’t bank a round this time.<br/><small>Better luck next mission!</small>";
@@ -3351,7 +3473,7 @@ async function  renderStageEndedPanelIfNeeded(mission){
 
   const winners = topWinners(enrollments, rounds, 3);
 
-  const x = 500, y = 585, lineH = 16;
+  const x = 500, y = 603, lineH = 16;
   const g = document.createElementNS("http://www.w3.org/2000/svg","g");
   g.setAttribute("fill", stageTextFill());
 
@@ -4052,8 +4174,6 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
     els.enrollmentsList.appendChild(li);
   }
 
-  document.getElementById("btnTrigger")?.addEventListener("click", () => triggerRoundCurrentMission(mission));
-
 }
 
 // #endregion
@@ -4327,45 +4447,6 @@ async function  subscribeToMission(addr){
   }
 
   subscribedAddr = targetLc;
-}
-
-async function  triggerRoundCurrentMission(mission){
-  const signer = getSigner?.();
-  if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
-
-  try {
-    const c = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
-
-    // confirm admin rights via signer
-    const owner = await c.owner();
-    const me = await signer.getAddress();
-    if (owner.toLowerCase() !== me.toLowerCase()) {
-      showAlert("Only the mission owner can trigger a round.", "warning");
-      return;
-    }
-
-    setBtnLoading(document.getElementById("btnTrigger"), true, "Triggering…", true);
-    const tx = await c.callRound();
-    await tx.wait();
-
-    // NEW: ping backend to push spectators immediately
-    try {
-      fetch("/api/events/banked", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mission: mission.mission_address, txHash: tx.hash })
-      }).catch(()=>{});
-    } catch { /* non-fatal */ }
-
-    showAlert("Round triggered!", "success");
-    const data = await apiMission(mission.mission_address, true);
-    renderMissionDetail(data);
-  } catch (err) {
-    console.error(err);
-    showAlert(`Trigger failed: ${decodeError(err)}`, "error");
-  } finally {
-    setBtnLoading(document.getElementById("btnTrigger"), false, "Trigger Round", false);
-  }
 }
 
 // #endregion

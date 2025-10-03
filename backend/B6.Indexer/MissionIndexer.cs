@@ -41,7 +41,7 @@ namespace B6.Indexer
         private int                                     _rpcIndex = 0;
         private const int                               REORG_CUSHION = 3;
         private const int                               MAX_LOG_RANGE = 1800;
-        private const bool                              scanMissionStatus = true;           // ← toggle mission-level status logs
+        private const bool                              scanMissionStatus = false;           // ← toggle mission-level status logs
         private readonly HttpClient                     _http = new HttpClient();
         private readonly string                         _pushBase;                          // e.g. https://b6missions.com/api
         private readonly string                         _pushKey;
@@ -67,6 +67,11 @@ namespace B6.Indexer
         private volatile bool _kickRequested = false;
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _kickMissions = new();
 
+        // Per-cycle mission tuple cache (reset each cycle)
+        private int _mdCacheEpoch = 0;
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string,(MissionDataWrapper Wrap, int Epoch)> 
+            _mdCache = new(StringComparer.InvariantCulture);
+
         [Function("refundPlayers")]
         public class RefundPlayersFunction : FunctionMessage {
             // no args
@@ -80,6 +85,20 @@ namespace B6.Indexer
         [Function("forceFinalizeMission")]
         public class ForceFinalizeMissionFunction : FunctionMessage {
             // no args
+        }
+
+        private async Task<MissionDataWrapper>          GetMissionDataCachedAsync(string mission) {
+            if (_mdCache.TryGetValue(mission, out var e) && e.Epoch == _mdCacheEpoch)
+                return e.Wrap;
+
+            var wrap = await RunRpc(
+                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                            new GetMissionDataFunction(), mission, null),
+                "Call.getMissionData");
+
+            _mdCache[mission] = (wrap, _mdCacheEpoch);
+            return wrap;
         }
 
         public                                          MissionIndexer              (ILogger<MissionIndexer> log, IConfiguration cfg) {
@@ -221,8 +240,8 @@ namespace B6.Indexer
                         await TryAutoRefundAsync(a, token);        // uses RefundPlayersFunction
                     }
 
-                    var potChanged = await RefreshPotFromChainAsync(a, token);
-                    var fixedPlayers = await ReconcileEnrollmentsFromChainAsync(a, token); // ← add this
+                    var fixedPlayers    = await ReconcileEnrollmentsFromChainAsync(a, token); // ← add this
+                    var potChanged      = await RefreshPotFromChainAsync(a, token);
                     if (potChanged || fixedPlayers)
                         await NotifyMissionUpdatedAsync(a, token);
                 }
@@ -361,11 +380,7 @@ namespace B6.Indexer
                         MissionDataWrapper wrap;
                         try
                         {
-                            wrap = await RunRpc(
-                                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
-                                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
-                                            new GetMissionDataFunction(), a, null),
-                                "Call.getMissionData");
+                            wrap = await GetMissionDataCachedAsync(a);
                         }
                         catch (Exception ex)
                         {
@@ -912,12 +927,7 @@ namespace B6.Indexer
 
         private async Task                              EnsureMissionSeededAsync    (string missionAddr, string name, long seedLastSeenBlock, CancellationToken token) {
             // call mission.getMissionData (single tuple wrapper)
-            var wrap = await RunRpc(
-                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
-                    .QueryDeserializingToObjectAsync<MissionDataWrapper>(
-                        new GetMissionDataFunction(), missionAddr, null),
-                "Call.getMissionData");
-
+            var wrap = await GetMissionDataCachedAsync(missionAddr);
             var md = wrap.Data;
 
             await using var conn = new NpgsqlConnection(_pg);
@@ -1285,6 +1295,7 @@ namespace B6.Indexer
 
             while (!token.IsCancellationRequested)
             {
+                _mdCacheEpoch++;   // start a fresh per-cycle cache
                 // If we recently tripped the circuit, idle briefly
                 if (DateTime.UtcNow < _suspendUntilUtc)
                 {
@@ -1444,11 +1455,7 @@ namespace B6.Indexer
 
         private async Task<bool>                        RefreshPotFromChainAsync    (string mission, CancellationToken token) {
             // 1) Pull on-chain mission tuple (already used elsewhere in this file)
-            var wrap = await RunRpc(
-                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
-                    .QueryDeserializingToObjectAsync<MissionDataWrapper>(
-                        new GetMissionDataFunction(), mission, null),
-                "Call.getMissionData");
+            var wrap = await GetMissionDataCachedAsync(mission);
             var md = wrap.Data;
 
             // 2) Update only when changed (uses PostgreSQL IS DISTINCT FROM to avoid false positives)
@@ -1473,11 +1480,7 @@ namespace B6.Indexer
 
         private async Task<bool>                        ReconcileEnrollmentsFromChainAsync(string addr, CancellationToken token) {
             // read on-chain players
-            var wrap = await RunRpc(
-                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
-                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
-                            new GetMissionDataFunction(), addr, null),
-                "Call.getMissionData");
+            var wrap = await GetMissionDataCachedAsync(addr);
             var md = wrap.Data;
 
             // build set of chain players (lowercased)
