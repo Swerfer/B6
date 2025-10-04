@@ -64,6 +64,15 @@ namespace B6.Indexer
         private int                                     _circuitTrips = 0;
         private readonly int                            _maxCircuitTrips;           // default 12
 
+        // --- Global RPC throttle (max QPS) -------------------------------------------
+        private readonly SemaphoreSlim _rpcThrottle = new(1,1);
+        private DateTime _nextRpcEarliestUtc = DateTime.MinValue;
+        private readonly int _rpcMaxQps;
+        private static TimeSpan PerRequestGap(int qps) => TimeSpan.FromMilliseconds(Math.Max(1, 1000 / Math.Max(1, qps)));
+        private static readonly Random _rpcJitter = new Random();
+        private static TimeSpan SmallJitter() => TimeSpan.FromMilliseconds(_rpcJitter.Next(15, 45));
+        // ----------------------------------------------------------------------------- 
+
         private volatile bool _kickRequested = false;
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _kickMissions = new();
 
@@ -164,12 +173,12 @@ namespace B6.Indexer
             _pg      = cfg.GetConnectionString("Db") 
                     ?? throw new InvalidOperationException("Missing connection string: Db");
 
-            _maxWinPerMission = int.TryParse(cfg["Indexer:MaxWindowsPerMissionPerCycle"], out var m) ? Math.Max(1, m) : 2;
-            _maxWinTotal      = int.TryParse(cfg["Indexer:MaxWindowsTotalPerCycle"],      out var t) ? Math.Max(1, t) : 200;
+            _maxWinPerMission = 2;
+            _maxWinTotal      = 200;
 
             // Circuit-breaker tuning (optional keys)
-            _maxConsecErrors  = int.TryParse(cfg["Indexer:MaxConsecErrors"], out var mce) ? Math.Max(1, mce) : 5;
-            _maxCircuitTrips  = int.TryParse(cfg["Indexer:MaxCircuitTripsBeforeRestart"], out var mct) ? Math.Max(1, mct) : 12;
+            _maxConsecErrors  = 5;
+            _maxCircuitTrips  = 12;
 
             // NEW: optional deploy block (0 means disabled)
             _factoryDeployBlock = long.TryParse(cfg["Indexer:FactoryDeployBlock"], out var fb) ? fb : 0L;
@@ -183,6 +192,8 @@ namespace B6.Indexer
             // Try Cronos:Rpc2 as a backup (in Key Vault: Cronos--Rpc2)
             var rpc2 = cfg["Cronos:Rpc2"];
             if (!string.IsNullOrWhiteSpace(rpc2)) _rpcEndpoints.Add(rpc2);
+
+            _rpcMaxQps = 5;
 
             if (_rpcEndpoints.Count == 0)
                 throw new InvalidOperationException("No RPC endpoints configured (Cronos:Rpc and/or Cronos:Rpc2).");
@@ -1201,6 +1212,22 @@ namespace B6.Indexer
 
         private async Task<T>                           RunRpc<T>                   (Func<Web3, Task<T>> fn, string context) {
             var kind = NormalizeKind(context);
+
+            // --- Global throttle: space calls to respect provider QPS ----------------
+            await _rpcThrottle.WaitAsync();
+            try
+            {
+                var now = DateTime.UtcNow;
+                var wait = _nextRpcEarliestUtc - now;
+                if (wait > TimeSpan.Zero)
+                    try { await Task.Delay(wait); } catch { /* cancelled OK */ }
+
+                // reserve the next slot now (gap + a tiny jitter)
+                _nextRpcEarliestUtc = DateTime.UtcNow + PerRequestGap(_rpcMaxQps) + SmallJitter();
+            }
+            finally { _rpcThrottle.Release(); }
+            // ------------------------------------------------------------------------
+
             var sw = Stopwatch.StartNew();
             try
             {
@@ -1213,26 +1240,25 @@ namespace B6.Indexer
             {
                 sw.Stop();
 
-                // NEW: if provider rate-limits us, cool down briefly before switching/retrying
+                // If provider rate-limits us, extend the throttle window before switching/retrying
                 if (IsRateLimited(ex))
                 {
                     _log.LogWarning(ex, "{ctx} hit rate limit (429); cooling down {sec}s", context, (int)RATE_LIMIT_COOLDOWN.TotalSeconds);
+                    // push out the next slot so ALL callers back off together
+                    await _rpcThrottle.WaitAsync();
+                    try { _nextRpcEarliestUtc = DateTime.UtcNow + RATE_LIMIT_COOLDOWN; }
+                    finally { _rpcThrottle.Release(); }
+
                     try { await Task.Delay(RATE_LIMIT_COOLDOWN); } catch { /* ignore */ }
                 }
 
                 if (logRpcCalls) RpcFileLog(kind, $"{context} ↻ transient: {ex.GetType().Name}: {ex.Message} (attempting switch)");
 
                 var switched = false;
-                try
-                {
-                    switched = SwitchRpc();
-                }
-                catch (Exception sx)
-                {
-                    _log.LogWarning(sx, "SwitchRpc() failed while handling transient error for {ctx}", context);
-                }
+                try { switched = SwitchRpc(); }
+                catch (Exception sx) { _log.LogWarning(sx, "SwitchRpc() failed while handling transient error for {ctx}", context); }
 
-                if (!switched) throw; // bubble to the final catch
+                if (!switched) throw;
 
                 _log.LogWarning(ex, "{ctx} failed; switched RPC and retrying", context);
 
