@@ -41,7 +41,7 @@ namespace B6.Indexer
         private int                                     _rpcIndex = 0;
         private const int                               REORG_CUSHION = 3;
         private const int                               MAX_LOG_RANGE = 1800;
-        private const bool                              scanMissionStatus = false;           // ← toggle mission-level status logs
+        private const bool                              scanMissionStatus = true;           // ← toggle mission-level status logs
         private readonly HttpClient                     _http = new HttpClient();
         private readonly string                         _pushBase;                          // e.g. https://b6missions.com/api
         private readonly string                         _pushKey;
@@ -54,7 +54,7 @@ namespace B6.Indexer
         private readonly int                            _maxWinTotal;
         private readonly string                         _ownerPk;                           // from Key Vault / config
         // ---- Realtime poll schedule -----------------------------------------------
-        private static readonly TimeSpan                _rtPollPeriod = TimeSpan.FromMinutes(10);
+        private static readonly TimeSpan                _rtPollPeriod = TimeSpan.FromMinutes(5);
         private DateTime                                _nextRtPollUtc = DateTime.MinValue;
         // ---- Circuit breaker -------------------------------------------------------
         private int                                     _consecErrors = 0;
@@ -66,11 +66,6 @@ namespace B6.Indexer
 
         private volatile bool _kickRequested = false;
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _kickMissions = new();
-
-        // Per-cycle mission tuple cache (reset each cycle)
-        private int _mdCacheEpoch = 0;
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<string,(MissionDataWrapper Wrap, int Epoch)> 
-            _mdCache = new(StringComparer.InvariantCulture);
 
         [Function("refundPlayers")]
         public class RefundPlayersFunction : FunctionMessage {
@@ -87,19 +82,52 @@ namespace B6.Indexer
             // no args
         }
 
-        private async Task<MissionDataWrapper>          GetMissionDataCachedAsync(string mission) {
-            if (_mdCache.TryGetValue(mission, out var e) && e.Epoch == _mdCacheEpoch)
-                return e.Wrap;
+        // --- Per-cycle RPC cache ------------------------------------------------------
+        private sealed class                            RpcCycleCache {
+            public long? TipBlock;
+            public GetMissionsOutput? AllMissions;
+            public readonly Dictionary<string, MissionDataWrapper> MissionTuples = new(StringComparer.InvariantCulture);
+            public readonly Dictionary<string, byte> RealtimeStatus = new(StringComparer.InvariantCulture);
+        }
 
-            var wrap = await RunRpc(
+        // Cache helpers (reuse existing RunRpc + types)
+        private async Task<long>                        GetLatestBlockCachedAsync   (RpcCycleCache cache) {
+            if (cache.TipBlock is long b) return b;
+            b = await GetLatestBlockAsync();
+            cache.TipBlock = b;
+            return b;
+        }
+
+        private async Task<GetMissionsOutput?>          GetAllMissionsCachedAsync   (RpcCycleCache cache) {
+            if (cache.AllMissions != null) return cache.AllMissions;
+            var all = await RunRpc(
+                w => w.Eth.GetContractQueryHandler<GetAllMissionsFunction>()
+                    .QueryDeserializingToObjectAsync<GetMissionsOutput>(new GetAllMissionsFunction(), _factory, null),
+                "Call.getAllMissions");
+            cache.AllMissions = all;
+            return all;
+        }
+
+        private async Task<MissionDataWrapper>          GetMissionDataCachedAsync   (string addr, RpcCycleCache cache) {
+            if (cache.MissionTuples.TryGetValue(addr, out var wrap)) return wrap;
+            wrap = await RunRpc(
                 w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
-                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
-                            new GetMissionDataFunction(), mission, null),
+                    .QueryDeserializingToObjectAsync<MissionDataWrapper>(new GetMissionDataFunction(), addr, null),
                 "Call.getMissionData");
-
-            _mdCache[mission] = (wrap, _mdCacheEpoch);
+            cache.MissionTuples[addr] = wrap;
             return wrap;
         }
+
+        private async Task<byte>                        GetRealtimeStatusCachedAsync(string addr, RpcCycleCache cache) {
+            if (cache.RealtimeStatus.TryGetValue(addr, out var rt)) return rt;
+            rt = await RunRpc(
+                w => w.Eth.GetContractQueryHandler<GetRealtimeStatusFunction>()
+                        .QueryAsync<byte>(addr, new GetRealtimeStatusFunction()),
+                "Call.getRealtimeStatus");
+            cache.RealtimeStatus[addr] = rt;
+            return rt;
+        }
+        // -----------------------------------------------------------------------------
 
         public                                          MissionIndexer              (ILogger<MissionIndexer> log, IConfiguration cfg) {
             _log = log;
@@ -136,12 +164,12 @@ namespace B6.Indexer
             _pg      = cfg.GetConnectionString("Db") 
                     ?? throw new InvalidOperationException("Missing connection string: Db");
 
-            _maxWinPerMission = 1;
-            _maxWinTotal      = 50;
+            _maxWinPerMission = int.TryParse(cfg["Indexer:MaxWindowsPerMissionPerCycle"], out var m) ? Math.Max(1, m) : 2;
+            _maxWinTotal      = int.TryParse(cfg["Indexer:MaxWindowsTotalPerCycle"],      out var t) ? Math.Max(1, t) : 200;
 
             // Circuit-breaker tuning (optional keys)
-            _maxConsecErrors  = 5;
-            _maxCircuitTrips  = 12;
+            _maxConsecErrors  = int.TryParse(cfg["Indexer:MaxConsecErrors"], out var mce) ? Math.Max(1, mce) : 5;
+            _maxCircuitTrips  = int.TryParse(cfg["Indexer:MaxCircuitTripsBeforeRestart"], out var mct) ? Math.Max(1, mct) : 12;
 
             // NEW: optional deploy block (0 means disabled)
             _factoryDeployBlock = long.TryParse(cfg["Indexer:FactoryDeployBlock"], out var fb) ? fb : 0L;
@@ -196,14 +224,12 @@ namespace B6.Indexer
 
             foreach (var a in missions)
             {
+                var cycle = new RpcCycleCache();
                 byte rt;
                 try
                 {
                     // 2) Ask chain: getRealtimeStatus()
-                    rt = await RunRpc(
-                        w => w.Eth.GetContractQueryHandler<GetRealtimeStatusFunction>()
-                                .QueryAsync<byte>(a, new GetRealtimeStatusFunction()),
-                        "Call.getRealtimeStatus");
+                    rt = await GetRealtimeStatusCachedAsync(a, cycle);
                 }
                 catch
                 {
@@ -233,22 +259,15 @@ namespace B6.Indexer
                     if (rt == 5)
                     {
                         // Will re-check DB<5 and RT==5 inside NeedsAutoFinalizeAsync
-                        await TryAutoFinalizeAsync(a, token);      // uses ForceFinalizeMissionFunction
+                        await TryAutoFinalizeAsync(a, token, cachedRt: rt);
                     }
                     else if (rt == 7 && !await HasAnyRefundsRecordedAsync(a, token))
                     {
                         await TryAutoRefundAsync(a, token);        // uses RefundPlayersFunction
                     }
 
-                    var fixedPlayers = false;
-                    var potChanged   = false;
-
-                    if (rt < 6) // only poll chain-heavy reconciliations for non-final states
-                    {
-                        fixedPlayers = await ReconcileEnrollmentsFromChainAsync(a, token);
-                        potChanged   = await RefreshPotFromChainAsync(a, token);
-                    }
-
+                    var potChanged   = await RefreshPotFromChainAsync(a, token, cycle);
+                    var fixedPlayers = await ReconcileEnrollmentsFromChainAsync(a, token); // ← add this
                     if (potChanged || fixedPlayers)
                         await NotifyMissionUpdatedAsync(a, token);
                 }
@@ -260,7 +279,8 @@ namespace B6.Indexer
         }
 
         private async Task                              ScanFactoryEventsAsync      (CancellationToken token, long? latestOverride = null) {
-            var latest  = latestOverride ?? await GetLatestBlockAsync();
+            var cycle  = new RpcCycleCache();
+            var latest = latestOverride ?? await GetLatestBlockCachedAsync(cycle);
             var toBlock = latest - REORG_CUSHION;
             if (toBlock <= 0) return;
 
@@ -330,10 +350,7 @@ namespace B6.Indexer
                         var nameByAddr = new Dictionary<string,string>(StringComparer.InvariantCulture);
                         try
                         {
-                            var all = await RunRpc(
-                                w => w.Eth.GetContractQueryHandler<GetAllMissionsFunction>()
-                                    .QueryDeserializingToObjectAsync<GetMissionsOutput>(new GetAllMissionsFunction(), _factory, null),
-                                "Call.getAllMissions");
+                            var all = await GetAllMissionsCachedAsync(cycle);
 
                             if (all?.Missions != null && all.Names != null)
                             {
@@ -358,7 +375,7 @@ namespace B6.Indexer
 
                             var name = nameByAddr.TryGetValue(a, out var n) ? n : a;
 
-                            try { await EnsureMissionSeededAsync(a, name, firstBlk - 1, token); }
+                            try { await EnsureMissionSeededAsync(a, name, firstBlk - 1, token, alreadyFetchedThisCycle:false, cache:cycle); }
                             catch (Exception ex) { _log.LogError(ex, "EnsureMissionSeeded failed for {addr}", a); }
                         }
                     }
@@ -387,7 +404,11 @@ namespace B6.Indexer
                         MissionDataWrapper wrap;
                         try
                         {
-                            wrap = await GetMissionDataCachedAsync(a);
+                            wrap = await RunRpc(
+                                w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                                            new GetMissionDataFunction(), a, null),
+                                "Call.getMissionData");
                         }
                         catch (Exception ex)
                         {
@@ -482,13 +503,19 @@ namespace B6.Indexer
                         }
 
                         await using (var up = new NpgsqlCommand(@"
-                            update missions set status = @s, updated_at = now()
+                            update missions
+                            set status          = @s,
+                                realtime_status = case when @s in (6,7) then @s else realtime_status end,
+                                last_seen_block = greatest(coalesce(last_seen_block,0), @toBlk),
+                                updated_at      = now()
                             where mission_address = @a;", conn, tx))
                         {
                             up.Parameters.AddWithValue("a", mission);
                             up.Parameters.AddWithValue("s", toS);
+                            up.Parameters.AddWithValue("toBlk", windowTo);   // safe tip for this factory window
                             await up.ExecuteNonQueryAsync(token);
                         }
+
                         if (inserted > 0) pushStatuses.Add((mission, toS));
                     }
 
@@ -884,10 +911,9 @@ namespace B6.Indexer
                                 if (missionUpdated)
                                     await NotifyMissionUpdatedAsync(addr, token);
 
-                                // Backfill enrollments from tuple in case a provider returned partial logs
-                                var fixedPlayers = await ReconcileEnrollmentsFromChainAsync(addr, token);
-
-                                var potChanged = await RefreshPotFromChainAsync(addr, token);
+                                var cycle = new RpcCycleCache(); // create near the top of ScanMissionEventsAsync window loop or reuse one per method
+                                var fixedPlayers = await ReconcileEnrollmentsFromChainAsync(addr, token, cycle);
+                                var potChanged   = await RefreshPotFromChainAsync(addr, token, cycle);
                                 if ((potChanged || fixedPlayers) && !missionUpdated)
                                     await NotifyMissionUpdatedAsync(addr, token);
                             } catch (Exception ex) {
@@ -932,9 +958,26 @@ namespace B6.Indexer
             }
         }
 
-        private async Task                              EnsureMissionSeededAsync    (string missionAddr, string name, long seedLastSeenBlock, CancellationToken token) {
-            // call mission.getMissionData (single tuple wrapper)
-            var wrap = await GetMissionDataCachedAsync(missionAddr);
+        private async Task                              EnsureMissionSeededAsync(string missionAddr, string name, long seedLastSeenBlock, CancellationToken token, bool alreadyFetchedThisCycle = false, RpcCycleCache? cache = null) {
+            MissionDataWrapper wrap;
+
+            if (alreadyFetchedThisCycle && cache != null && cache.MissionTuples.TryGetValue(missionAddr, out var cachedWrap))
+            {
+                wrap = cachedWrap;                                // NEW: reuse tuple fetched earlier this cycle
+            }
+            else if (cache != null)
+            {
+                wrap = await GetMissionDataCachedAsync(missionAddr, cache);   // NEW
+            }
+            else
+            {
+                wrap = await RunRpc(
+                    w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                            new GetMissionDataFunction(), missionAddr, null),
+                    "Call.getMissionData");
+            }
+
             var md = wrap.Data;
 
             await using var conn = new NpgsqlConnection(_pg);
@@ -1138,7 +1181,7 @@ namespace B6.Indexer
                 }
             }
         }
-
+    
         private static bool                             IsTransient                 (Exception ex) {
             return ex is Nethereum.JsonRpc.Client.RpcResponseException
                 || ex is System.Net.Http.HttpRequestException
@@ -1227,11 +1270,11 @@ namespace B6.Indexer
                 try
                 {
                     var block = await RunRpc(
-                        w => w.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(
+                        w => w.Eth.Blocks.GetBlockWithTransactionsByNumber.SendRequestAsync(
                                 new Nethereum.RPC.Eth.DTOs.BlockParameter(new Nethereum.Hex.HexTypes.HexBigInteger(bn))),
                         "GetBlock");
-                    var unix = (long)block.Timestamp.Value;
 
+                    var unix = (long)block.Timestamp.Value;
                     var dt   = DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime;
                     _blockTsCache[bn] = dt;  // cache
                     result[bn]        = dt;
@@ -1302,7 +1345,8 @@ namespace B6.Indexer
 
             while (!token.IsCancellationRequested)
             {
-                _mdCacheEpoch++;   // start a fresh per-cycle cache
+                var cycle = new RpcCycleCache();
+
                 // If we recently tripped the circuit, idle briefly
                 if (DateTime.UtcNow < _suspendUntilUtc)
                 {
@@ -1319,7 +1363,7 @@ namespace B6.Indexer
 
                     try
                     {
-                        var latest = await GetLatestBlockAsync();
+                        var latest = await GetLatestBlockCachedAsync(cycle);
                         await ScanMissionEventsAsync(token, latestOverride: latest);
                         // (No need to force a specific mission; ScanMissionEventsAsync picks up any with work)
                     }
@@ -1331,7 +1375,7 @@ namespace B6.Indexer
 
                 try
                 {
-                    var latest = await GetLatestBlockAsync();
+                    var latest = await GetLatestBlockCachedAsync(cycle);
                     await ScanFactoryEventsAsync(token, latest);
                     await ScanMissionEventsAsync(token, latest);
                     RecordSuccess();
@@ -1460,9 +1504,14 @@ namespace B6.Indexer
             return new Web3(acct, url);
         }
 
-        private async Task<bool>                        RefreshPotFromChainAsync    (string mission, CancellationToken token) {
-            // 1) Pull on-chain mission tuple (already used elsewhere in this file)
-            var wrap = await GetMissionDataCachedAsync(mission);
+        private async Task<bool>                        RefreshPotFromChainAsync(string mission, CancellationToken token, RpcCycleCache? cache = null) {
+            var wrap = cache is null ? 
+                await RunRpc(
+                    w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                            new GetMissionDataFunction(), mission, null),
+                    "Call.getMissionData")
+                : await GetMissionDataCachedAsync(mission, cache);
             var md = wrap.Data;
 
             // 2) Update only when changed (uses PostgreSQL IS DISTINCT FROM to avoid false positives)
@@ -1485,9 +1534,14 @@ namespace B6.Indexer
             return rows > 0; // true → pot changed and DB was updated
         }
 
-        private async Task<bool>                        ReconcileEnrollmentsFromChainAsync(string addr, CancellationToken token) {
-            // read on-chain players
-            var wrap = await GetMissionDataCachedAsync(addr);
+        private async Task<bool>                        ReconcileEnrollmentsFromChainAsync(string addr, CancellationToken token, RpcCycleCache? cache = null) {
+            var wrap = cache is null ? 
+                await RunRpc(
+                    w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
+                            .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                                new GetMissionDataFunction(), addr, null),
+                    "Call.getMissionData")
+                : await GetMissionDataCachedAsync(addr, cache);
             var md = wrap.Data;
 
             // build set of chain players (lowercased)
@@ -1590,7 +1644,8 @@ namespace B6.Indexer
             }
         }
 
-        private async Task<bool>                        NeedsAutoFinalizeAsync      (string mission, CancellationToken token) {
+       private async Task<bool>                         NeedsAutoFinalizeAsync(string mission, CancellationToken token, byte? cachedRt = null) {
+
             // 1) DB guard: skip only if already fully final (status in 6,7)
             short? dbStatus = null;
             await using (var c = new NpgsqlConnection(_pg))
@@ -1606,7 +1661,7 @@ namespace B6.Indexer
             if (dbStatus == 6 || dbStatus == 7) return false;
 
             // 2) finalize iff getRealtimeStatus() reports PartlySuccess (5).
-            var rt = await RunRpc(
+            var rt = cachedRt ?? await RunRpc(
                 w => w.Eth.GetContractQueryHandler<GetRealtimeStatusFunction>()
                         .QueryAsync<byte>(mission, new GetRealtimeStatusFunction()),
                 "Call.getRealtimeStatus");
@@ -1614,7 +1669,8 @@ namespace B6.Indexer
             return rt == 5; // PartlySuccess
         }
 
-        private async Task                              TryAutoFinalizeAsync        (string mission, CancellationToken token) {
+
+        private async Task                              TryAutoFinalizeAsync(string mission, CancellationToken token, byte? cachedRt = null) {
             _log.LogInformation("TryAutoFinalizeAsync - {mission}", mission);
             if (string.IsNullOrWhiteSpace(_ownerPk)) {
                 _log.LogDebug("Auto-finalize skipped for {mission}: missing Owner--PK/Owner:PK", mission);
@@ -1624,7 +1680,7 @@ namespace B6.Indexer
             bool shouldFinalize;
             try
             {
-                shouldFinalize = await NeedsAutoFinalizeAsync(mission, token);
+                shouldFinalize = await NeedsAutoFinalizeAsync(mission, token, cachedRt);
             }
             catch (Exception ex)
             {

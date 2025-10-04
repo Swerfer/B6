@@ -115,7 +115,7 @@ let   optimisticGuard       = { untilMs: 0, players: 0, croNow: "0" };
 // Cache:
 const __missionCreatedCache = new Map();
 const JOIN_CACHE_KEY        = "_b6joined";
-const MISSION_CACHE_TTL_MS  = 15000;
+const MISSION_CACHE_TTL_MS  = 8000;
 let __missionSnapCache      = { addr:"", ts:0, data:null };
 const __missionInflight     = new Map();
 const __missionMicroCache   = new Map();           // addr -> { ts, payload }
@@ -1769,7 +1769,8 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
   };
 
   try {
-    const data = await apiMission(currentMissionAddr, false);
+    const force = (Date.now() < (optimisticGuard?.untilMs || 0)) || (Date.now() - (__lastPushTs || 0) > 8000);
+    const data  = await apiMission(currentMissionAddr, force);
     const m = enrichMissionFromApi(data);
 
     // Merge optimism for a short window so API can't regress the UI
@@ -4102,22 +4103,26 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
       if (el) el.textContent = formatCountdown(ts);
     }
 
-    // UPDATED AGE → mark red + exclamation when > 60s
+    // UPDATED AGE → mark red + exclamation when > 180s AND no pushes for > 75s
     const stamp = document.getElementById("updatedAtStamp");
     const icon  = document.getElementById("updatedAtIcon");
     if (stamp) {
       const t = Number(stamp.dataset.updated || 0);
       const age = Math.floor(Date.now()/1000) - t;
-      const stale = age > 60;
+      const staleAge = age > 180;
+
+      const lastPushAgeMs = Date.now() - (__lastPushTs || 0);
+      const pushQuiet = lastPushAgeMs > 75000; // ~75s without any push
+
+      const stale = staleAge;
       stamp.classList.toggle("text-error", stale);
       if (icon) icon.style.display = stale ? "inline-block" : "none";
 
-      // One-time popup when it first turns stale
-      if (stale && !staleWarningShown) {
-        showAlert("Mission data hasn’t updated for over 1 minute. Try reloading or check your connection.", "warning");
+      if (stale && pushQuiet && !staleWarningShown) {
+        showAlert("Live data looks quiet for over a 2 minutes. Try reloading or check your connection.", "warning");
         staleWarningShown = true;
       }
-      if (!stale){
+      if (!stale) {
         staleWarningShown = false;
         const alertModal   = document.getElementById("alertModal");
         const modalOverlay = document.getElementById("modalOverlay");
