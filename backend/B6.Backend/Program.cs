@@ -641,6 +641,42 @@ app.MapGet("/debug/env",                      (IHostEnvironment env) => {
     });
 });
 
+// Daily error rollup from the indexer (benign provider hiccups etc.)
+app.MapGet("/debug/indexer/errors",     async (HttpRequest req, IConfiguration cfg) =>{
+    // Optional ?day=YYYY-MM-DD; defaults to today (UTC)
+    var dayStr = req.Query["day"].ToString();
+    DateTime dayUtc;
+    if (!DateTime.TryParse(dayStr, out dayUtc)) dayUtc = DateTime.UtcNow.Date;
+
+    var cs = cfg.GetConnectionString("Db");
+    await using var conn = new NpgsqlConnection(cs);
+    await conn.OpenAsync();
+
+    await using var cmd = new NpgsqlCommand(@"
+        select err_key, count, updated_at
+        from indexer_benign_errors
+        where day = @d
+        order by err_key;", conn);
+    cmd.Parameters.AddWithValue("d", dayUtc.Date);
+
+    var items = new List<object>();
+    int total = 0;
+    await using var rd = await cmd.ExecuteReaderAsync();
+    while (await rd.ReadAsync())
+    {
+        var key   = rd["err_key"] as string ?? "";
+        var count = (int) rd["count"];
+        var upd   = (DateTime) rd["updated_at"];
+        total += count;
+        items.Add(new { key, count, updated_at = upd.ToUniversalTime().ToString("o") });
+    }
+
+    return Results.Ok(new {
+        day = dayUtc.ToString("yyyy-MM-dd"),
+        total,
+        items
+    });
+});
 
 // backend/B6.Backend/Program.cs  // locator: HUB & push routes section
 

@@ -1473,12 +1473,13 @@ namespace B6.Indexer
         private void                                    NoteBenign(string kind, string code){
             try
             {
+                string key;
+                var today = DateTime.UtcNow.Date;
+
                 lock (_rpcLogLock)
                 {
-                    var day = DateTime.UtcNow.Date;
-                    if (_benignDayUtc.Date != day && _benignCounts.Count > 0)
+                    if (_benignDayUtc.Date != today && _benignCounts.Count > 0)
                     {
-                        // emit previous day rollup
                         var y = _benignDayUtc.Date.ToString("yyyy-MM-dd");
                         var summary = string.Join(", ", _benignCounts.Select(kv => $"{kv.Key}={kv.Value}"));
                         _log.LogInformation("RPC benign error rollup {day}: {summary}", y, summary);
@@ -1486,9 +1487,31 @@ namespace B6.Indexer
                     }
                     _benignDayUtc = DateTime.UtcNow;
 
-                    var key = $"{kind}.{code}";
+                    key = $"{kind}.{code}";
                     _benignCounts[key] = _benignCounts.TryGetValue(key, out var n) ? n + 1 : 1;
                 }
+
+                // Fire-and-forget DB upsert; never block the caller.
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await using var conn = new NpgsqlConnection(_pg);
+                        await conn.OpenAsync();
+
+                        await using var up = new NpgsqlCommand(@"
+                            insert into indexer_benign_errors (day, err_key, count, updated_at)
+                            values (@d, @k, 1, now())
+                            on conflict (day, err_key) do update
+                            set count = indexer_benign_errors.count + 1,
+                                updated_at = now();", conn);
+
+                        up.Parameters.AddWithValue("d", today);
+                        up.Parameters.AddWithValue("k", key);
+                        await up.ExecuteNonQueryAsync();
+                    }
+                    catch { /* best-effort only */ }
+                });
             }
             catch { /* never block caller */ }
         }
@@ -1684,11 +1707,6 @@ namespace B6.Indexer
             await conn.OpenAsync(token);
 
             const string sql = @"
-            CREATE TABLE IF NOT EXISTS indexer_cursors (
-            cursor_key     TEXT PRIMARY KEY,
-            last_block     BIGINT NOT NULL,
-            updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
             INSERT INTO indexer_cursors (cursor_key, last_block)
             VALUES ('factory', 0)
             ON CONFLICT (cursor_key) DO NOTHING;";

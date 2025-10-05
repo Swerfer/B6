@@ -2809,6 +2809,17 @@ async function  renderStageCtaForStatus (mission) {
 
   // Enrolling → show a disabled JOIN immediately, then refine gating async.
   if (st === 1) {
+    // NEW: If an interactive JOIN is already on screen, don't flash the placeholder.
+    const hasInteractiveJoin =
+      !!host.querySelector('.cta-btn') &&
+      host.querySelector('.cta-btn')?.getAttribute('tabindex') === '0';
+
+    if (hasInteractiveJoin) {
+      // Refine gating without the placeholder swap that can swallow the first click
+      try { await renderCtaEnrolling(host, mission); } catch (e) { console.warn(e); }
+      return;
+    }
+
     host.innerHTML = "";
     renderJoinPlaceholder(host);                    // instant, no-await
     (async () => {                                  // refine without removing the CTA
@@ -4568,11 +4579,13 @@ async function  init(){
 
   // event-based (if we add wallet events in walletConnect.js, see 1D)
   window.addEventListener("wallet:connected", () => {
+    ctaBusy = false;
     fetchAndRenderAllMissions();
     if (walletAddress) enableGamePush(walletAddress);
   });
 
   window.addEventListener("wallet:changed", async () => {
+    ctaBusy = false;
     try { __viewerWins?.clear?.(); } catch {}
     try { __viewerWonOnce?.clear?.(); } catch {}
 
@@ -4594,6 +4607,7 @@ async function  init(){
   });
 
   window.addEventListener("wallet:disconnected", () => {
+    ctaBusy = false;
     try { __viewerWins?.clear?.(); } catch {}
     try { __viewerWonOnce?.clear?.(); } catch {}
 
