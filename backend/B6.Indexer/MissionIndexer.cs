@@ -50,6 +50,11 @@ namespace B6.Indexer
         private DateTime                                _rpcLogDay    = DateTime.MinValue;  // UTC date boundary
         private string                                  _rpcLogPath   = string.Empty;
         private readonly Dictionary<string,int>         _rpcCounts    = new(StringComparer.InvariantCulture);
+        // --- Benign provider hiccup rollup (daily, UTC) -------------------------------
+        private DateTime                                _benignDayUtc = DateTime.MinValue;
+        private readonly Dictionary<string,int>         _benignCounts = new(StringComparer.InvariantCulture);
+        private static readonly TimeSpan                _benignRetryDelay = TimeSpan.FromMilliseconds(800);
+        // -----------------------------------------------------------------------------         
         private readonly int                            _maxWinPerMission;
         private readonly int                            _maxWinTotal;
         private readonly string                         _ownerPk;                           // from Key Vault / config
@@ -73,6 +78,8 @@ namespace B6.Indexer
         private static TimeSpan SmallJitter() => TimeSpan.FromMilliseconds(_rpcJitter.Next(15, 45));
         // ----------------------------------------------------------------------------- 
 
+        private static readonly TimeSpan                RATE_LIMIT_COOLDOWN        = TimeSpan.FromSeconds(30);
+
         private volatile bool _kickRequested = false;
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _kickMissions = new();
 
@@ -91,7 +98,53 @@ namespace B6.Indexer
             // no args
         }
 
-        // --- Per-cycle RPC cache ------------------------------------------------------
+        private readonly                                RpcCyclePacer _pacer = new();
+
+        private sealed class                            RpcCyclePacer {
+            private readonly SemaphoreSlim _mux = new(1,1);
+            private DateTime _startUtc = DateTime.MinValue;
+            private TimeSpan _budget = TimeSpan.Zero;
+            private int _planned = 0;
+            private DateTime _nextUtc = DateTime.MinValue;
+
+            public void Start(int planned, TimeSpan budget)
+            {
+                _planned  = Math.Max(1, planned);
+                _budget   = budget;
+                _startUtc = DateTime.UtcNow;
+                _nextUtc  = _startUtc; // first call can run immediately
+            }
+
+            public void Reserve(int more)
+            {
+                if (more <= 0) return;
+                Interlocked.Add(ref _planned, more);
+            }
+
+            public async Task GateAsync()
+            {
+                if (_budget == TimeSpan.Zero || _planned <= 0) return; // not started → no-op
+
+                await _mux.WaitAsync();
+                try
+                {
+                    var gapMs = Math.Max(1.0, _budget.TotalMilliseconds / Math.Max(1, _planned));
+                    var gap   = TimeSpan.FromMilliseconds(gapMs);
+
+                    var now   = DateTime.UtcNow;
+                    if (_nextUtc < now) _nextUtc = now;
+                    var wait = _nextUtc - now;
+                    _nextUtc = _nextUtc + gap;
+
+                    if (wait > TimeSpan.Zero)
+                    {
+                        try { await Task.Delay(wait); } catch { }
+                    }
+                }
+                finally { _mux.Release(); }
+            }
+        }
+
         private sealed class                            RpcCycleCache {
             public long? TipBlock;
             public GetMissionsOutput? AllMissions;
@@ -99,7 +152,58 @@ namespace B6.Indexer
             public readonly Dictionary<string, byte> RealtimeStatus = new(StringComparer.InvariantCulture);
         }
 
-        // Cache helpers (reuse existing RunRpc + types)
+        private static int                              CountWindows                (long start, long toBlock) {
+            if (start > toBlock) return 0;
+            int w = 0; long from = start;
+            while (from <= toBlock)
+            {
+                long to = Math.Min(from + MAX_LOG_RANGE, toBlock);
+                w++; from = to + 1;
+            }
+            return w;
+        }
+
+        private async Task<int>                         CountFactoryWindowsAsync    (long latest, CancellationToken token) {
+            var toBlock = latest - REORG_CUSHION;
+            if (toBlock <= 0) return 0;
+            var cursor  = await GetCursorAsync("factory", token);
+            var start   = cursor + 1;
+            return CountWindows(start, toBlock);
+        }
+
+        private async Task<int>                         CountMissionWindowsAsync    (long latest, CancellationToken token) {
+            var tipSafe = latest - REORG_CUSHION;
+            if (tipSafe <= 0) return 0;
+
+            int total = 0;
+            await using var conn = new NpgsqlConnection(_pg);
+            await conn.OpenAsync(token);
+            await using var cmd = new NpgsqlCommand(@"
+                select coalesce(last_seen_block,0) as from_block
+                from missions
+                where coalesce(last_seen_block,0) < @tipSafe;", conn);
+            cmd.Parameters.AddWithValue("tipSafe", tipSafe);
+            await using var rd = await cmd.ExecuteReaderAsync(token);
+            while (await rd.ReadAsync(token))
+            {
+                var from = (long)rd["from_block"];
+                total += CountWindows(from, tipSafe);
+            }
+            return total;
+        }
+
+        private async Task<int>                         CountRealtimePollMissionsAsync(CancellationToken token) {
+            await using var c = new NpgsqlConnection(_pg);
+            await c.OpenAsync(token);
+            await using var cmd = new NpgsqlCommand(@"
+                select count(*) 
+                from missions
+                where coalesce(status,0) < 5
+                or (coalesce(status,0) in (5,6,7) and coalesce(realtime_status,0) not in (6,7));", c);
+            var n = (long)(await cmd.ExecuteScalarAsync(token) ?? 0L);
+            return (int)n;
+        }
+
         private async Task<long>                        GetLatestBlockCachedAsync   (RpcCycleCache cache) {
             if (cache.TipBlock is long b) return b;
             b = await GetLatestBlockAsync();
@@ -136,7 +240,6 @@ namespace B6.Indexer
             cache.RealtimeStatus[addr] = rt;
             return rt;
         }
-        // -----------------------------------------------------------------------------
 
         public                                          MissionIndexer              (ILogger<MissionIndexer> log, IConfiguration cfg) {
             _log = log;
@@ -313,27 +416,58 @@ namespace B6.Indexer
                 var from            = new BlockParameter(new HexBigInteger(windowFrom));
                 var to              = new BlockParameter(new HexBigInteger(windowTo));
 
-                // pull logs via RunRpc so they’re counted & timed
-                var createdLogs = await RunRpc(
-                    w => {
-                        var e = w.Eth.GetEvent<MissionCreatedEventDTO>(_factory);
-                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                    },
-                    "GetLogs.Factory.MissionCreated");
+                // pull logs for this window with local benign retry before any switch
+                List<EventLog<MissionCreatedEventDTO>>         createdLogs = default!;
+                List<EventLog<MissionStatusUpdatedEventDTO>>   statusLogs  = default!;
+                List<EventLog<MissionFinalizedEventDTO>>       finalLogs   = default!;
 
-                var statusLogs = await RunRpc(
-                    w => {
-                        var e = w.Eth.GetEvent<MissionStatusUpdatedEventDTO>(_factory);
-                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                    },
-                    "GetLogs.Factory.StatusUpdated");
+                for (var attempt = 0; attempt < 2; attempt++)
+                {
+                    try
+                    {
+                        createdLogs = await RunRpc(
+                            w => {
+                                var e = w.Eth.GetEvent<MissionCreatedEventDTO>(_factory);
+                                return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                            },
+                            "GetLogs.Factory.MissionCreated");
 
-                var finalLogs = await RunRpc(
-                    w => {
-                        var e = w.Eth.GetEvent<MissionFinalizedEventDTO>(_factory);
-                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                    },
-                    "GetLogs.Factory.Finalized");
+                        statusLogs = await RunRpc(
+                            w => {
+                                var e = w.Eth.GetEvent<MissionStatusUpdatedEventDTO>(_factory);
+                                return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                            },
+                            "GetLogs.Factory.StatusUpdated");
+
+                        finalLogs = await RunRpc(
+                            w => {
+                                var e = w.Eth.GetEvent<MissionFinalizedEventDTO>(_factory);
+                                return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
+                            },
+                            "GetLogs.Factory.Finalized");
+
+                        break; // success
+                    }
+                    catch (Exception ex) when (IsTransient(ex) && attempt == 0)
+                    {
+                        // Benign provider blip? -> count + brief delay + retry on same RPC, no warning
+                        if (TryGetBenignProviderCode(ex, out var code))
+                        {
+                            NoteBenign("GetLogs.FactoryWindow", code);
+                            try { await Task.Delay(_benignRetryDelay, token); } catch { }
+                            continue;
+                        }
+
+                        // Otherwise switch once and retry (same behavior you use elsewhere)
+                        if (SwitchRpc())
+                        {
+                            _log.LogWarning(ex, "Factory getLogs window {from}-{to} failed; switched RPC, retrying once", windowFrom, windowTo);
+                            continue;
+                        }
+
+                        throw;
+                    }
+                }
 
                 // 1) Seed unknown missions discovered via status/final (optional, same as before)
                 var seen    = new HashSet<string>(StringComparer.InvariantCulture);
@@ -358,6 +492,9 @@ namespace B6.Indexer
 
                     if (unknown.Count > 0)
                     {
+                        // NEW: count these extra RPCs so pacing tightens accordingly
+                        _pacer.Reserve(1 + unknown.Count);
+
                         var nameByAddr = new Dictionary<string,string>(StringComparer.InvariantCulture);
                         try
                         {
@@ -595,10 +732,24 @@ namespace B6.Indexer
                             _log.LogInformation("ScanFactoryEvents canceled by stop request for window {from}-{to}", windowFrom, windowTo);
                             return; // graceful stop – no error, no retry
                         }
-                        catch (Exception ex) when (IsTransient(ex) && attempt == 0 && SwitchRpc())
+                        catch (Exception ex) when (IsTransient(ex) && attempt == 0)
                         {
-                            _log.LogWarning(ex, "Factory window {from}-{to} failed; switched RPC, retrying once", windowFrom, windowTo);
-                            continue; // retry once after switching RPC
+                            // Benign upstream blip? Count it and retry on the SAME RPC, no warning noise.
+                            if (TryGetBenignProviderCode(ex, out var code))
+                            {
+                                NoteBenign("GetLogs.FactoryWindow", code);
+                                try { await Task.Delay(_benignRetryDelay, token); } catch { }
+                                continue;
+                            }
+
+                            // Otherwise: switch once and retry (previous behavior).
+                            if (SwitchRpc())
+                            {
+                                _log.LogWarning(ex, "Factory window {from}-{to} failed; switched RPC, retrying once", windowFrom, windowTo);
+                                continue;
+                            }
+
+                            throw; // couldn't switch; bubble up
                         }
                     }
                 }
@@ -910,7 +1061,7 @@ namespace B6.Indexer
 
                             await tx.CommitAsync(token);
 
-                            // publish after DB commit
+                            // publish after DB commit (push-only)
                             try
                             {
                                 foreach (var s in pushStatuses)
@@ -921,14 +1072,29 @@ namespace B6.Indexer
 
                                 if (missionUpdated)
                                     await NotifyMissionUpdatedAsync(addr, token);
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.LogWarning(ex, "Notify failed for {addr}", addr);
+                            }
 
-                                var cycle = new RpcCycleCache(); // create near the top of ScanMissionEventsAsync window loop or reuse one per method
+                            // chain-derived reconciles (quietly handle benign hiccups)
+                            try
+                            {
+                                var cycle = new RpcCycleCache();
                                 var fixedPlayers = await ReconcileEnrollmentsFromChainAsync(addr, token, cycle);
                                 var potChanged   = await RefreshPotFromChainAsync(addr, token, cycle);
                                 if ((potChanged || fixedPlayers) && !missionUpdated)
                                     await NotifyMissionUpdatedAsync(addr, token);
-                            } catch (Exception ex) {
-                                _log.LogWarning(ex, "Notify failed for {addr}", addr); 
+                            }
+                            catch (Exception ex) when (IsTransient(ex) && TryGetBenignProviderCode(ex, out var code))
+                            {
+                                NoteBenign("eth_call.reconcile", code);
+                                // no log; next cycle will catch up
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.LogWarning(ex, "Reconcile-from-chain failed for {addr}", addr);
                             }
 
                             try { 
@@ -940,21 +1106,35 @@ namespace B6.Indexer
                             windowSucceeded = true;
                             break; // success for this window
                         }
-                        catch (Exception ex) when (IsTransient(ex) && attempt == 0 && SwitchRpc())
+                        catch (Exception ex) when (IsTransient(ex) && attempt == 0)
                         {
-                            _log.LogWarning(ex, "Mission {addr} window {from}-{to} failed; switched RPC, retrying once", addr, windowFrom, windowTo);
-                            continue; // retry once after switching RPC
+                            // Benign provider blip? -> count + brief delay + retry on same RPC, no warning
+                            if (TryGetBenignProviderCode(ex, out var code))
+                            {
+                                NoteBenign("GetLogs.MissionWindow", code);
+                                try { await Task.Delay(_benignRetryDelay, token); } catch { }
+                                continue;
+                            }
+
+                            // Otherwise switch once and retry, as before
+                            if (SwitchRpc())
+                            {
+                                _log.LogWarning(ex, "Mission {addr} window {from}-{to} failed; switched RPC, retrying once", addr, windowFrom, windowTo);
+                                continue;
+                            }
+
+                            throw;
                         }
                         catch (OperationCanceledException) when (token.IsCancellationRequested)
                         {
                             _log.LogInformation("ScanMissionEvents canceled by stop request for {addr} in window {from}-{to}", addr, windowFrom, windowTo);
-                            return; // graceful stop – no error, no retry
+                            return;
                         }
                         catch (Exception ex)
                         {
                             _log.LogError(ex, "ScanMissionEvents failed for {addr} in window {from}-{to}", addr, windowFrom, windowTo);
                             RecordFailure(ex);
-                            break; // stop retrying this window
+                            break;
                         }
 
                     }
@@ -1158,6 +1338,72 @@ namespace B6.Indexer
             _log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
         }
 
+        private async Task<T>                           RunRpc<T>                   (Func<Web3, Task<T>> fn, string context) {
+            var kind = NormalizeKind(context);
+
+            // NEW: evenly space this call within the current cycle
+            await _pacer.GateAsync();
+
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                var res = await fn(_web3);
+                sw.Stop();
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw.ElapsedMilliseconds} ms");
+                return res;
+            }
+            catch (Exception ex) when (IsTransient(ex))
+            {
+                sw.Stop();
+
+                // 1) Immediate handling of 429s: cool down + switch, log as Warning
+                if (IsRateLimited(ex))
+                {
+                    _log.LogWarning(ex, "{ctx} hit rate limit (429); cooling down {sec}s", context, (int)RATE_LIMIT_COOLDOWN.TotalSeconds);
+                    try { await Task.Delay(RATE_LIMIT_COOLDOWN); } catch { }
+                }
+                else if (TryGetBenignProviderCode(ex, out var code))
+                {
+                    // 2) Benign hiccup: count & quick retry on the SAME endpoint, no warning log
+                    NoteBenign(kind, code);
+                    try { await Task.Delay(_benignRetryDelay); } catch { }
+                    try
+                    {
+                        var res0 = await fn(_web3); // retry without switching
+                        if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ after benign {code} in {sw.ElapsedMilliseconds} ms");
+                        return res0;
+                    }
+                    catch (Exception ex2) when (IsTransient(ex2))
+                    {
+                        // fall through to switch logic below
+                        ex = ex2;
+                    }
+                }
+
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ↻ transient: {ex.GetType().Name}: {ex.Message} (attempting switch)");
+
+                var switched = false;
+                try { switched = SwitchRpc(); }
+                catch (Exception sx) { _log.LogWarning(sx, "SwitchRpc() failed while handling transient error for {ctx}", context); }
+
+                if (!switched) throw; // bubble to final catch
+
+                _log.LogWarning(ex, "{ctx} failed; switched RPC and retrying", context);
+
+                var sw2 = Stopwatch.StartNew();
+                var res2 = await fn(_web3);
+                sw2.Stop();
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw2.ElapsedMilliseconds} ms (after switch)");
+                return res2;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                if (logRpcCalls) RpcFileLog(kind, $"{context} ✗ in {sw.ElapsedMilliseconds} ms: {ex.GetType().Name}: {ex.Message}");
+                throw;
+            }
+        }
+
         private bool                                    SwitchRpc                   () {
             if (_rpcEndpoints.Count <= 1) return false;
             var next = (_rpcIndex + 1) % _rpcEndpoints.Count;
@@ -1208,72 +1454,43 @@ namespace B6.Indexer
             return ex.InnerException != null && IsRateLimited(ex.InnerException);
         }
 
-        private static readonly TimeSpan                RATE_LIMIT_COOLDOWN        = TimeSpan.FromSeconds(30);
+        private static bool                             TryGetBenignProviderCode(Exception ex, out string code) {
+            code = string.Empty;
+            if (ex == null) return false;
+            var m = (ex.Message ?? string.Empty).ToLowerInvariant();
 
-        private async Task<T>                           RunRpc<T>                   (Func<Web3, Task<T>> fn, string context) {
-            var kind = NormalizeKind(context);
+            // map a few frequent upstream issues
+            if (m.Contains("502") || m.Contains("bad gateway"))           { code = "502-BadGateway";      return true; }
+            if (m.Contains("503") || m.Contains("service unavailable"))   { code = "503-Unavailable";     return true; }
+            if (m.Contains("504") || m.Contains("gateway timeout"))       { code = "504-GatewayTimeout";  return true; }
+            if (m.Contains("408") || m.Contains("request timeout"))       { code = "408-Timeout";         return true; }
+            if (m.Contains("410") || m.Contains("gone"))                  { code = "410-Gone";            return true; }
 
-            // --- Global throttle: space calls to respect provider QPS ----------------
-            await _rpcThrottle.WaitAsync();
+            // bubble down to inner exception text if any
+            return ex.InnerException != null && TryGetBenignProviderCode(ex.InnerException, out code);
+        }
+
+        private void                                    NoteBenign(string kind, string code){
             try
             {
-                var now = DateTime.UtcNow;
-                var wait = _nextRpcEarliestUtc - now;
-                if (wait > TimeSpan.Zero)
-                    try { await Task.Delay(wait); } catch { /* cancelled OK */ }
-
-                // reserve the next slot now (gap + a tiny jitter)
-                _nextRpcEarliestUtc = DateTime.UtcNow + PerRequestGap(_rpcMaxQps) + SmallJitter();
-            }
-            finally { _rpcThrottle.Release(); }
-            // ------------------------------------------------------------------------
-
-            var sw = Stopwatch.StartNew();
-            try
-            {
-                var res = await fn(_web3);
-                sw.Stop();
-                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw.ElapsedMilliseconds} ms");
-                return res;
-            }
-            catch (Exception ex) when (IsTransient(ex))
-            {
-                sw.Stop();
-
-                // If provider rate-limits us, extend the throttle window before switching/retrying
-                if (IsRateLimited(ex))
+                lock (_rpcLogLock)
                 {
-                    _log.LogWarning(ex, "{ctx} hit rate limit (429); cooling down {sec}s", context, (int)RATE_LIMIT_COOLDOWN.TotalSeconds);
-                    // push out the next slot so ALL callers back off together
-                    await _rpcThrottle.WaitAsync();
-                    try { _nextRpcEarliestUtc = DateTime.UtcNow + RATE_LIMIT_COOLDOWN; }
-                    finally { _rpcThrottle.Release(); }
+                    var day = DateTime.UtcNow.Date;
+                    if (_benignDayUtc.Date != day && _benignCounts.Count > 0)
+                    {
+                        // emit previous day rollup
+                        var y = _benignDayUtc.Date.ToString("yyyy-MM-dd");
+                        var summary = string.Join(", ", _benignCounts.Select(kv => $"{kv.Key}={kv.Value}"));
+                        _log.LogInformation("RPC benign error rollup {day}: {summary}", y, summary);
+                        _benignCounts.Clear();
+                    }
+                    _benignDayUtc = DateTime.UtcNow;
 
-                    try { await Task.Delay(RATE_LIMIT_COOLDOWN); } catch { /* ignore */ }
+                    var key = $"{kind}.{code}";
+                    _benignCounts[key] = _benignCounts.TryGetValue(key, out var n) ? n + 1 : 1;
                 }
-
-                if (logRpcCalls) RpcFileLog(kind, $"{context} ↻ transient: {ex.GetType().Name}: {ex.Message} (attempting switch)");
-
-                var switched = false;
-                try { switched = SwitchRpc(); }
-                catch (Exception sx) { _log.LogWarning(sx, "SwitchRpc() failed while handling transient error for {ctx}", context); }
-
-                if (!switched) throw;
-
-                _log.LogWarning(ex, "{ctx} failed; switched RPC and retrying", context);
-
-                var sw2 = Stopwatch.StartNew();
-                var res2 = await fn(_web3);
-                sw2.Stop();
-                if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ in {sw2.ElapsedMilliseconds} ms (after switch)");
-                return res2;
             }
-            catch (Exception ex)
-            {
-                sw.Stop();
-                if (logRpcCalls) RpcFileLog(kind, $"{context} ✗ in {sw.ElapsedMilliseconds} ms — {ex.GetType().Name}: {ex.Message}");
-                throw;
-            }
+            catch { /* never block caller */ }
         }
 
         private async Task<Dictionary<long, DateTime>>  GetBlockTimestampsAsync     (IEnumerable<long> blockNumbers) {
@@ -1291,6 +1508,7 @@ namespace B6.Indexer
             }
 
             // fetch only misses
+            _pacer.Reserve(misses.Count); // NEW: add to the plan for pacing
             foreach (var bn in misses)
             {
                 try
@@ -1401,7 +1619,24 @@ namespace B6.Indexer
 
                 try
                 {
+                    // 0) Need latest first (counts depend on it)
                     var latest = await GetLatestBlockCachedAsync(cycle);
+
+                    // 1) Count planned RPCs for this 15s cycle
+                    var factoryWins  = await CountFactoryWindowsAsync(latest, token);
+                    var missionWins  = await CountMissionWindowsAsync(latest, token);
+                    var pollMissions = DateTime.UtcNow >= _nextRtPollUtc ? await CountRealtimePollMissionsAsync(token) : 0;
+
+                    // Per window: Factory=3 logs, Mission=5 logs (StatusChanged enabled)
+                    // Realtime poll (when due): ~3 per mission (getRealtimeStatus + getMissionData*2)
+                    var planned = 1 /* we just did GetBlockNumber via GetLatestBlock... */
+                                + factoryWins * 3
+                                + missionWins * 5
+                                + pollMissions * 3;
+
+                    // 2) Pace all subsequent RPCs evenly across ~12 seconds
+                    _pacer.Start(planned, TimeSpan.FromSeconds(12));
+
                     await ScanFactoryEventsAsync(token, latest);
                     await ScanMissionEventsAsync(token, latest);
                     RecordSuccess();

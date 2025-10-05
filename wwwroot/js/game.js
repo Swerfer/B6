@@ -2004,15 +2004,12 @@ function finalizeVaultOpenVideoWin(){
   // Hide video now
   if (vaultLayer) vaultLayer.style.display = "none";
 
-  // Show the success popup a second later (with final amount), unless we already showed it
+  // Show the success popup 2 seconds after the video ends (with final amount)
   const round = __vaultVideoPendingWin?.round ?? "?";
   const cro   = __vaultVideoPendingWin?.cro   ?? "?";
   setTimeout(() => {
-    if (!window.__winPopupSuppressUntil || Date.now() >= window.__winPopupSuppressUntil) {
-      try { showAlert(`Congratulations! You banked ${cro} CRO in round ${round}!`, "success"); } catch {}
-    }
-  }, 1000);
-
+    try { showAlert(`Congratulations! You banked ${cro} CRO in round ${round}!`, "success"); } catch {}
+  }, 2000);
 
   // Clear flags
   __vaultVideoFlowActive = false;
@@ -2649,9 +2646,9 @@ async function  handleBankItClick       (mission){
     const winCro   = weiToCro(String(winWei), 2);
     const nextRnd  = Number(mission.round_count || 0) + 1;
 
-    // Show the winner popup NOW (don’t wait for RoundResult)
-    window.__winPopupSuppressUntil = Date.now() + 16000;                   // guard to avoid double-pop later
-    showAlert(`Congratulations! You banked ${winCro} CRO in round ${nextRnd}!`, "success");
+    // Defer the winner popup to after the vault video finishes.
+    // Stash the result so finalizeVaultOpenVideoWin() can display it later.
+    __vaultVideoPendingWin = { cro: winCro, round: nextRnd };
 
     // Optimistically drop the pool by the payout right away
     let croAfter = mission.cro_current_wei;
@@ -2668,7 +2665,9 @@ async function  handleBankItClick       (mission){
     buildStageLowerHudForStatus({ ...mission, cro_current_wei: croAfter, round_count: nextRoundCount });
 
     // Keep your video + optimistic pause flip
-    playVaultOpenVideoOnce();
+    setTimeout(() => {
+      try { playVaultOpenVideoOnce(); } catch {}
+    }, 1000);
     await flipStageToPausedOptimistic(mission);
 
     // Quick chain hydrate to lock in truth (still fine if slow)
@@ -3055,7 +3054,7 @@ function        renderCtaActive         (host, mission)   {
     // Centered message in the CTA area, no button rendered
     const msg = document.createElementNS(SVG_NS, "text");
     msg.setAttribute("x", String(xCenter));
-    msg.setAttribute("y", String(y + Math.round(btnH / 2) + 7));
+    msg.setAttribute("y", String(y + Math.round(btnH / 2) + 25));
     msg.setAttribute("text-anchor", "middle");
     msg.setAttribute("class", "cta-block");         // was cta-note
     msg.style.fill = stageTextFill();               // paint now → no black flash
@@ -3156,7 +3155,7 @@ function        renderCtaPaused         (host, mission){
     const msg = document.createElementNS(SVG_NS, "text");
     msg.setAttribute("class", "cta-block");
     msg.setAttribute("x", String(xCenter));
-    msg.setAttribute("y", String(Math.round(y + btnH/2) + txtDy + 5));
+    msg.setAttribute("y", String(Math.round(y + btnH/2) + txtDy + 25));
     msg.setAttribute("text-anchor", "middle");
     msg.setAttribute("dominant-baseline", "middle");
     msg.style.fill = stageTextFill(); // color immediately → no black flash
@@ -4577,9 +4576,16 @@ async function  init(){
     try { __viewerWins?.clear?.(); } catch {}
     try { __viewerWonOnce?.clear?.(); } catch {}
 
-    // Reset vault state for the new viewer
-    try { __vaultIsOpen = false; } catch {}
-    try { setRingAndTimerVisible(true); } catch {}
+    // Force-close vault art and stop any video immediately
+    try {
+      const layer = document.getElementById("vaultVideoLayer");
+      if (layer) layer.style.display = "none";
+      __vaultVideoFlowActive = false;
+      __vaultVideoEndedAwaitingResult = false;
+      __vaultVideoPendingWin = null;
+      setVaultOpen(false, /*force*/ true);
+      setRingAndTimerVisible(true);
+    } catch {}
 
     updateConnectText();
 
@@ -4591,9 +4597,16 @@ async function  init(){
     try { __viewerWins?.clear?.(); } catch {}
     try { __viewerWonOnce?.clear?.(); } catch {}
 
-    // Reset vault state for the new viewer
-    try { __vaultIsOpen = false; } catch {}
-    try { setRingAndTimerVisible(true); } catch {}
+    // Force-close vault art and stop any video immediately
+    try {
+      const layer = document.getElementById("vaultVideoLayer");
+      if (layer) layer.style.display = "none";
+      __vaultVideoFlowActive = false;
+      __vaultVideoEndedAwaitingResult = false;
+      __vaultVideoPendingWin = null;
+      setVaultOpen(false, /*force*/ true);
+      setRingAndTimerVisible(true);
+    } catch {}
 
     renderAllMissions([]);
     // optional: no-op (enableGamePush(null) returns early)
@@ -4607,7 +4620,19 @@ async function  init(){
 
   // Fallback if those custom events aren’t emitted:
   if (window.ethereum) {
-    window.ethereum.on("accountsChanged", () => setTimeout( refreshStageCtaIfOpen, 0));
+    window.ethereum.on("accountsChanged", () => {
+      // Force-close instantly, then refresh CTA/art
+      try {
+        const layer = document.getElementById("vaultVideoLayer");
+        if (layer) layer.style.display = "none";
+        __vaultVideoFlowActive = false;
+        __vaultVideoEndedAwaitingResult = false;
+        __vaultVideoPendingWin = null;
+        setVaultOpen(false, /*force*/ true);
+        setRingAndTimerVisible(true);
+      } catch {}
+      setTimeout(refreshStageCtaIfOpen, 0);
+    });
   }
 
   window.addEventListener("wallet:connected",               updateConnectText);
