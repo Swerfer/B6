@@ -307,12 +307,11 @@ function        enrichMissionFromApi(data){
 
     // Pool (current) during Enrolling: initial + fee * joined (no payouts yet)
     if (Number(m.status) === 1 &&
-        m.cro_current_wei == null &&
         m.cro_initial_wei != null &&
         m.enrollment_amount_wei != null) {
       const initialWei = BigInt(String(m.cro_initial_wei || "0"));
       const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
-      const joined     = BigInt(m.enrollments.length);
+      const joined     = BigInt((Array.isArray(m.enrollments) ? m.enrollments.length : 0));
       m.cro_current_wei = (initialWei + feeWei * joined).toString();
     }
   }
@@ -2209,15 +2208,18 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
   fee:            { label: "Mission Fee",      value: m => (m && m.enrollment_amount_wei != null) ? `${weiToCro(m.enrollment_amount_wei, 2)} CRO` : "—" },
   poolStart:      { label: "Pool (start)",     value: m => (m && m.cro_start_wei    != null)      ? `${weiToCro(m.cro_start_wei, 2)} CRO`    : "—" },
   poolCurrent:    { label: "Pool (current)",   value: m => {
-    if (m?.cro_current_wei != null) return `${weiToCro(m.cro_current_wei, 2)} CRO`;
-    if (Number(m?.status) === 1 && Array.isArray(m?.enrollments) && m?.cro_initial_wei != null && m?.enrollment_amount_wei != null){
+    // During Enrolling prefer the derived value (API may still return the initial snapshot)
+    if (Number(m?.status) === 1 && Array.isArray(m?.enrollments) &&
+        m?.cro_initial_wei != null && m?.enrollment_amount_wei != null) {
       const initialWei = BigInt(String(m.cro_initial_wei || "0"));
       const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
       const joined     = BigInt(m.enrollments.length || 0);
       return `${weiToCro((initialWei + feeWei * joined).toString(), 2)} CRO`;
     }
+    if (m?.cro_current_wei != null) return `${weiToCro(m.cro_current_wei, 2)} CRO`;
     return "—";
   }},
+
   playersCap:     { label: "Players cap",      value: m => (m?.enrollment_max_players ?? "—") },
   players: { label: "Players",                 value: m => Math.max(
     Array.isArray(m?.enrollments) ? m.enrollments.length : 0,
@@ -4151,7 +4153,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
               : `${formatLocalDateTime(mission.mission_end)}`}
           </div>
 
-        <div class="label">Updated</div>
+        <div class="label">Data updated</div>
         <div class="value">
           <span id="updatedAtStamp"
                 data-updated="${Math.max(mission.updated_at || 0, Math.floor((__lastPushTs || 0)/1000))}">

@@ -186,17 +186,48 @@ namespace B6.Indexer
             await using var conn = new NpgsqlConnection(_pg);
             await conn.OpenAsync(token);
             await using var cmd = new NpgsqlCommand(@"
-                select coalesce(last_seen_block,0) as from_block
-                from missions
-                where coalesce(last_seen_block,0) < @tipSafe
-                and (coalesce(status,0) < 6 
-                    or coalesce(realtime_status,0) not in (6,7));", conn);
+                select
+                    m.mission_address,
+                    coalesce(m.last_seen_block,0)::bigint as from_block,
+                    coalesce((
+                        select max(h.block_number)::bigint
+                        from mission_status_history h
+                        where h.mission_address = m.mission_address
+                        and h.to_status in (6,7)          -- Ended or Refunded
+                    ), null) as final_blk,
+                    coalesce(m.status,0)::smallint as status,
+                    case when coalesce(m.status,0) = 7 then
+                        not exists (
+                            select 1
+                            from mission_enrollments e
+                            where e.mission_address = m.mission_address
+                            and coalesce(e.refunded, false) = false
+                        )
+                    else true end as all_refunded_or_not_needed
+                from missions m
+                where coalesce(m.last_seen_block,0) < @tipSafe
+                and coalesce(m.status,0) not in (0,2);", conn);
+
             cmd.Parameters.AddWithValue("tipSafe", tipSafe);
+
             await using var rd = await cmd.ExecuteReaderAsync(token);
             while (await rd.ReadAsync(token))
             {
-                var from = (long)rd["from_block"];
-                total += CountWindows(from, tipSafe);
+                var from = Convert.ToInt64(rd["from_block"]);
+                var status  = Convert.ToInt16(rd["status"]);
+                var finalObj = rd["final_blk"];
+                long? final  = finalObj is DBNull ? (long?)null : (long)finalObj;
+                var allOk    = (bool)rd["all_refunded_or_not_needed"];   // true for status 6, or 7 with all refunded
+
+                long to = tipSafe;
+                if (final is long fb && (status == 6 || (status == 7 && allOk)))
+                {
+                    var freeze = fb + REORG_CUSHION;
+                    to = Math.Min(tipSafe, freeze);
+                }
+
+                if (from < to)
+                    total += CountWindows(from, to);
             }
             return total;
         }
@@ -209,8 +240,10 @@ namespace B6.Indexer
                 from missions
                 where coalesce(status,0) < 5
                 or (coalesce(status,0) in (5,6,7) and coalesce(realtime_status,0) not in (6,7));", c);
-            var n = (long)(await cmd.ExecuteScalarAsync(token) ?? 0L);
+            var obj = await cmd.ExecuteScalarAsync(token);
+            var n = Convert.ToInt64(obj ?? 0L);
             return (int)n;
+
         }
 
         private async Task<long>                        GetLatestBlockCachedAsync   (RpcCycleCache cache) {
@@ -665,14 +698,26 @@ namespace B6.Indexer
                             update missions
                             set status          = @s,
                                 realtime_status = case when @s in (6,7) then @s else realtime_status end,
-                                last_seen_block = greatest(coalesce(last_seen_block,0), @toBlk),
                                 updated_at      = now()
                             where mission_address = @a;", conn, tx))
                         {
                             up.Parameters.AddWithValue("a", mission);
                             up.Parameters.AddWithValue("s", toS);
-                            up.Parameters.AddWithValue("toBlk", windowTo);   // safe tip for this factory window
                             await up.ExecuteNonQueryAsync(token);
+                        }
+
+                        // If we just LEFT a 'non-scan' state (0=Pending, 2=Arming), jump the mission cursor
+                        // to the block of this status change. That way we don't backfill those skipped windows.
+                        if ((fromS == 0 || fromS == 2) && toS != fromS)
+                        {
+                            await using var upCur = new NpgsqlCommand(@"
+                                update missions
+                                set last_seen_block = greatest(coalesce(last_seen_block,0), @blk),
+                                    updated_at      = now()
+                                where mission_address = @a;", conn, tx);
+                            upCur.Parameters.AddWithValue("a",   mission);
+                            upCur.Parameters.AddWithValue("blk", blk);
+                            await upCur.ExecuteNonQueryAsync(token);
                         }
 
                         if (inserted > 0) pushStatuses.Add((mission, toS));
@@ -777,7 +822,7 @@ namespace B6.Indexer
 
         private async Task                              ScanMissionEventsAsync      (CancellationToken token, long? latestOverride = null) {
             // load missions + last_seen_block
-            var missions = new List<(string addr, long fromBlock)>();
+            var missions = new List<(string addr, long fromBlock, long stopAt)>();
             var latest  = latestOverride ?? await GetLatestBlockAsync();
             var tipSafe = latest - REORG_CUSHION;
             if (tipSafe <= 0) return;
@@ -786,35 +831,65 @@ namespace B6.Indexer
             {
                 await conn.OpenAsync(token);
                 await using var cmd = new NpgsqlCommand(@"
-                    select mission_address, coalesce(last_seen_block,0) as from_block
-                    from missions
-                    where coalesce(last_seen_block,0) < @safeTip
-                    and (coalesce(status,0) < 6 
-                        or coalesce(realtime_status,0) not in (6,7))
-                    order by mission_address;", conn);
-                cmd.Parameters.AddWithValue("safeTip", tipSafe);                        // ← NEW
+                    select
+                        m.mission_address,
+                        coalesce(m.last_seen_block,0)::bigint as from_block,
+                        coalesce((
+                            select max(h.block_number)::bigint
+                            from mission_status_history h
+                            where h.mission_address = m.mission_address
+                            and h.to_status in (6,7)
+                        ), null) as final_blk,
+                        coalesce(m.status,0)::smallint as status,
+                        case when coalesce(m.status,0) = 7 then
+                            not exists (
+                                select 1
+                                from mission_enrollments e
+                                where e.mission_address = m.mission_address
+                                and coalesce(e.refunded, false) = false
+                            )
+                        else true end as all_refunded_or_not_needed
+                    from missions m
+                    where coalesce(m.last_seen_block,0) < @safeTip
+                    and coalesce(m.status,0) not in (0,2)
+                    order by m.mission_address;", conn);
+
+                cmd.Parameters.AddWithValue("safeTip", tipSafe);
+
                 await using var rd = await cmd.ExecuteReaderAsync(token);
                 while (await rd.ReadAsync(token))
                 {
-                    var a = (rd["mission_address"] as string ?? "").ToLower(CultureInfo.InvariantCulture);
-                    var f = (long)rd["from_block"];
-                    missions.Add((a, f));
+                    var a       = (rd["mission_address"] as string ?? "").ToLower(CultureInfo.InvariantCulture);
+                    var from    = Convert.ToInt64(rd["from_block"]);
+                    var status  = Convert.ToInt16(rd["status"]);
+                    var finalOb = rd["final_blk"];
+                    long? final = finalOb is DBNull ? (long?)null : (long)finalOb;
+                    var allOk   = (bool)rd["all_refunded_or_not_needed"];
+
+                    long stopAt = tipSafe;
+                    if (final is long fb && (status == 6 || (status == 7 && allOk)))
+                    {
+                        var freeze = fb + REORG_CUSHION;
+                        stopAt = Math.Min(tipSafe, freeze);
+                    }
+
+                    missions.Add((a, from, stopAt));
                 }
             }
             if (missions.Count == 0) return;
 
             var windowsBudget = _maxWinTotal;
 
-            foreach (var (addr, lastSeen) in missions)
+            foreach (var (addr, lastSeen, stopAt) in missions)
             {
                 if (windowsBudget <= 0) break;
                 var start = Math.Max(0, lastSeen + 1);
 
                 long windowFrom = start;
                 int windowsDone = 0;
-                while (windowFrom <= tipSafe && windowsDone < _maxWinPerMission && windowsBudget > 0)
+                while (windowFrom <= stopAt && windowsDone < _maxWinPerMission && windowsBudget > 0)
                 {
-                    long windowTo = Math.Min(windowFrom + MAX_LOG_RANGE, tipSafe);
+                    long windowTo = Math.Min(windowFrom + MAX_LOG_RANGE, stopAt);
 
                     // collectors to push AFTER commit
                     var pushRounds   = new List<(short round, string winner, string amountWei)>();
@@ -863,7 +938,8 @@ namespace B6.Indexer
 
                             foreach (var log in rawLogs ?? Array.Empty<FilterLog>())
                             {
-                                var topic0 = log.Topics?.Length > 0 ? log.Topics[0] : null;
+                                // make sure topic0 is a string (Nethereum FilterLog.Topics is object[])
+                                string? topic0 = (log.Topics != null && log.Topics.Length > 0) ? log.Topics[0] as string : null;
 
                                 if (scanMissionStatus && string.Equals(topic0, sigStatus, StringComparison.OrdinalIgnoreCase))
                                 {
@@ -887,14 +963,43 @@ namespace B6.Indexer
                                 }
                                 else if (string.Equals(topic0, sigMR, StringComparison.OrdinalIgnoreCase))
                                 {
+                                    var dec = Event<MissionRefundedEventDTO>.DecodeEvent(log);
+                                    if (dec != null) mrLogs.Add(dec);
+                                }
+                                else
+                                {
+                                    // ── Fallback (signature-agnostic) ─────────────────────────────────────────
+                                    // Accept refunds by SHAPE to tolerate minor ABI/signature drift without
+                                    // touching DTOs. We only add when decode succeeds AND the shape looks right.
+
                                     try
                                     {
-                                        var dec = Event<MissionRefundedEventDTO>.DecodeEvent(log);
-                                        if (dec != null) mrLogs.Add(dec);
+                                        // Single-player refund: topics == 2 (sig + player), data = 32 bytes (amount)
+                                        if ((log.Topics?.Length ?? 0) == 2)
+                                        {
+                                            var hex = log.Data ?? string.Empty;
+                                            var bytes = string.IsNullOrEmpty(hex) ? 0 : ((hex.StartsWith("0x") ? hex.Length - 2 : hex.Length) / 2);
+                                            if (bytes == 32)
+                                            {
+                                                var dec = Event<PlayerRefundedEventDTO>.DecodeEvent(log);
+                                                if (dec != null && !string.IsNullOrEmpty(dec.Event.Player))
+                                                    prLogs.Add(dec);
+                                            }
+                                        }
+                                        // Batch refund: topics == 3 (sig + 2 indexed scalars), data contains address[]
+                                        else if ((log.Topics?.Length ?? 0) == 3)
+                                        {
+                                            var dec = Event<MissionRefundedEventDTO>.DecodeEvent(log);
+                                            if (dec != null && dec.Event.Players != null && dec.Event.Players.Count > 0)
+                                                mrLogs.Add(dec);
+                                        }
                                     }
-                                    catch (Exception ex) { _log.LogWarning(ex, "MissionRefunded decode failed for {addr}", addr); }
+                                    catch
+                                    {
+                                        // ignore: not a refund log
+                                    }
+                                    // ──────────────────────────────────────────────────────────────────────────
                                 }
-
                             }
 
                             // Collect unique block numbers across this window’s logs

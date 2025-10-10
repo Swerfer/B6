@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("B6.Indexer")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+124b684c457e083c10efac4da0216bf1f6ebd9d2")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+d79d7043931ed7ffba6e6c862a636fb518dad6dc")]
 [assembly: System.Reflection.AssemblyProductAttribute("B6.Indexer")]
 [assembly: System.Reflection.AssemblyTitleAttribute("B6.Indexer")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

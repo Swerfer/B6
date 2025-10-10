@@ -131,5 +131,4 @@ namespace B6.Contracts
         [Parameter("uint8",   "missionRounds",        13, false)] public byte       MissionRounds           { get; set; }
     }
 
-
 }
