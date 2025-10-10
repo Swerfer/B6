@@ -418,7 +418,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         m.round_count,
         m.cro_start_wei::text          as cro_start_wei,
         m.cro_current_wei::text        as cro_current_wei,
-        m.cro_initial_wei::text        as cro_initial_wei,
+        coalesce(m.cro_initial_wei, 0)::text as cro_initial_wei,
         m.pause_timestamp,
         m.last_seen_block,
         m.updated_at,

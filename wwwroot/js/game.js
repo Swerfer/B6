@@ -305,17 +305,18 @@ function        enrichMissionFromApi(data){
   // Fallbacks so HUD pills show live values even if API hasn’t denormalized yet
   if (Array.isArray(m.enrollments)) {
 
-    // Pool (current) during Enrolling: start + fee * joined (no payouts yet)
+    // Pool (current) during Enrolling: initial + fee * joined (no payouts yet)
     if (Number(m.status) === 1 &&
         m.cro_current_wei == null &&
-        m.cro_start_wei != null &&
+        m.cro_initial_wei != null &&
         m.enrollment_amount_wei != null) {
-      const startWei = BigInt(String(m.cro_start_wei || "0"));
-      const feeWei   = BigInt(String(m.enrollment_amount_wei || "0"));
-      const joined   = BigInt(m.enrollments.length);
-      m.cro_current_wei = (startWei + feeWei * joined).toString();
+      const initialWei = BigInt(String(m.cro_initial_wei || "0"));
+      const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
+      const joined     = BigInt(m.enrollments.length);
+      m.cro_current_wei = (initialWei + feeWei * joined).toString();
     }
   }
+
   return m;
 }
 
@@ -926,21 +927,23 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
               buildStageLowerHudForStatus({ ...m2, status: 3 });
             } else if (next === 2) {
               // Enrolling → Arming:
-              // Ensure Pool (start) equals the *final* enrollment pool immediately.
-              // If we already know cro_current_wei (from enrolling enrichment), use it to set cro_start_wei.
-              if (m2?.cro_current_wei != null) {
-                m2.cro_start_wei = String(m2.cro_current_wei);
-              } else {
-                // Fallback: derive from start + fee * joined (same formula as enrolling enrichment)
-                try {
-                  const startWei = BigInt(String(m2.cro_start_wei || "0"));
-                  const feeWei   = BigInt(String(m2.enrollment_amount_wei || "0"));
-                  const joined   = BigInt(Array.isArray(m2.enrollments) ? m2.enrollments.length : 0);
-                  m2.cro_start_wei = (startWei + feeWei * joined).toString();
-                } catch {}
-              }
+              // Freeze Pool (start) to the final enrollment pool immediately:
+              // cro_start_wei = cro_initial_wei + fee * joined
+              try {
+                const initialWei = BigInt(String(m2.cro_initial_wei || "0"));
+                const feeWei     = BigInt(String(m2.enrollment_amount_wei || "0"));
+                const joined     = BigInt(Array.isArray(m2.enrollments) ? m2.enrollments.length : 0);
+
+                // If we already computed current via enrichment, prefer that; else compute now from initial
+                const currentFromEnrolling = (m2?.cro_current_wei != null) ? BigInt(String(m2.cro_current_wei)) : null;
+                const computedFinal        = initialWei + feeWei * joined;
+                const finalStart           = (currentFromEnrolling != null) ? currentFromEnrolling : computedFinal;
+
+                m2.cro_start_wei = finalStart.toString();
+              } catch {}
 
               // Paint immediately with corrected Pool (start), then hydrate to confirm
+
               await rehydratePillsFromChain(m2, "deadlineFlip-enrolling→arming", true);
               buildStageLowerHudForStatus(m2);
             } else {
@@ -1398,11 +1401,16 @@ async function  startHub() { // SignalR HUB
           buildStageLowerHudForStatus(mLocal);
         } else {
           if (target === 2) {
-            // Prevent pool regression flash: ensure Arming uses the final Enrolling pool
-            const cur = String(mLocal?.cro_current_wei ?? "");
-            if (cur) {
-              mLocal.cro_start_wei = cur;
-            }
+            // Prevent pool regression flash:
+            // Freeze Pool (start) from cro_initial_wei + fee * joined (or current if already enriched).
+            try {
+              const feeWei  = BigInt(String(mLocal.enrollment_amount_wei || "0"));
+              const joined  = BigInt(Array.isArray(mLocal.enrollments) ? mLocal.enrollments.length : 0);
+              const initial = BigInt(String(mLocal.cro_initial_wei || "0"));
+              const curOpt  = (mLocal?.cro_current_wei != null) ? BigInt(String(mLocal.cro_current_wei)) : null;
+              const finalStart = (curOpt != null) ? curOpt : (initial + feeWei * joined);
+              mLocal.cro_start_wei = finalStart.toString();
+            } catch {}
           }
           if (target >= 5) {
             mLocal.cro_current_wei = "0";
@@ -2202,11 +2210,11 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
   poolStart:      { label: "Pool (start)",     value: m => (m && m.cro_start_wei    != null)      ? `${weiToCro(m.cro_start_wei, 2)} CRO`    : "—" },
   poolCurrent:    { label: "Pool (current)",   value: m => {
     if (m?.cro_current_wei != null) return `${weiToCro(m.cro_current_wei, 2)} CRO`;
-    if (Number(m?.status) === 1 && Array.isArray(m?.enrollments) && m?.cro_start_wei != null && m?.enrollment_amount_wei != null){
-      const startWei = BigInt(String(m.cro_start_wei || "0"));
-      const feeWei   = BigInt(String(m.enrollment_amount_wei || "0"));
-      const joined   = BigInt(m.enrollments.length || 0);
-      return `${weiToCro((startWei + feeWei * joined).toString(), 2)} CRO`;
+    if (Number(m?.status) === 1 && Array.isArray(m?.enrollments) && m?.cro_initial_wei != null && m?.enrollment_amount_wei != null){
+      const initialWei = BigInt(String(m.cro_initial_wei || "0"));
+      const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
+      const joined     = BigInt(m.enrollments.length || 0);
+      return `${weiToCro((initialWei + feeWei * joined).toString(), 2)} CRO`;
     }
     return "—";
   }},
@@ -2306,16 +2314,16 @@ async function  rehydratePillsFromChain(missionOverride = null, why = "", force 
 
     // 3) Pool: prefer chain truth; avoid enrollment fallback in Active/Paused
     const chainNow = tuple?.croCurrent != null ? String(tuple.croCurrent) : "";
-    const feeWei   = BigInt(String(mSnap.enrollment_amount_wei || "0"));
-    const startWei = BigInt(String(mSnap.cro_start_wei        || "0"));
-    const derived  = (startWei + feeWei * BigInt(playersCnt)).toString();
+    const feeWei     = BigInt(String(mSnap.enrollment_amount_wei || "0"));
+    const initialWei = BigInt(String(mSnap.cro_initial_wei       || "0"));
+    const derived    = (initialWei + feeWei * BigInt(playersCnt)).toString();
 
     let croNow;
     const stNum = Number(mSnap?.status);
     if (chainNow) {
       croNow = chainNow;
     } else if (stNum === 1) {
-      // Enrolling only: start + fee * joined
+      // Enrolling only: initial + fee * joined
       croNow = derived;
     } else {
       // keep last known current (don’t pass empty string through)
@@ -2816,6 +2824,11 @@ async function  renderStageCtaForStatus (mission) {
   const host = document.getElementById("stageCtaGroup");
   if (!host) return;
 
+  // ensure viewer identity is present for gating logic
+  if (window.walletAddress) {
+    mission._viewerAddr = (window.walletAddress || "").toLowerCase();
+  }
+
   const st = uiStatusFor(mission);
 
   // Ignore stale snapshots that would repaint an older CTA
@@ -3078,15 +3091,39 @@ function        renderCtaActive         (host, mission)   {
 
   // --- NEW: pre-render gating for view-only states ---
   const me = (mission._viewerAddr || (walletAddress || "")).toLowerCase();
+  const addrLc = String(mission?.mission_address || "").toLowerCase();
 
-  // joined?
-  const joined = !!(me && (mission?.enrollments || []).some(e => {
-    const p = String(e?.player_address || e?.address || e?.player || "").toLowerCase();
-    return p === me;
-  }));
+  // joined? — trust multiple signals (flag/cache/API), then refine with chain
+  let joined =
+    !!(me) && (
+      mission?._joinedByMe === true ||                              // set on successful local join
+      joinedCacheHas(addrLc, me) ||                                 // local storage cache
+      (mission?.enrollments || []).some(e => {                      // API snapshot
+        const p = String(e?.player_address || e?.address || e?.player || "").toLowerCase();
+        return p === me;
+      })
+    );
+
+  // If still unsure, kick a fast chain probe and re-render CTA on success.
+  if (!joined && me && addrLc) {
+    (async () => {
+      try {
+        const ro = getReadProvider();
+        const mc = new ethers.Contract(addrLc, MISSION_ABI, ro);
+        const md = await withTimeout(mc.getMissionData(), 2500).catch(() => null);
+        const tuple   = md?.[0] || md || {};
+        const players = (tuple?.players || []).map(a => String(a).toLowerCase());
+        if (players.includes(me)) {
+          // Remember and repaint CTA as BANK IT (no reload needed)
+          mission._joinedByMe = true;
+          try { joinedCacheAdd(addrLc, me); } catch {}
+          renderStageCtaForStatus(mission);
+        }
+      } catch {}
+    })();
+  }
 
   // already won any round?
-  const addrLc = String(mission?.mission_address || "").toLowerCase();
   const alreadyWon = !!(me && (
     __viewerWonOnce.has(addrLc) ||
     (mission?.rounds || []).some(r => {
@@ -4117,8 +4154,8 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
         <div class="label">Updated</div>
         <div class="value">
           <span id="updatedAtStamp"
-                data-updated="${mission.updated_at}">
-            ${formatLocalDateTime(mission.updated_at)}
+                data-updated="${Math.max(mission.updated_at || 0, Math.floor((__lastPushTs || 0)/1000))}">
+            ${formatLocalDateTime(Math.max(mission.updated_at || 0, Math.floor(Date.now()/1000)))}
           </span>
           <i id="updatedAtIcon"
             class="fa-solid fa-circle-exclamation ms-1 text-error"
@@ -4164,15 +4201,23 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
       const lastPushAgeMs = Date.now() - (__lastPushTs || 0);
       const pushQuiet = lastPushAgeMs > 75000; // ~75s without any push
 
-      const stale = staleAge;
-      stamp.classList.toggle("text-error", stale);
-      if (icon) icon.style.display = stale ? "inline-block" : "none";
+      // Only flag/warn during live states (1=enrolling, 2=arming, 3=active, 4=paused)
+      const liveState = [1, 2, 3, 4].includes(Number(mission.status));
 
-      if (stale && pushQuiet && !staleWarningShown) {
-        showAlert("Live data looks quiet for over a 2 minutes. Try reloading or check your connection.", "warning");
+      // Visual staleness marker shown only for live missions
+      const showStaleMarker = liveState && staleAge;
+      stamp.classList.toggle("text-error", showStaleMarker);
+      if (icon) icon.style.display = showStaleMarker ? "inline-block" : "none";
+
+      // Modal warning only for live missions
+      const warn = liveState && staleAge && pushQuiet;
+      if (warn && !staleWarningShown) {
+        showAlert("Live data looks quiet for over 2 minutes. Try reloading or check your connection.", "warning");
         staleWarningShown = true;
       }
-      if (!stale) {
+
+      // If no longer stale (or not live), ensure any warning is cleared
+      if (!warn) {
         staleWarningShown = false;
         const alertModal   = document.getElementById("alertModal");
         const modalOverlay = document.getElementById("modalOverlay");
