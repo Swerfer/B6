@@ -35,8 +35,8 @@
     <link rel="manifest" href="/site.webmanifest" />
     
     <!-- CSS -->
-    <link rel="stylesheet" href="css/core.css?v601">
-    <link rel="stylesheet" href="css/game.css?v601">      
+    <link rel="stylesheet" href="css/core.css?v602">
+    <link rel="stylesheet" href="css/game.css?v602">      
 
     <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet';">
     <noscript>
@@ -52,7 +52,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
     <!-- onze connect-logica -->
-    <script type="module" src="js/game.js?v601"></script>
+    <script type="module" src="js/game.js?v602"></script>
   </head>
   <body>
 
@@ -126,6 +126,47 @@
                   font-size="22" fill="#4AB8F9"
                   stroke="rgba(0,0,0,.25)" stroke-width="3" paint-order="stroke fill">
             </text>
+
+            <!-- Center digital display (SVG) -->
+            <g id="vaultDisplay" transform="translate(501 417)">
+              <!-- Metal bezel -->
+              <defs>
+                <!-- Darker, more “vault-like” dial that matches top/bottom tones -->
+                <radialGradient id="vdBezel" cx="50%" cy="44%" r="70%">
+                  <stop offset="0%"   stop-color="#1b242c"/>
+                  <stop offset="62%"  stop-color="#141b22"/>
+                  <stop offset="100%" stop-color="#0a1016"/>
+                </radialGradient>
+                <linearGradient id="vdGlass" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%"   stop-color="rgba(170,230,255,.28)"/>
+                  <stop offset="100%" stop-color="rgba(20,46,70,.40)"/>
+                </linearGradient>
+                <filter id="vdGlow" x="-50%" y="-50%" width="200%" height="200%">
+                  <feDropShadow dx="0" dy="0" stdDeviation="1.6" flood-color="#55d6ff" flood-opacity=".85"/>
+                </filter>
+              </defs>
+
+              <!-- bezel disc (sits behind) -->
+              <circle r="38" fill="url(#vdBezel)"/>
+              <!-- glass slot (more padding around digits) -->
+              <rect x="-30.5" y="-17" width="61" height="34" rx="8" ry="8"
+                    fill="url(#vdGlass)" stroke="rgba(72,221,255,.45)" stroke-width="1.5"/>
+
+              <!-- 7-segment digits mount (shifted slightly left; closer spacing) -->
+              <g id="vdDigits" transform="translate(-18 0)">
+                <g class="vdDigit" data-pos="0"></g>
+                <g class="vdDigit" data-pos="1" transform="translate(18 0)"></g>
+              </g>
+
+              <!-- unit badge (moved left and slightly larger “H”) -->
+              <g id="vdUnit" transform="translate(24 0)">
+                <rect x="-11" y="-11" width="22" height="22" rx="11" ry="11"
+                      fill="rgba(12,28,40,.88)" stroke="rgba(72,221,255,.50)" stroke-width="1.2"/>
+                <text id="vdUnitText" x="0" y="0" text-anchor="middle"
+                  dominant-baseline="middle" alignment-baseline="middle"
+                  dx="0.5" dy="1.0" font-family="system-ui,Segoe UI,Arial" font-size="14" fill="#bfe6ff">H</text>
+              </g>
+            </g>
 
             <!-- LOWER HUD (Pending): two rows of pills -->
             <g id="stageLowerHud">

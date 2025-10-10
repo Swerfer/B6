@@ -750,6 +750,9 @@ function        setVaultOpen(isOpen, force = false){
   const timer = document.getElementById("vaultTimerText");
   if (timer) timer.style.display = isOpen ? "none" : "";
 
+  const vd = document.getElementById("vaultDisplay");
+  if (vd) vd.style.display = isOpen ? "none" : "";
+
   const ringCover = document.getElementById("ringCover");
   if (ringCover) ringCover.style.display = isOpen ? "none" : "";
 
@@ -812,6 +815,8 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
 
     // center text only formats; does not drive windows
     node.textContent = formatStageShort(left);
+    // Mirror the value into the new digital display
+    try { setVaultDisplay(node.textContent); } catch {}
 
     // NEW: tick lower-HUD countdown pills (full d hh:mm:ss)
     document.querySelectorAll('#stageLowerHud [data-countdown], #stageCtaGroup [data-countdown]').forEach(el => {
@@ -983,6 +988,144 @@ function        formatStageShort(leftSec){
   if (s > 90*60)   return Math.round(s/3600)  + "H";   // > 90m → hours
   if (s > 90)      return Math.round(s/60)    + "M";   // > 90s  → minutes
   return s + "S";                                      // ≤ 90s → seconds
+}
+
+// === Center digital display (7-segment) =====================================
+
+function        ensureVaultDisplayBuilt(){
+  const root = document.getElementById('vaultDisplay');
+  if (!root) return null;
+
+  // If segments already exist, skip
+  if (root.__built) return root;
+  root.__built = true;
+
+  // For each digit group, draw 7 segments (A..G)
+  const segW = 12, segT = 2.6;   // a touch thicker for legibility
+  const on   = "#6ED3FF";        // brighter ON
+  const off  = "rgba(110,211,255,.12)"; // dimmer OFF for contrast
+
+  // How much to shorten the RIGHT side of the three horizontals (px)
+  const H_TRIM = 1.6; // try 1.0–2.2
+
+  // How much to trim top/bottom of verticals (px)
+  const V_TRIM_TOP = 1.0, V_TRIM_BOTTOM = 1.2; // try 0.8–1.6
+
+  // Horizontal with centered tips (diamond ends) and optional RIGHT trim
+  const mkH = (x, y, w, t, rTrim = 0, lTrim = 0) => {
+    const ht  = t / 2;
+    const hw  = (w - rTrim - lTrim) / 2;
+    const xL  = x - hw;
+    const xR  = x + hw;
+    // polygon: left tip → top edge → right tip → bottom edge
+    return `
+      M ${xL - ht} ${y}
+      L ${xL} ${y - ht}
+      L ${xR} ${y - ht}
+      L ${xR + ht} ${y}
+      L ${xR} ${y + ht}
+      L ${xL} ${y + ht}
+      Z
+    `;
+  };
+
+  // Vertical with centered tips (diamond ends) and top/bottom trims
+  const mkV = (x, y, w, t, tTrim = 0, bTrim = 0) => {
+    const ht  = t / 2;
+    const hv  = (w - tTrim - bTrim) / 2;
+    const yT  = y - hv;          // trimmed top
+    const yB  = y + hv;          // trimmed bottom
+    return `
+      M ${x - ht} ${yT}
+      L ${x} ${yT - ht}
+      L ${x + ht} ${yT}
+      L ${x + ht} ${yB}
+      L ${x} ${yB + ht}
+      L ${x - ht} ${yB}
+      Z
+    `;
+  };
+
+  const segDefs = [
+    { id: 'A', d: mkH(0, -segW, segW, segT, H_TRIM, 0) },
+    { id: 'B', d: mkV( segW/2, -segW/2, segW, segT, V_TRIM_TOP, V_TRIM_BOTTOM) },
+    { id: 'C', d: mkV( segW/2,  segW/2, segW, segT, V_TRIM_TOP, V_TRIM_BOTTOM) },
+    { id: 'D', d: mkH(0,  segW,  segW, segT, H_TRIM, 0) },
+    { id: 'E', d: mkV(-segW/2,  segW/2, segW, segT, V_TRIM_TOP, V_TRIM_BOTTOM) },
+    { id: 'F', d: mkV(-segW/2, -segW/2, segW, segT, V_TRIM_TOP, V_TRIM_BOTTOM) },
+    { id: 'G', d: mkH(0, 0, segW, segT, H_TRIM, 0) },
+  ];
+
+  const map = {
+    "0": "A B C D E F",
+    "1": "B C",
+    "2": "A B D E G",
+    "3": "A B C D G",
+    "4": "B C F G",
+    "5": "A C D F G",
+    "6": "A C D E F G",
+    "7": "A B C",
+    "8": "A B C D E F G",
+    "9": "A B C D F G"
+  };
+  root.__segMap = map;
+
+  const digitsHost = root.querySelector('#vdDigits');
+  digitsHost.querySelectorAll('.vdDigit').forEach(dg => {
+    segDefs.forEach(s => {
+      const p = document.createElementNS(SVG_NS, 'path');
+      p.setAttribute('d', s.d);
+      p.setAttribute('class', 'seg');
+      p.setAttribute('data-seg', s.id);
+      p.setAttribute('fill', off);
+      dg.appendChild(p);
+    });
+  });
+
+  // Colors for quick toggles
+  root.__segOn  = on;
+  root.__segOff = off;
+
+  return root;
+}
+
+function        setVaultDisplay(valueStr){
+  const root = ensureVaultDisplayBuilt();
+  if (!root) return;
+
+  // Expect things like "22H", "8M", "45S", "2D"
+  valueStr = String(valueStr || "").toUpperCase().trim();
+  const unit = valueStr.slice(-1);
+  const num  = valueStr.slice(0, -1);
+
+  // Left-pad number to 2 digits (blank is allowed on the left)
+  let d0 = " ", d1 = " ";
+  if (num.length === 1) d1 = num;
+  else if (num.length >= 2){ d0 = num[num.length - 2]; d1 = num[num.length - 1]; }
+
+  // Update two digit groups
+  const map   = root.__segMap;
+  const color = (dg, set) => {
+    dg.querySelectorAll('[data-seg]').forEach(seg => {
+      const id = seg.getAttribute('data-seg');
+      const isOn = set.has(id);
+      seg.setAttribute('fill', isOn ? root.__segOn : root.__segOff);
+      if (isOn) seg.setAttribute('filter', 'url(#vdGlow)');
+      else      seg.removeAttribute('filter');
+    });
+  };
+
+  const digs = root.querySelectorAll('.vdDigit');
+  [d0, d1].forEach((ch, idx) => {
+    const g  = digs[idx];
+    const key= (ch === " ") ? "" : (map[ch] ? ch : " "); // blank or mapped digit
+    const on = new Set((map[key] || "").split(/\s+/).filter(Boolean));
+    color(g, on);
+  });
+
+  // Unit badge letter
+  const unitText = root.querySelector('#vdUnitText');
+  unitText.textContent = (unit || "").slice(0,1);
 }
 
 function        stageUnitFor(leftSec){ // Unit classifier used by the center text and the ring "reset" windows
@@ -1971,6 +2114,8 @@ function setRingAndTimerVisible(visible){
   const disp = visible ? "" : "none";
   const timer = document.getElementById("vaultTimerText");
   if (timer) timer.style.display = disp;
+  const vd = document.getElementById("vaultDisplay");
+  if (vd) vd.style.display = disp;
   const ringCover = document.getElementById("ringCover");
   if (ringCover) ringCover.style.display = disp;
   const ringTrack = document.getElementById("ringTrack");

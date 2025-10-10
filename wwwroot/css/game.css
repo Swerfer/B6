@@ -87,7 +87,7 @@ body.scroll-lock{
   object-fit: contain;
   pointer-events: none;         /* pills/CTA stay clickable */
 }
-
+ 
 /* Title displayed at the top of the game stage */
 .stage-title{
   position:absolute;
@@ -257,3 +257,11 @@ body.scroll-lock{
 }
 
 .countdown-time { color: #eea648; /* pick your color */ }
+
+/* Digital display segments (stroke alignment help) */
+#vaultDisplay .seg {
+  vector-effect: non-scaling-stroke;
+}
+
+#vaultDisplay text { paint-order: stroke fill; stroke: rgba(0,0,0,.45); stroke-width: .8; }
+
