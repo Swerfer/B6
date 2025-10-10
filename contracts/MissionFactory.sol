@@ -1218,7 +1218,8 @@ contract Mission        is Ownable, ReentrancyGuard {
         uint256         missionStart;                   // Start time for the mission
         uint256         missionEnd;                     // End time for the mission
         uint8           missionRounds;                  // Total number of rounds in the mission
-        uint8           roundCount;                     // Current round count  
+        uint8           roundCount;                     // Current round count 
+        uint256         croInitial;                     // Initial CRO amount at the creation of the mission 
         uint256         croStart;                       // Initial CRO amount at the start of the mission
         uint256         croCurrent;                     // Current CRO amount in the mission
         PlayersWon[]    playersWon;                     // Array to hold players who won in the mission     
@@ -1317,6 +1318,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         _missionData.missionEnd              = _missionEnd;
         _missionData.missionRounds           = _missionRounds;
         _missionData.roundCount              = 0;
+        _missionData.croInitial              = msg.value;                       // Set initial CRO amount to the value sent during initialization
         _missionData.croStart                = msg.value;                       // Set initial CRO amount to the value sent during initialization
         _missionData.croCurrent              = msg.value;                       // Set current CRO amount to the value sent during initialization
         _missionData.pauseTimestamp          = 0;                               // Initialize pause time to 0

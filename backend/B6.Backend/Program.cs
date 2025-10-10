@@ -221,6 +221,7 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
         round_count,
         cro_start_wei::text          as cro_start_wei,
         cro_current_wei::text        as cro_current_wei,
+        cro_initial_wei::text        as cro_initial_wei,
         pause_timestamp,
         last_seen_block,
         updated_at
@@ -250,6 +251,7 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
             round_count            = (short) rd["round_count"],
             cro_start_wei          = (string)rd["cro_start_wei"],
             cro_current_wei        = (string)rd["cro_current_wei"],
+            cro_initial_wei        = (string)rd["cro_initial_wei"],
             pause_timestamp        = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
             last_seen_block        = rd["last_seen_block"]  is DBNull ? null : (long?) rd["last_seen_block"],
             updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime())
@@ -416,6 +418,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         m.round_count,
         m.cro_start_wei::text          as cro_start_wei,
         m.cro_current_wei::text        as cro_current_wei,
+        m.cro_initial_wei::text        as cro_initial_wei,
         m.pause_timestamp,
         m.last_seen_block,
         m.updated_at,
@@ -447,6 +450,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         round_count            = (short) rd["round_count"],
         cro_start_wei          = (string)rd["cro_start_wei"],
         cro_current_wei        = (string)rd["cro_current_wei"],
+        cro_initial_wei        = (string)rd["cro_initial_wei"],
         pause_timestamp        = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
         last_seen_block        = rd["last_seen_block"]  is DBNull ? null : (long?) rd["last_seen_block"],
         updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),

@@ -1303,9 +1303,10 @@ async function  startHub() { // SignalR HUB
       if (gameMain && gameMain.classList.contains('stage-mode')) {
 
         // 0) Ultra-fast optimistic paint: bump round pill and subtract payout from pool now
+        let m0 = null;
         try {
           const data = await apiMission(currentMissionAddr, false);
-          const m0   = enrichMissionFromApi(data);
+          m0   = enrichMissionFromApi(data);
           const played = Math.max(Number(m0.round_count || 0), Number(round || 0));
           let croAfter = m0.cro_current_wei;
           try {
@@ -1313,7 +1314,15 @@ async function  startHub() { // SignalR HUB
             croAfter   = (prev - BigInt(String(amountWei || "0"))).toString();
           } catch {}
           const mFast = { ...m0, round_count: played, cro_current_wei: croAfter };
-          buildStageLowerHudForStatus(mFast);   // <- paints pills immediately
+          buildStageLowerHudForStatus(mFast);   // pills: instant subtract
+        } catch {}
+
+        // NEW: immediately flip spectators to Paused with a fresh pause_timestamp
+        // so the accruing counter resets now (not after a later push).
+        try {
+          if (m0) {
+            await flipStageToPausedOptimistic(m0);
+          }
         } catch {}
 
         // 1) Fast: grab chain-truth so “Pool (current)” is instant for spectators
@@ -1394,6 +1403,9 @@ async function  startHub() { // SignalR HUB
             if (cur) {
               mLocal.cro_start_wei = cur;
             }
+          }
+          if (target >= 5) {
+            mLocal.cro_current_wei = "0";
           }
           buildStageLowerHudForStatus(mLocal);
           if (target === 1 || target === 2) {
@@ -1484,7 +1496,6 @@ async function  startHub() { // SignalR HUB
       }
     });
 
-    // on reconnect, re-subscribe to the open mission (if any)
     hubConnection.onreconnected(async () => {
       const H = signalR.HubConnectionState;
       if (hubConnection?.state !== H.Connected) return;
@@ -1774,12 +1785,17 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
     const m = enrichMissionFromApi(data);
 
     // Merge optimism for a short window so API can't regress the UI
+    // Grow phases (Enrolling/Arming): prefer higher; Active/Paused: prefer lower.
     if (Date.now() < (optimisticGuard?.untilMs || 0)) {
       try {
-        const apiCro     = BigInt(String(m.cro_current_wei || m.cro_start_wei || "0"));
-        const optCro     = BigInt(String(optimisticGuard.croNow || "0"));
-
-        if (optCro     > apiCro)     m.cro_current_wei  = optCro.toString();
+        const apiCro = BigInt(String(m.cro_current_wei || m.cro_start_wei || "0"));
+        const optCro = BigInt(String(optimisticGuard?.croNow || "0"));
+        const st     = Number(m.status);
+        if (st === 1 || st === 2) {
+          if (optCro > apiCro) m.cro_current_wei = optCro.toString();
+        } else if (st === 3 || st === 4) {
+          if (optCro && optCro < apiCro) m.cro_current_wei = optCro.toString();
+        }
       } catch {}
     }
 
@@ -1959,7 +1975,6 @@ function playVaultOpenVideoOnce(){
 
   __vaultVideoFlowActive = true;
   __vaultVideoEndedAwaitingResult = false;
-  __vaultVideoPendingWin = null;
 
   // Keep the vault CLOSED and HUD hidden before playback begins
   setVaultOpen(false);
@@ -2213,7 +2228,9 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
   roundsBanked: {
     label: "Rounds banked",
     value: m => {
-      const played = Number(m?.round_count ?? 0);
+      const c1 = Number(m?.round_count ?? 0);
+      const c2 = Array.isArray(m?.rounds) ? m.rounds.length : 0; // final-round-safe
+      const played = Math.max(c1, c2);
       const total  = Number(m?.mission_rounds_total ?? 0);
       return `${played}/${total}`;
     }
@@ -2312,6 +2329,24 @@ async function  rehydratePillsFromChain(missionOverride = null, why = "", force 
       if (playersCnt > __lastChainPlayers) __lastChainPlayers = playersCnt;
       if (BigInt(croNow) > BigInt(__lastChainCroWei || "0")) __lastChainCroWei = croNow;
     } catch { /* ignore BigInt issues */ }
+
+    // NEW: shrink-safe rule — while Active or Paused, do not bounce the pool up.
+    try {
+      if (stNum === 3 || stNum === 4) {
+        if (missionOverride && missionOverride.cro_current_wei != null) {
+          const ov = BigInt(String(missionOverride.cro_current_wei));
+          const cv = BigInt(String(croNow || "0"));
+          if (ov < cv) croNow = ov.toString();
+        }
+        if (Date.now() < (optimisticGuard?.untilMs || 0)) {
+          const ov = BigInt(String(optimisticGuard?.croNow || "0"));
+          const cv = BigInt(String(croNow || "0"));
+          if (ov && ov < cv) croNow = ov.toString();
+        }
+      } else if (stNum === 1 || stNum === 2) {
+        // growing phases keep the existing “prefer higher” behavior
+      }
+    } catch {}
 
     // 4) Paint
     const snapStatus = Number(mSnap?.status ?? -1);
@@ -2663,6 +2698,11 @@ async function  handleBankItClick       (mission){
 
     // Paint HUD with both new pool + incremented round
     buildStageLowerHudForStatus({ ...mission, cro_current_wei: croAfter, round_count: nextRoundCount });
+
+    // Pre-arm the video flow immediately to prevent the open-art flash
+    __vaultVideoFlowActive = true;                 // block updateVaultImageFor() from opening the art
+    setVaultOpen(false, /*force*/ true);           // keep base art closed
+    setRingAndTimerVisible(false);                 // hide HUD under the overlay
 
     // Keep your video + optimistic pause flip
     setTimeout(() => {

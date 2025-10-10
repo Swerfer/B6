@@ -19,6 +19,7 @@ using System.IO;
 using System.Net.Http;        
 using System.Net.Http.Json; 
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -50,6 +51,13 @@ namespace B6.Indexer
         private DateTime                                _rpcLogDay    = DateTime.MinValue;  // UTC date boundary
         private string                                  _rpcLogPath   = string.Empty;
         private readonly Dictionary<string,int>         _rpcCounts    = new(StringComparer.InvariantCulture);
+        // ======== NEW: 5-minute RPC summary counters ========
+        private readonly Dictionary<string,int>         _rpc5mByContext = new(StringComparer.InvariantCulture);
+        private readonly Dictionary<string, Dictionary<string,int>> _rpc5mByCaller 
+            = new(StringComparer.InvariantCulture);
+        private DateTime                                _nextRpcSummaryUtc = DateTime.MinValue;
+        private static readonly TimeSpan                _rpcSummaryPeriod = TimeSpan.FromMinutes(5);
+        // =====================================================
         // --- Benign provider hiccup rollup (daily, UTC) -------------------------------
         private DateTime                                _benignDayUtc = DateTime.MinValue;
         private readonly Dictionary<string,int>         _benignCounts = new(StringComparer.InvariantCulture);
@@ -72,7 +80,6 @@ namespace B6.Indexer
         // --- Global RPC throttle (max QPS) -------------------------------------------
         private readonly SemaphoreSlim _rpcThrottle = new(1,1);
         private DateTime _nextRpcEarliestUtc = DateTime.MinValue;
-        private readonly int _rpcMaxQps;
         private static TimeSpan PerRequestGap(int qps) => TimeSpan.FromMilliseconds(Math.Max(1, 1000 / Math.Max(1, qps)));
         private static readonly Random _rpcJitter = new Random();
         private static TimeSpan SmallJitter() => TimeSpan.FromMilliseconds(_rpcJitter.Next(15, 45));
@@ -181,7 +188,9 @@ namespace B6.Indexer
             await using var cmd = new NpgsqlCommand(@"
                 select coalesce(last_seen_block,0) as from_block
                 from missions
-                where coalesce(last_seen_block,0) < @tipSafe;", conn);
+                where coalesce(last_seen_block,0) < @tipSafe
+                and (coalesce(status,0) < 6 
+                    or coalesce(realtime_status,0) not in (6,7));", conn);
             cmd.Parameters.AddWithValue("tipSafe", tipSafe);
             await using var rd = await cmd.ExecuteReaderAsync(token);
             while (await rd.ReadAsync(token))
@@ -296,13 +305,13 @@ namespace B6.Indexer
             var rpc2 = cfg["Cronos:Rpc2"];
             if (!string.IsNullOrWhiteSpace(rpc2)) _rpcEndpoints.Add(rpc2);
 
-            _rpcMaxQps = 5;
-
             if (_rpcEndpoints.Count == 0)
                 throw new InvalidOperationException("No RPC endpoints configured (Cronos:Rpc and/or Cronos:Rpc2).");
 
             // start with first endpoint
             UseRpc(0);
+
+            _nextRpcSummaryUtc = DateTime.UtcNow.AddMinutes(1);
 
             // --- push config (optional; if empty, pushing is disabled) ---
             _pushBase = cfg["Push:BaseUrl"] ?? "";
@@ -571,13 +580,13 @@ namespace B6.Indexer
                             enrollment_start, enrollment_end, enrollment_amount_wei,
                             enrollment_min_players, enrollment_max_players, round_pause_secs, last_round_pause_secs,
                             mission_start, mission_end, mission_rounds_total, round_count,
-                            cro_start_wei, cro_current_wei, pause_timestamp, mission_created, last_seen_block, updated_at
+                            cro_start_wei, cro_current_wei, cro_initial_wei, pause_timestamp, mission_created, last_seen_block, updated_at
                             ) values (
                             @a,@n,@ty,@st,
                             @es,@ee,@amt,
                             @min,@max,@rps,@lrps,
                             @ms,@me,@rt,0,
-                            @cs,@cc,null,@mc,@blkMinus1, now()
+                            @cs,@cc,@ci,null,@mc,@blkMinus1, now()
                             )
                             on conflict (mission_address) do update set
                             name                    = coalesce(nullif(excluded.name,''), missions.name),
@@ -594,6 +603,7 @@ namespace B6.Indexer
                             -- take chain values at creation; keep existing if already nonzero
                             cro_start_wei           = CASE WHEN coalesce(missions.cro_start_wei,0)=0 THEN excluded.cro_start_wei ELSE missions.cro_start_wei END,
                             cro_current_wei         = CASE WHEN coalesce(missions.cro_current_wei,0)=0 THEN excluded.cro_current_wei ELSE missions.cro_current_wei END,
+                            cro_initial_wei         = CASE WHEN coalesce(missions.cro_initial_wei,0)=0 THEN excluded.cro_initial_wei ELSE missions.cro_initial_wei END,
 
                             mission_created         = excluded.mission_created,
                             last_seen_block         = greatest(coalesce(missions.last_seen_block,0), excluded.last_seen_block),
@@ -618,6 +628,7 @@ namespace B6.Indexer
                         // pull initial pool directly from getMissionData() we already queried above
                         up.Parameters.Add("cs", NpgsqlDbType.Numeric).Value = md.CroStart;
                         up.Parameters.Add("cc", NpgsqlDbType.Numeric).Value = md.CroCurrent;
+                        up.Parameters.Add("ci", NpgsqlDbType.Numeric).Value = md.CroStart;
 
                         var createdUnix = tsByBlock.TryGetValue(blk, out var cr)
                             ? new DateTimeOffset(cr).ToUnixTimeSeconds()
@@ -689,7 +700,10 @@ namespace B6.Indexer
                         }
 
                         await using (var up = new NpgsqlCommand(@"
-                            update missions set status = @s, updated_at = now()
+                            update missions 
+                            set status = @s, 
+                                realtime_status = @s,         -- ← ensure realtime mirrors finalized
+                                updated_at = now()
                             where mission_address = @a;", conn, tx))
                         {
                             up.Parameters.AddWithValue("a", mission);
@@ -774,7 +788,9 @@ namespace B6.Indexer
                 await using var cmd = new NpgsqlCommand(@"
                     select mission_address, coalesce(last_seen_block,0) as from_block
                     from missions
-                    where coalesce(last_seen_block,0) < @safeTip                 -- ← NEW filter
+                    where coalesce(last_seen_block,0) < @safeTip
+                    and (coalesce(status,0) < 6 
+                        or coalesce(realtime_status,0) not in (6,7))
                     order by mission_address;", conn);
                 cmd.Parameters.AddWithValue("safeTip", tipSafe);                        // ← NEW
                 await using var rd = await cmd.ExecuteReaderAsync(token);
@@ -820,59 +836,73 @@ namespace B6.Indexer
                             var mrEvt     = _web3.Eth.GetEvent<MissionRefundedEventDTO>     (addr);
                             var peEvt     = _web3.Eth.GetEvent<PlayerEnrolledEventDTO>      (addr);
 
-                            List<EventLog<MissionStatusChangedEventDTO>> statusLogs = new(); 
+                            List<EventLog<MissionStatusChangedEventDTO>> statusLogs = new();
+                            List<EventLog<RoundCalledEventDTO>>          roundLogs  = new();
+                            List<EventLog<PlayerRefundedEventDTO>>       prLogs     = new();
+                            List<EventLog<PlayerEnrolledEventDTO>>       peLogs     = new();
+                            List<EventLog<MissionRefundedEventDTO>>      mrLogs     = new();
 
-                            var roundLogs = await RunRpc(
-                                w => {
-                                    var e = w.Eth.GetEvent<RoundCalledEventDTO>(addr);
-                                    return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                                },
-                                "GetLogs.Mission.RoundCalled");
-
-                            var prLogs = await RunRpc(
-                                w => {
-                                    var e = w.Eth.GetEvent<PlayerRefundedEventDTO>(addr);
-                                    return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                                },
-                                "GetLogs.Mission.PlayerRefunded");
-
-                            var peLogs = await RunRpc(
-                                w => {
-                                    var e = w.Eth.GetEvent<PlayerEnrolledEventDTO>(addr);
-                                    return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                                },
-                                "GetLogs.Mission.PlayerEnrolled");
-
-                            // optional mission-level status logs (factory status is canonical)
-                            // flip 'scanMissionStatus' const at the top to enable/disable this query
-                            if (scanMissionStatus)
+                            var filter = new NewFilterInput
                             {
-                                statusLogs = await RunRpc(
-                                    w => {
-                                        var e = w.Eth.GetEvent<MissionStatusChangedEventDTO>(addr);
-                                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                                    },
-                                    "GetLogs.Mission.StatusChanged");
-                            }
+                                Address   = new[] { addr },
+                                FromBlock = from,
+                                ToBlock   = to,
+                                Topics    = null // all topics; we’ll route by topic[0]
+                            };
 
-                            // MissionRefunded is optional in your current code; keep the try/catch
-                            List<EventLog<MissionRefundedEventDTO>> mrLogs = new();
-                            try
+                            var rawLogs = await RunRpc(
+                                w => w.Eth.Filters.GetLogs.SendRequestAsync(filter),
+                                "GetLogs.Mission.WindowAll");
+
+                            // Route raw logs to typed DTOs by the first topic (event signature)
+                            var sigStatus = statusEvt.EventABI.Sha3Signature;    // topic[0]
+                            var sigRound  = roundEvt.EventABI.Sha3Signature;
+                            var sigPR     = prEvt.EventABI.Sha3Signature;
+                            var sigMR     = mrEvt.EventABI.Sha3Signature;
+                            var sigPE     = peEvt.EventABI.Sha3Signature;
+
+                            foreach (var log in rawLogs ?? Array.Empty<FilterLog>())
                             {
-                                mrLogs = await RunRpc(
-                                    w => {
-                                        var e = w.Eth.GetEvent<MissionRefundedEventDTO>(addr);
-                                        return e.GetAllChangesAsync(e.CreateFilterInput(from, to));
-                                    },
-                                    "GetLogs.Mission.MissionRefunded");
+                                var topic0 = log.Topics?.Length > 0 ? log.Topics[0] : null;
+
+                                if (scanMissionStatus && string.Equals(topic0, sigStatus, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var dec = Event<MissionStatusChangedEventDTO>.DecodeEvent(log);
+                                    if (dec != null) statusLogs.Add(dec);
+                                }
+                                else if (string.Equals(topic0, sigRound, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var dec = Event<RoundCalledEventDTO>.DecodeEvent(log);
+                                    if (dec != null) roundLogs.Add(dec);
+                                }
+                                else if (string.Equals(topic0, sigPR, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var dec = Event<PlayerRefundedEventDTO>.DecodeEvent(log);
+                                    if (dec != null) prLogs.Add(dec);
+                                }
+                                else if (string.Equals(topic0, sigPE, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var dec = Event<PlayerEnrolledEventDTO>.DecodeEvent(log);
+                                    if (dec != null) peLogs.Add(dec);
+                                }
+                                else if (string.Equals(topic0, sigMR, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    try
+                                    {
+                                        var dec = Event<MissionRefundedEventDTO>.DecodeEvent(log);
+                                        if (dec != null) mrLogs.Add(dec);
+                                    }
+                                    catch (Exception ex) { _log.LogWarning(ex, "MissionRefunded decode failed for {addr}", addr); }
+                                }
+
                             }
-                            catch (Exception ex) { _log.LogWarning(ex, "MissionRefunded decode failed for {addr}", addr); }
 
                             // Collect unique block numbers across this window’s logs
                             var blockNums = new HashSet<long>();
                             foreach (var ev in peLogs)     blockNums.Add((long)ev.Log.BlockNumber.Value);
                             foreach (var ev in roundLogs)  blockNums.Add((long)ev.Log.BlockNumber.Value);
                             foreach (var ev in statusLogs) blockNums.Add((long)ev.Log.BlockNumber.Value);
+                            foreach (var ev in mrLogs)     blockNums.Add((long)ev.Log.BlockNumber.Value);
                             var tsByBlock = await GetBlockTimestampsAsync(blockNums);
 
                             await using var conn = new NpgsqlConnection(_pg);
@@ -1182,13 +1212,13 @@ namespace B6.Indexer
                 enrollment_start, enrollment_end, enrollment_amount_wei,
                 enrollment_min_players, enrollment_max_players,
                 mission_start, mission_end, mission_rounds_total, round_count,
-                cro_start_wei, cro_current_wei, pause_timestamp, mission_created, last_seen_block, updated_at
+                cro_start_wei, cro_current_wei, cro_initial_wei, pause_timestamp, mission_created, last_seen_block, updated_at
                 ) values (
                 @a,@n,@ty,@st,
                 @es,@ee,@amt,
                 @min,@max,
                 @ms,@me,@rt,@rc,
-                @cs,@cc,@pt,@mc,@blk, now()
+                @cs,@cc,@ci,@pt,@mc,@blk, now()
                 )
                 on conflict (mission_address) do update set
                 name                    = excluded.name,
@@ -1205,6 +1235,7 @@ namespace B6.Indexer
                 round_count             = excluded.round_count,
                 cro_start_wei           = excluded.cro_start_wei,
                 cro_current_wei         = excluded.cro_current_wei,
+                cro_initial_wei         = CASE WHEN coalesce(missions.cro_initial_wei,0)=0 THEN excluded.cro_initial_wei ELSE missions.cro_initial_wei END,
                 pause_timestamp         = excluded.pause_timestamp,
                 mission_created         = excluded.mission_created,
                 last_seen_block         = GREATEST(COALESCE(missions.last_seen_block,0), excluded.last_seen_block),
@@ -1232,6 +1263,7 @@ namespace B6.Indexer
 
                 up.Parameters.Add("cs", NpgsqlDbType.Numeric).Value = md.CroStart;
                 up.Parameters.Add("cc", NpgsqlDbType.Numeric).Value = md.CroCurrent;
+                up.Parameters.Add("ci", NpgsqlDbType.Numeric).Value = md.CroStart;
 
                 up.Parameters.AddWithValue("pt",  ToInt64(md.PauseTimestamp));
                 up.Parameters.AddWithValue("mc",  ToInt64(md.MissionCreated));
@@ -1338,10 +1370,13 @@ namespace B6.Indexer
             _log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
         }
 
-        private async Task<T>                           RunRpc<T>                   (Func<Web3, Task<T>> fn, string context) {
+        private async Task<T>                           RunRpc<T>(Func<Web3, Task<T>> fn, string context, [CallerMemberName] string caller = "") {
             var kind = NormalizeKind(context);
 
-            // NEW: evenly space this call within the current cycle
+            // Count this attempt (counts retries too, which reflects real request volume)
+            NoteRpc(context, caller);
+
+            // Evenly space this call within the current cycle
             await _pacer.GateAsync();
 
             var sw = Stopwatch.StartNew();
@@ -1354,9 +1389,7 @@ namespace B6.Indexer
             }
             catch (Exception ex) when (IsTransient(ex))
             {
-                sw.Stop();
-
-                // 1) Immediate handling of 429s: cool down + switch, log as Warning
+                // Count the retry attempt after we decide to retry (by calling NoteRpc again)
                 if (IsRateLimited(ex))
                 {
                     _log.LogWarning(ex, "{ctx} hit rate limit (429); cooling down {sec}s", context, (int)RATE_LIMIT_COOLDOWN.TotalSeconds);
@@ -1364,19 +1397,19 @@ namespace B6.Indexer
                 }
                 else if (TryGetBenignProviderCode(ex, out var code))
                 {
-                    // 2) Benign hiccup: count & quick retry on the SAME endpoint, no warning log
                     NoteBenign(kind, code);
                     try { await Task.Delay(_benignRetryDelay); } catch { }
                     try
                     {
-                        var res0 = await fn(_web3); // retry without switching
+                        // retry on same endpoint → new attempt
+                        NoteRpc(context, caller);
+                        var res0 = await fn(_web3);
                         if (logRpcCalls) RpcFileLog(kind, $"{context} ✓ after benign {code} in {sw.ElapsedMilliseconds} ms");
                         return res0;
                     }
                     catch (Exception ex2) when (IsTransient(ex2))
                     {
-                        // fall through to switch logic below
-                        ex = ex2;
+                        ex = ex2; // fall through
                     }
                 }
 
@@ -1386,10 +1419,12 @@ namespace B6.Indexer
                 try { switched = SwitchRpc(); }
                 catch (Exception sx) { _log.LogWarning(sx, "SwitchRpc() failed while handling transient error for {ctx}", context); }
 
-                if (!switched) throw; // bubble to final catch
+                if (!switched) throw;
 
                 _log.LogWarning(ex, "{ctx} failed; switched RPC and retrying", context);
 
+                // retry after switch → new attempt
+                NoteRpc(context, caller);
                 var sw2 = Stopwatch.StartNew();
                 var res2 = await fn(_web3);
                 sw2.Stop();
@@ -1402,6 +1437,64 @@ namespace B6.Indexer
                 if (logRpcCalls) RpcFileLog(kind, $"{context} ✗ in {sw.ElapsedMilliseconds} ms: {ex.GetType().Name}: {ex.Message}");
                 throw;
             }
+        }
+
+        private void                                    NoteRpc(string context, string caller) {
+            var ctx = string.IsNullOrWhiteSpace(context) ? "RPC" : context;
+            var who = string.IsNullOrWhiteSpace(caller)  ? "Unknown" : caller;
+
+            lock (_rpcLogLock)
+            {
+                _rpc5mByContext[ctx] = _rpc5mByContext.TryGetValue(ctx, out var n) ? n + 1 : 1;
+
+                if (!_rpc5mByCaller.TryGetValue(who, out var map))
+                {
+                    map = new Dictionary<string,int>(StringComparer.InvariantCulture);
+                    _rpc5mByCaller[who] = map;
+                }
+                map[ctx] = map.TryGetValue(ctx, out var c) ? c + 1 : 1;
+            }
+        }
+
+        private void                                    FlushRpcSummaryIfDue() {
+            var now = DateTime.UtcNow;
+            if (_nextRpcSummaryUtc == DateTime.MinValue) _nextRpcSummaryUtc = now + _rpcSummaryPeriod;
+            if (now < _nextRpcSummaryUtc) return;
+
+            Dictionary<string,int> byCtx;
+            Dictionary<string, Dictionary<string,int>> byCaller;
+            int total = 0;
+
+            lock (_rpcLogLock)
+            {
+                // Snapshot & reset
+                byCtx    = new Dictionary<string,int>(_rpc5mByContext, StringComparer.InvariantCulture);
+                byCaller = new Dictionary<string, Dictionary<string,int>>(StringComparer.InvariantCulture);
+                foreach (var kv in _rpc5mByCaller)
+                    byCaller[kv.Key] = new Dictionary<string,int>(kv.Value, StringComparer.InvariantCulture);
+
+                _rpc5mByContext.Clear();
+                _rpc5mByCaller.Clear();
+
+                _nextRpcSummaryUtc = now + _rpcSummaryPeriod;
+            }
+
+            foreach (var n in byCtx.Values) total += n;
+
+            // Build compact messages
+            string ctxPart = (byCtx.Count == 0)
+                ? "none"
+                : string.Join(", ", byCtx.OrderByDescending(kv => kv.Value)
+                                        .Select(kv => $"{kv.Key}={kv.Value}"));
+
+            string callerPart = (byCaller.Count == 0)
+                ? "none"
+                : string.Join(" | ", byCaller.OrderByDescending(kv => kv.Value.Values.Sum())
+                                            .Select(kv =>
+                                                $"{kv.Key}: " + string.Join(", ", kv.Value.OrderByDescending(x => x.Value)
+                                                                                        .Select(x => $"{x.Key}={x.Value}"))));
+
+            _log.LogWarning("RPC Summary (last 5m) total={total}; ByContext: {ctx}; ByCaller: {caller}", total, ctxPart, callerPart);
         }
 
         private bool                                    SwitchRpc                   () {
@@ -1693,10 +1786,10 @@ namespace B6.Indexer
                     _log.LogError(ex, "Realtime status poll failed");
                     RecordFailure(ex);
                 }
-
+                FlushRpcSummaryIfDue();
                 try { await Task.Delay(TimeSpan.FromSeconds(15), token); }
                 catch { /* cancelled */ }
-                
+                FlushRpcSummaryIfDue();
                 _log.LogInformation("Mission indexer stopping (cancellation requested).");
             }
 
