@@ -1472,7 +1472,7 @@ namespace B6.Indexer
             _rpcIndex = idx % _rpcEndpoints.Count;
             var url = _rpcEndpoints[_rpcIndex];
             _web3 = new Web3(url);
-            _log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
+            //_log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
         }
 
         private async Task<T>                           RunRpc<T>(Func<Web3, Task<T>> fn, string context, [CallerMemberName] string caller = "") {
@@ -1599,7 +1599,8 @@ namespace B6.Indexer
                                                 $"{kv.Key}: " + string.Join(", ", kv.Value.OrderByDescending(x => x.Value)
                                                                                         .Select(x => $"{x.Key}={x.Value}"))));
 
-            _log.LogWarning("RPC Summary (last 5m) total={total}; ByContext: {ctx}; ByCaller: {caller}", total, ctxPart, callerPart);
+            _log.LogInformation(new EventId(9001, "RpcSummary"), "RPC Summary (last 5m) total={total}; ByContext: {ctx}; ByCaller: {caller}", total, ctxPart, callerPart);
+
         }
 
         private bool                                    SwitchRpc                   () {
@@ -1789,7 +1790,7 @@ namespace B6.Indexer
         }
 
         protected override async Task                   ExecuteAsync                (CancellationToken token) {
-            _log.LogInformation("Mission indexer started (events-only). Factory={factory} RPC={rpc}", _factory, _rpc);
+            //_log.LogInformation("Mission indexer started (events-only). Factory={factory} RPC={rpc}", _factory, _rpc);
 
             try
             {
@@ -1895,7 +1896,7 @@ namespace B6.Indexer
                 try { await Task.Delay(TimeSpan.FromSeconds(15), token); }
                 catch { /* cancelled */ }
                 FlushRpcSummaryIfDue();
-                _log.LogInformation("Mission indexer stopping (cancellation requested).");
+                //_log.LogInformation("Mission indexer stopping (cancellation requested).");
             }
 
         }
@@ -2148,7 +2149,7 @@ namespace B6.Indexer
 
 
         private async Task                              TryAutoFinalizeAsync(string mission, CancellationToken token, byte? cachedRt = null) {
-            _log.LogInformation("TryAutoFinalizeAsync - {mission}", mission);
+            //_log.LogInformation("TryAutoFinalizeAsync - {mission}", mission);
             if (string.IsNullOrWhiteSpace(_ownerPk)) {
                 _log.LogDebug("Auto-finalize skipped for {mission}: missing Owner--PK/Owner:PK", mission);
                 return;

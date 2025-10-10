@@ -15,7 +15,6 @@ var host = Host.CreateDefaultBuilder(args)
     .UseWindowsService()
     .ConfigureAppConfiguration((ctx, cfg) =>
     {
-        // read local files first (optional), then override from Key Vault
         cfg.SetBasePath(AppContext.BaseDirectory);
         cfg.AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
         cfg.AddJsonFile($"appsettings.{ctx.HostingEnvironment.EnvironmentName}.json", optional: true, reloadOnChange: true);
@@ -27,13 +26,29 @@ var host = Host.CreateDefaultBuilder(args)
             new DefaultAzureCredential()
         );
     })
-    .ConfigureLogging(logging =>
+    .ConfigureLogging((ctx, logging) =>
     {
         logging.ClearProviders();
+
+        // Pull Logging section (so category filters from appsettings can apply)
+        logging.AddConfiguration(ctx.Configuration.GetSection("Logging"));
+
         logging.AddConsole();
 #pragma warning disable CA1416
-        logging.AddEventLog(new EventLogSettings { SourceName = "B6.Indexer" });
+        // Align SourceName with appsettings.json ("B6Indexer")
+        var src = ctx.Configuration.GetValue<string>("Logging:EventLog:SourceName") ?? "B6Indexer";
+        logging.AddEventLog(new EventLogSettings { SourceName = src });
+
+        // Keep default noise down…
+        logging.AddFilter<EventLogLoggerProvider>("Default", LogLevel.Warning);
+        logging.AddFilter<EventLogLoggerProvider>("Microsoft", LogLevel.Warning);
+        // …but allow Information for your indexer category
+        logging.AddFilter<EventLogLoggerProvider>("B6.Indexer.MissionIndexer", LogLevel.Information);
+        // Keep the lifetime “Service started successfully.” message
+        logging.AddFilter<EventLogLoggerProvider>("Microsoft.Hosting.Lifetime", LogLevel.Information);
 #pragma warning restore CA1416
+
+        // Global floor (safe): info
         logging.SetMinimumLevel(LogLevel.Information);
     })
     .ConfigureServices((ctx, services) =>
