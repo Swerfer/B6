@@ -53,10 +53,11 @@ namespace B6.Indexer
         private readonly Dictionary<string,int>         _rpcCounts    = new(StringComparer.InvariantCulture);
         // ======== NEW: 5-minute RPC summary counters ========
         private readonly Dictionary<string,int>         _rpc5mByContext = new(StringComparer.InvariantCulture);
-        private readonly Dictionary<string, Dictionary<string,int>> _rpc5mByCaller 
+        private readonly Dictionary<string, Dictionary<string,int>> _rpc1hByCaller 
             = new(StringComparer.InvariantCulture);
         private DateTime                                _nextRpcSummaryUtc = DateTime.MinValue;
-        private static readonly TimeSpan                _rpcSummaryPeriod = TimeSpan.FromMinutes(5);
+        private bool                                    _firstRPCSummary = true;
+        private static readonly TimeSpan                _rpcSummaryPeriod = TimeSpan.FromMinutes(60);
         // =====================================================
         // --- Benign provider hiccup rollup (daily, UTC) -------------------------------
         private DateTime                                _benignDayUtc = DateTime.MinValue;
@@ -1552,10 +1553,10 @@ namespace B6.Indexer
             {
                 _rpc5mByContext[ctx] = _rpc5mByContext.TryGetValue(ctx, out var n) ? n + 1 : 1;
 
-                if (!_rpc5mByCaller.TryGetValue(who, out var map))
+                if (!_rpc1hByCaller.TryGetValue(who, out var map))
                 {
                     map = new Dictionary<string,int>(StringComparer.InvariantCulture);
-                    _rpc5mByCaller[who] = map;
+                    _rpc1hByCaller[who] = map;
                 }
                 map[ctx] = map.TryGetValue(ctx, out var c) ? c + 1 : 1;
             }
@@ -1575,11 +1576,11 @@ namespace B6.Indexer
                 // Snapshot & reset
                 byCtx    = new Dictionary<string,int>(_rpc5mByContext, StringComparer.InvariantCulture);
                 byCaller = new Dictionary<string, Dictionary<string,int>>(StringComparer.InvariantCulture);
-                foreach (var kv in _rpc5mByCaller)
+                foreach (var kv in _rpc1hByCaller)
                     byCaller[kv.Key] = new Dictionary<string,int>(kv.Value, StringComparer.InvariantCulture);
 
                 _rpc5mByContext.Clear();
-                _rpc5mByCaller.Clear();
+                _rpc1hByCaller.Clear();
 
                 _nextRpcSummaryUtc = now + _rpcSummaryPeriod;
             }
@@ -1598,8 +1599,13 @@ namespace B6.Indexer
                                             .Select(kv =>
                                                 $"{kv.Key}: " + string.Join(", ", kv.Value.OrderByDescending(x => x.Value)
                                                                                         .Select(x => $"{x.Key}={x.Value}"))));
-
-            _log.LogInformation(new EventId(9001, "RpcSummary"), "RPC Summary (last 5m) total={total}; ByContext: {ctx}; ByCaller: {caller}", total, ctxPart, callerPart);
+            if (_firstRPCSummary) {
+                _firstRPCSummary = false;
+                _log.LogInformation(new EventId(9001, "RpcSummary"), "RPC Summary (first minute) total={total}; ByContext: {ctx}; ByCaller: {caller}", total, ctxPart, callerPart);
+            }
+            else {
+                _log.LogInformation(new EventId(9001, "RpcSummary"), "RPC Summary (last hour) total={total}; ByContext: {ctx}; ByCaller: {caller}", total, ctxPart, callerPart);
+            }
 
         }
 

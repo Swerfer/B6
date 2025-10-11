@@ -4713,6 +4713,8 @@ async function  init(){
   // 0) show list immediately
   showOnlySection("allMissionsSection");
 
+  document.addEventListener('click', enableVaultSoundOnce, { once: true });
+
   // 1) wire buttons BEFORE any awaited network work
   els.refreshJoinableBtn?.addEventListener("click", async () => {
     try {
@@ -4908,6 +4910,14 @@ async function  init(){
   // When network goes back online → one smart reconcile
   window.addEventListener("online", () => smartReconcile("online"));
 
+}
+
+function enableVaultSoundOnce() {
+  const vaultVideo = document.getElementById('vaultVideo');
+  if (vaultVideo) {
+    vaultVideo.muted = false;
+    vaultVideo.play().catch(err => console.warn('Autoplay with sound blocked:', err));
+  }
 }
 
 if (document.readyState === "loading"){
