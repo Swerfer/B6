@@ -30,52 +30,51 @@ namespace B6.Indexer
     public class MissionIndexer : BackgroundService
     {
         // Logger on/off ------------------------------------------------------------------------------------------------
-        private static readonly bool                    logRpcCalls = false;                // ← toggle RPC file logging
+        private static readonly bool                    logRpcCalls         = false;                // ← toggle RPC file logging
         // --------------------------------------------------------------------------------------------------------------
         private readonly ILogger<MissionIndexer>        _log;
         private readonly string                         _rpc;
         private readonly string                         _factory;
         private readonly string                         _pg;
-        private Web3                                    _web3 = default!;
+        private Web3                                    _web3               = default!;
         private readonly long                           _factoryDeployBlock;
-        private readonly List<string>                   _rpcEndpoints = new();
-        private int                                     _rpcIndex = 0;
-        private const int                               REORG_CUSHION = 3;
-        private const int                               MAX_LOG_RANGE = 1800;
-        private const bool                              scanMissionStatus = true;           // ← toggle mission-level status logs
-        private readonly HttpClient                     _http = new HttpClient();
+        private readonly List<string>                   _rpcEndpoints       = new();
+        private int                                     _rpcIndex           = 0;
+        private const int                               REORG_CUSHION       = 3;
+        private const int                               MAX_LOG_RANGE       = 1800;
+        private const bool                              scanMissionStatus   = true;           // ← toggle mission-level status logs
+        private readonly HttpClient                     _http               = new HttpClient();
         private readonly string                         _pushBase;                          // e.g. https://b6missions.com/api
         private readonly string                         _pushKey;
-        private readonly Dictionary<long, DateTime>     _blockTsCache = new();
-        private readonly object                         _rpcLogLock   = new();
-        private DateTime                                _rpcLogDay    = DateTime.MinValue;  // UTC date boundary
-        private string                                  _rpcLogPath   = string.Empty;
-        private readonly Dictionary<string,int>         _rpcCounts    = new(StringComparer.InvariantCulture);
+        private readonly Dictionary<long, DateTime>     _blockTsCache       = new();
+        private readonly object                         _rpcLogLock         = new();
+        private DateTime                                _rpcLogDay          = DateTime.MinValue;  // UTC date boundary
+        private string                                  _rpcLogPath         = string.Empty;
+        private readonly Dictionary<string,int>         _rpcCounts          = new(StringComparer.InvariantCulture);
         // ======== NEW: 5-minute RPC summary counters ========
-        private readonly Dictionary<string,int>         _rpc5mByContext = new(StringComparer.InvariantCulture);
-        private readonly Dictionary<string, Dictionary<string,int>> _rpc1hByCaller 
-            = new(StringComparer.InvariantCulture);
-        private DateTime                                _nextRpcSummaryUtc = DateTime.MinValue;
-        private bool                                    _firstRPCSummary = true;
-        private static readonly TimeSpan                _rpcSummaryPeriod = TimeSpan.FromMinutes(60);
+        private readonly Dictionary<string,int>         _rpc5mByContext     = new(StringComparer.InvariantCulture);
+        private readonly Dictionary<string, Dictionary<string,int>> _rpc1hByCaller = new(StringComparer.InvariantCulture);
+        private DateTime                                _nextRpcSummaryUtc  = DateTime.MinValue;
+        private bool                                    _firstRPCSummary    = true;
+        private static readonly TimeSpan                _rpcSummaryPeriod   = TimeSpan.FromMinutes(5);
         // =====================================================
         // --- Benign provider hiccup rollup (daily, UTC) -------------------------------
-        private DateTime                                _benignDayUtc = DateTime.MinValue;
-        private readonly Dictionary<string,int>         _benignCounts = new(StringComparer.InvariantCulture);
-        private static readonly TimeSpan                _benignRetryDelay = TimeSpan.FromMilliseconds(800);
+        private DateTime                                _benignDayUtc       = DateTime.MinValue;
+        private readonly Dictionary<string,int>         _benignCounts       = new(StringComparer.InvariantCulture);
+        private static readonly TimeSpan                _benignRetryDelay   = TimeSpan.FromMilliseconds(800);
         // -----------------------------------------------------------------------------         
         private readonly int                            _maxWinPerMission;
         private readonly int                            _maxWinTotal;
         private readonly string                         _ownerPk;                           // from Key Vault / config
         // ---- Realtime poll schedule -----------------------------------------------
-        private static readonly TimeSpan                _rtPollPeriod = TimeSpan.FromMinutes(5);
-        private DateTime                                _nextRtPollUtc = DateTime.MinValue;
+        private static readonly TimeSpan                _rtPollPeriod       = TimeSpan.FromMinutes(60);
+        private DateTime                                _nextRtPollUtc      = DateTime.MinValue;
         // ---- Circuit breaker -------------------------------------------------------
-        private int                                     _consecErrors = 0;
-        private DateTime                                _suspendUntilUtc = DateTime.MinValue;
+        private int                                     _consecErrors       = 0;
+        private DateTime                                _suspendUntilUtc    = DateTime.MinValue;
         private readonly int                            _maxConsecErrors;           // default 5
-        private static readonly TimeSpan                _suspendFor = TimeSpan.FromSeconds(60);
-        private int                                     _circuitTrips = 0;
+        private static readonly TimeSpan                _suspendFor         = TimeSpan.FromSeconds(60);
+        private int                                     _circuitTrips       = 0;
         private readonly int                            _maxCircuitTrips;           // default 12
 
         // --- Global RPC throttle (max QPS) -------------------------------------------
@@ -854,7 +853,6 @@ namespace B6.Indexer
                     where coalesce(m.last_seen_block,0) < @safeTip
                     and coalesce(m.status,0) not in (0,2)
                     order by m.mission_address;", conn);
-
                 cmd.Parameters.AddWithValue("safeTip", tipSafe);
 
                 await using var rd = await cmd.ExecuteReaderAsync(token);
@@ -873,11 +871,14 @@ namespace B6.Indexer
                         var freeze = fb + REORG_CUSHION;
                         stopAt = Math.Min(tipSafe, freeze);
                     }
-
+                    // Forced mission scans the entire window to tipSafe
                     missions.Add((a, from, stopAt));
                 }
             }
-            if (missions.Count == 0) return;
+            if (missions.Count == 0)
+            {
+                return;
+            }
 
             var windowsBudget = _maxWinTotal;
 
@@ -892,13 +893,14 @@ namespace B6.Indexer
                 {
                     long windowTo = Math.Min(windowFrom + MAX_LOG_RANGE, stopAt);
 
-                    // collectors to push AFTER commit
+                    // collectors …
+                    bool windowSucceeded = false;
+
+                    // push queues for this window (status changes + new rounds)
+                    var pushStatuses = new List<short>();
                     var pushRounds   = new List<(short round, string winner, string amountWei)>();
-                    var pushStatuses = new List<short>(); // mission-level status changes for this address
 
-                    bool windowSucceeded = false; // track if we completed this window
-
-                    // retry once on transient RPC errors (replacing goto retry_window)
+                    // retry once …
                     for (var attempt = 0; attempt < 2; attempt++)
                     {
                         try
@@ -931,26 +933,114 @@ namespace B6.Indexer
                                 "GetLogs.Mission.WindowAll");
 
                             // Route raw logs to typed DTOs by the first topic (event signature)
-                            var sigStatus = statusEvt.EventABI.Sha3Signature;    // topic[0]
-                            var sigRound  = roundEvt.EventABI.Sha3Signature;
-                            var sigPR     = prEvt.EventABI.Sha3Signature;
-                            var sigMR     = mrEvt.EventABI.Sha3Signature;
-                            var sigPE     = peEvt.EventABI.Sha3Signature;
+                            static string NormSig(string s)
+                            {
+                                if (string.IsNullOrEmpty(s)) return "";
+                                return (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s : "0x" + s)
+                                        .ToLowerInvariant();
+                            }
+
+                            var sigStatus = NormSig(statusEvt.EventABI.Sha3Signature);
+                            var sigRound  = NormSig(roundEvt.EventABI.Sha3Signature);
+                            var sigPR     = NormSig(prEvt.EventABI.Sha3Signature);
+                            var sigMR     = NormSig(mrEvt.EventABI.Sha3Signature);
+                            var sigPE     = NormSig(peEvt.EventABI.Sha3Signature);
+
+                            // PRECOMPUTE: all block timestamps for this window
+                            var blockNumsAll = new List<long>();
+                            foreach (var l in rawLogs ?? Array.Empty<FilterLog>())
+                                if (l?.BlockNumber != null) blockNumsAll.Add((long)l.BlockNumber.Value);
+                            var tsByBlock = await GetBlockTimestampsAsync(blockNumsAll);
 
                             foreach (var log in rawLogs ?? Array.Empty<FilterLog>())
                             {
-                                // make sure topic0 is a string (Nethereum FilterLog.Topics is object[])
-                                string? topic0 = (log.Topics != null && log.Topics.Length > 0) ? log.Topics[0] as string : null;
+                                // topic0 may be HexBigInteger/JToken/string → ToString() is safe
+                                string topic0 = (log.Topics != null && log.Topics.Length > 0)
+                                    ? (log.Topics[0]?.ToString() ?? string.Empty)
+                                    : string.Empty;
+                                if (string.IsNullOrEmpty(topic0)) continue;
 
-                                if (scanMissionStatus && string.Equals(topic0, sigStatus, StringComparison.OrdinalIgnoreCase))
+                                // normalize to lower + ensure 0x
+                                if (!topic0.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) topic0 = "0x" + topic0;
+                                topic0 = topic0.ToLowerInvariant();
+
+                                if (scanMissionStatus && topic0 == sigStatus)
                                 {
                                     var dec = Event<MissionStatusChangedEventDTO>.DecodeEvent(log);
                                     if (dec != null) statusLogs.Add(dec);
                                 }
-                                else if (string.Equals(topic0, sigRound, StringComparison.OrdinalIgnoreCase))
+                                else if (topic0 == sigRound)
                                 {
                                     var dec = Event<RoundCalledEventDTO>.DecodeEvent(log);
-                                    if (dec != null) roundLogs.Add(dec);
+                                    if (dec == null) continue;
+
+                                    var ev  = dec.Event;
+                                    var blk = (long)dec.Log.BlockNumber.Value;
+                                    var txh = dec.Log.TransactionHash ?? "";
+                                    var r   = (short)ev.RoundNumber;
+                                    var w   = (ev.Player ?? "").ToLowerInvariant();
+                                    var amt = ev.Payout;
+
+                                    // use precomputed timestamp; fall back to now if missing
+                                    var roundTime = tsByBlock.TryGetValue(blk, out var t) ? t : DateTime.UtcNow;
+
+                                    var inlineSucceeded = false;
+                                    try
+                                    {
+                                        await using var connR = new NpgsqlConnection(_pg);
+                                        await connR.OpenAsync(token);
+                                        await using var txR = await connR.BeginTransactionAsync(token);
+
+                                        // 1) insert mission_rounds row
+                                        await using (var ins = new NpgsqlCommand(@"
+                                            insert into mission_rounds (
+                                                mission_address, round_number, winner_address, payout_wei, block_number, tx_hash, created_at
+                                            ) values (@a,@no,@w,@amt,@b,@tx,@ca)
+                                            on conflict (mission_address, round_number) do nothing;", connR, txR))
+                                        {
+                                            ins.Parameters.AddWithValue("a",  addr.ToLowerInvariant());
+                                            ins.Parameters.AddWithValue("no", r);
+                                            ins.Parameters.AddWithValue("w",  w);
+                                            ins.Parameters.Add("amt", NpgsqlDbType.Numeric).Value = amt;
+                                            ins.Parameters.AddWithValue("b",  blk);
+                                            ins.Parameters.AddWithValue("tx", string.IsNullOrEmpty(txh) ? (object)DBNull.Value : txh);
+                                            ins.Parameters.AddWithValue("ca", roundTime);
+                                            await ins.ExecuteNonQueryAsync(token);
+                                        }
+
+                                        // 2) update pause_timestamp to block time + round_count + cro_current_wei
+                                        var pauseUnix = new DateTimeOffset(roundTime).ToUnixTimeSeconds();
+                                        await using (var up = new NpgsqlCommand(@"
+                                            update missions
+                                            set pause_timestamp = @pt,
+                                                round_count     = greatest(round_count, @rc),
+                                                cro_current_wei = @c,
+                                                updated_at      = now()
+                                            where lower(mission_address) = @a;", connR, txR))
+                                        {
+                                            up.Parameters.AddWithValue("a",  addr.ToLowerInvariant());
+                                            up.Parameters.AddWithValue("pt", pauseUnix);
+                                            up.Parameters.AddWithValue("rc", r);
+                                            up.Parameters.Add("c", NpgsqlDbType.Numeric).Value = ev.CroRemaining;
+                                            await up.ExecuteNonQueryAsync(token);
+                                        }
+
+                                        await txR.CommitAsync(token);
+
+                                        // 3) queue push
+                                        pushRounds.Add((r, w, amt.ToString()));
+
+                                        inlineSucceeded = true;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        // Do not fail the window; defer to the batch path below
+                                        _log.LogWarning(ex, "Inline RoundCalled write failed for {addr} r={r} blk={blk}; deferring to batch", addr, r, blk);
+                                    }
+
+                                    // Fallback: if inline failed, process it later in the batch loop you already have
+                                    if (!inlineSucceeded)
+                                        roundLogs.Add(dec);
                                 }
                                 else if (string.Equals(topic0, sigPR, StringComparison.OrdinalIgnoreCase))
                                 {
@@ -1003,13 +1093,69 @@ namespace B6.Indexer
                                 }
                             }
 
-                            // Collect unique block numbers across this window’s logs
-                            var blockNums = new HashSet<long>();
-                            foreach (var ev in peLogs)     blockNums.Add((long)ev.Log.BlockNumber.Value);
-                            foreach (var ev in roundLogs)  blockNums.Add((long)ev.Log.BlockNumber.Value);
-                            foreach (var ev in statusLogs) blockNums.Add((long)ev.Log.BlockNumber.Value);
-                            foreach (var ev in mrLogs)     blockNums.Add((long)ev.Log.BlockNumber.Value);
-                            var tsByBlock = await GetBlockTimestampsAsync(blockNums);
+                            // ── Fallback: if broad filter found nothing, probe RoundCalled directly once ──────────
+                            if ((rawLogs == null || rawLogs.Length == 0) && roundLogs.Count == 0)
+                            {
+                                try
+                                {
+                                    var eRound = _web3.Eth.GetEvent<RoundCalledEventDTO>(addr);
+
+                                    var probe  = await RunRpc(
+                                        w => {
+                                            var f = eRound.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
+                                                                            new BlockParameter(new HexBigInteger(windowTo)));
+                                            return eRound.GetAllChangesAsync(f);
+                                        },
+                                        "GetLogs.Mission.RoundCalled.Probe");
+
+                                    if (probe != null && probe.Count > 0)
+                                    {
+                                        foreach (var dec in probe)
+                                            roundLogs.Add(dec);
+                                        _log.LogWarning("MissionScanner: {addr} window {from}-{to} broad filter missed rounds; probe found {n}",
+                                            addr, windowFrom, windowTo, probe.Count);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _log.LogWarning(ex, "MissionScanner: {addr} window {from}-{to} RoundCalled probe failed", addr, windowFrom, windowTo);
+                                }
+                            }
+
+                            // If broad filter returned 0, also probe other mission events once
+                            if ((rawLogs == null || rawLogs.Length == 0))
+                            {
+                                try
+                                {
+                                    // Enrollments
+                                    var ePE = _web3.Eth.GetEvent<PlayerEnrolledEventDTO>(addr);
+                                    var pe  = await RunRpc(
+                                        w => ePE.GetAllChangesAsync(ePE.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
+                                                                                        new BlockParameter(new HexBigInteger(windowTo)))),
+                                        "GetLogs.Mission.PlayerEnrolled.Probe");
+                                    if (pe != null && pe.Count > 0) peLogs.AddRange(pe);
+
+                                    // Single refunds
+                                    var ePR = _web3.Eth.GetEvent<PlayerRefundedEventDTO>(addr);
+                                    var pr  = await RunRpc(
+                                        w => ePR.GetAllChangesAsync(ePR.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
+                                                                                        new BlockParameter(new HexBigInteger(windowTo)))),
+                                        "GetLogs.Mission.PlayerRefunded.Probe");
+                                    if (pr != null && pr.Count > 0) prLogs.AddRange(pr);
+
+                                    // Batch refunds
+                                    var eMR = _web3.Eth.GetEvent<MissionRefundedEventDTO>(addr);
+                                    var mr  = await RunRpc(
+                                        w => eMR.GetAllChangesAsync(eMR.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
+                                                                                        new BlockParameter(new HexBigInteger(windowTo)))),
+                                        "GetLogs.Mission.MissionRefunded.Probe");
+                                    if (mr != null && mr.Count > 0) mrLogs.AddRange(mr);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _log.LogWarning(ex, "MissionScanner: {addr} window {from}-{to} probes failed", addr, windowFrom, windowTo);
+                                }
+                            }
 
                             await using var conn = new NpgsqlConnection(_pg);
                             await conn.OpenAsync(token);
@@ -1185,26 +1331,27 @@ namespace B6.Indexer
                                 }
                             }
 
-                            // advance mission cursor to the end of this window
-                            await using (var c = new NpgsqlCommand(@"
-                                update missions set last_seen_block = @blk, updated_at = now()
-                                where mission_address = @a;", conn, tx))
-                            {
-                                c.Parameters.AddWithValue("a", addr);
-                                c.Parameters.AddWithValue("blk", windowTo);
-                                await c.ExecuteNonQueryAsync(token);
-                            }
+                        // Always advance cursor for the scanned window; windowTo is already capped by stopAt
+                        await using (var c = new NpgsqlCommand(@"
+                            update missions
+                            set last_seen_block = @blk, updated_at = now()
+                            where lower(mission_address) = @a;", conn, tx))
+                        {
+                            c.Parameters.AddWithValue("a", addr.ToLowerInvariant());
+                            c.Parameters.AddWithValue("blk", windowTo);
+                            await c.ExecuteNonQueryAsync(token);
+                        }
 
-                            await tx.CommitAsync(token);
+                        await tx.CommitAsync(token);
 
-                            // publish after DB commit (push-only)
-                            try
-                            {
-                                foreach (var s in pushStatuses)
-                                    await NotifyStatusAsync(addr, s, token);
+                        // publish after DB commit (push-only)
+                        try
+                        {
+                            foreach (var s in pushStatuses)
+                                await NotifyStatusAsync(addr, s, token);
 
-                                foreach (var (r, w, a) in pushRounds)
-                                    await NotifyRoundAsync(addr, r, w, a, token);
+                            foreach (var (r, w, a) in pushRounds)
+                                await NotifyRoundAsync(addr, r, w, a, token);
 
                                 if (missionUpdated)
                                     await NotifyMissionUpdatedAsync(addr, token);
@@ -1285,7 +1432,7 @@ namespace B6.Indexer
             }
         }
 
-        private async Task                              EnsureMissionSeededAsync(string missionAddr, string name, long seedLastSeenBlock, CancellationToken token, bool alreadyFetchedThisCycle = false, RpcCycleCache? cache = null) {
+        private async Task                              EnsureMissionSeededAsync    (string missionAddr, string name, long seedLastSeenBlock, CancellationToken token, bool alreadyFetchedThisCycle = false, RpcCycleCache? cache = null) {
             MissionDataWrapper wrap;
 
             if (alreadyFetchedThisCycle && cache != null && cache.MissionTuples.TryGetValue(missionAddr, out var cachedWrap))
@@ -1545,7 +1692,7 @@ namespace B6.Indexer
             }
         }
 
-        private void                                    NoteRpc(string context, string caller) {
+        private void                                    NoteRpc                     (string context, string caller) {
             var ctx = string.IsNullOrWhiteSpace(context) ? "RPC" : context;
             var who = string.IsNullOrWhiteSpace(caller)  ? "Unknown" : caller;
 
@@ -1562,7 +1709,7 @@ namespace B6.Indexer
             }
         }
 
-        private void                                    FlushRpcSummaryIfDue() {
+        private void                                    FlushRpcSummaryIfDue        () {
             var now = DateTime.UtcNow;
             if (_nextRpcSummaryUtc == DateTime.MinValue) _nextRpcSummaryUtc = now + _rpcSummaryPeriod;
             if (now < _nextRpcSummaryUtc) return;
@@ -1619,11 +1766,11 @@ namespace B6.Indexer
             return true;
         }
 
-        private void                                    RecordSuccess() {
+        private void                                    RecordSuccess               () {
             _consecErrors = 0;
         }
 
-        private void                                    RecordFailure(Exception ex) {
+        private void                                    RecordFailure               (Exception ex) {
             if (ex is OperationCanceledException) return; // normal during stop
             _consecErrors++;
             if (_consecErrors >= _maxConsecErrors)
@@ -1651,7 +1798,7 @@ namespace B6.Indexer
                 || (ex.InnerException != null && IsTransient(ex.InnerException));
         }
 
-        private static bool                             IsRateLimited              (Exception ex) {
+        private static bool                             IsRateLimited               (Exception ex) {
             if (ex == null) return false;
             var msg = ex.Message ?? string.Empty;
             if (msg.IndexOf("429", StringComparison.OrdinalIgnoreCase) >= 0) return true;
@@ -1659,7 +1806,7 @@ namespace B6.Indexer
             return ex.InnerException != null && IsRateLimited(ex.InnerException);
         }
 
-        private static bool                             TryGetBenignProviderCode(Exception ex, out string code) {
+        private static bool                             TryGetBenignProviderCode    (Exception ex, out string code) {
             code = string.Empty;
             if (ex == null) return false;
             var m = (ex.Message ?? string.Empty).ToLowerInvariant();
@@ -1988,8 +2135,7 @@ namespace B6.Indexer
             return new Web3(acct, url);
         }
 
-        private async Task<bool>                        RefreshPotFromChainAsync    (string mission, CancellationToken token, RpcCycleCache? cache = null)
-        {
+        private async Task<bool>                        RefreshPotFromChainAsync    (string mission, CancellationToken token, RpcCycleCache? cache = null) {
             // STEP 1: Read on-chain mission data (cached when available)
             var wrap = cache is null
                 ? await RunRpc(
@@ -2085,8 +2231,8 @@ namespace B6.Indexer
             {
                 await c.OpenAsync(token);
                 await using var cmd = new NpgsqlCommand(
-                    "select player_address from mission_enrollments where mission_address=@a;", c);
-                cmd.Parameters.AddWithValue("a", addr);
+                    "select player_address from mission_enrollments where lower(mission_address) = @a;", c);
+                cmd.Parameters.AddWithValue("a", addr.ToLowerInvariant());
                 await using var rd = await cmd.ExecuteReaderAsync(token);
                 while (await rd.ReadAsync(token))
                 {
@@ -2170,7 +2316,7 @@ namespace B6.Indexer
             }
         }
 
-       private async Task<bool>                         NeedsAutoFinalizeAsync(string mission, CancellationToken token, byte? cachedRt = null) {
+       private async Task<bool>                         NeedsAutoFinalizeAsync      (string mission, CancellationToken token, byte? cachedRt = null) {
 
             // 1) DB guard: skip only if already fully final (status in 6,7)
             short? dbStatus = null;

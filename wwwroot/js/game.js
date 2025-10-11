@@ -307,7 +307,7 @@ function        joinedCacheAdd(addr, me){
 
 // Enrichment:
 
-function enrichMissionFromApi(data){
+function        enrichMissionFromApi(data){
   const m = data?.mission || data || {};
   if (data && Array.isArray(data.enrollments)) m.enrollments = data.enrollments;
   if (data && Array.isArray(data.rounds))      m.rounds      = data.rounds;
@@ -741,6 +741,22 @@ function        prettyStatusForList(status, md, failedRefundCount = 0) { // stat
   }
   // fall through to your existing mapping for other statuses…
   return null;
+}
+
+// Misc
+
+function        touchUpdatedAtStampFromPush() {
+  const stamp = document.getElementById("updatedAtStamp");
+  const icon  = document.getElementById("updatedAtIcon");
+  const nowS  = Math.floor(Date.now() / 1000);
+
+  if (stamp) {
+    stamp.dataset.updated = String(nowS);
+    stamp.textContent = formatLocalDateTime(nowS);
+    stamp.classList.remove("text-error");
+  }
+  if (icon) icon.style.display = "none";
+  staleWarningShown = false; // clear any prior warning state
 }
 
 // #endregion
@@ -1384,12 +1400,14 @@ async function  startHub() { // SignalR HUB
     window.hubConnection = hubConnection;
 
     hubConnection.on("ServerPing", (msg) => {
-      //showAlert(`Server ping:<br>${msg}`, "info");
       console.log(msg);
+      __lastPushTs = Date.now();
+      touchUpdatedAtStampFromPush();
     });
 
     hubConnection.on("RoundResult", async (addr, round, winner, amountWei) => {
       __lastPushTs = Date.now();
+      touchUpdatedAtStampFromPush();
       dbg("RoundResult PUSH", { addr, round, winner, amountWei, currentMissionAddr, groups: Array.from(subscribedGroups) });
 
       // mark that a result landed for the active banking session (any winner)
@@ -1498,7 +1516,9 @@ async function  startHub() { // SignalR HUB
 
     hubConnection.on("StatusChanged", async (addr, newStatus) => {
       __lastPushTs = Date.now();
+      touchUpdatedAtStampFromPush();
       dbg("StatusChanged PUSH", { addr, newStatus, currentMissionAddr, groups: Array.from(subscribedGroups) });
+
       if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
         return;
       }
@@ -1589,7 +1609,9 @@ async function  startHub() { // SignalR HUB
 
     hubConnection.on("MissionUpdated", async (addr) => {
       __lastPushTs = Date.now();
+      touchUpdatedAtStampFromPush();
       dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
+
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
         try {
           const data = await apiMission(currentMissionAddr, true);
@@ -1679,6 +1701,7 @@ async function  startHub() { // SignalR HUB
 
       // Mark "fresh push" time and reconcile once (lightweight)
       __lastPushTs = Date.now();
+      touchUpdatedAtStampFromPush();
       smartReconcile("reconnected");
     });
 
@@ -4349,16 +4372,17 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
           </div>
 
         <div class="label">Data updated at</div>
-        <div class="value">
-          <span id="updatedAtStamp"
-                data-updated="${Math.max(mission.updated_at || 0, Math.floor((__lastPushTs || 0)/1000))}">
-            ${formatLocalDateTime(Math.max(mission.updated_at || 0, Math.floor(Date.now()/1000)))}
-          </span>
-          <i id="updatedAtIcon"
-            class="fa-solid fa-circle-exclamation ms-1 text-error"
-            style="display:none"
-            title="Data may be stale"></i>
-        </div>
+          <div class="value">
+            <span id="updatedAtStamp"
+                  data-updated="${Math.max(mission.updated_at || 0, Math.floor((__lastPushTs || 0)/1000))}">
+              ${formatLocalDateTime(Math.max(mission.updated_at || 0, Math.floor((__lastPushTs || 0)/1000)))}
+            </span>
+            <i id="updatedAtIcon"
+
+              class="fa-solid fa-circle-exclamation ms-1 text-error"
+              style="display:none"
+              title="Data may be stale"></i>
+          </div>
 
         </div>
 
@@ -4401,8 +4425,8 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
       // Only flag/warn during live states (1=enrolling, 2=arming, 3=active, 4=paused)
       const liveState = [1, 2, 3, 4].includes(Number(mission.status));
 
-      // Visual staleness marker shown only for live missions
-      const showStaleMarker = liveState && staleAge;
+      // Visual staleness only when API looks old AND pushes have been quiet
+      const showStaleMarker = liveState && staleAge && pushQuiet;
       stamp.classList.toggle("text-error", showStaleMarker);
       if (icon) icon.style.display = showStaleMarker ? "inline-block" : "none";
 
@@ -4836,13 +4860,12 @@ async function init(){
 
   // 4) Manual reload button
   els.reloadMissionBtn?.addEventListener("click", async () => {
-    if (!currentMissionAddr) {
-        return;
-      }
+    if (!currentMissionAddr) { return; }
     try {
-      // icon-only button → keep original innerHTML, no text label
       const data = await apiMission(currentMissionAddr, true);
       renderMissionDetail(data);
+      __lastPushTs = Date.now();
+      touchUpdatedAtStampFromPush();
     } catch (e) {
       showAlert("Reload failed. Please check your connection.", "error");
     } 
@@ -4851,18 +4874,55 @@ async function init(){
   buildAllFiltersUI();
 
   // ───────────────────────────────────────────────────────────────
-  // NEW: handle deep-links from homepage (?view=… or ?mission=…)
+  // Deep-links:
+  // - ?view=joinable|active|all     → keep existing behavior (lists)
+  // - ?mission=0x...                → open mission DETAIL (existing)
+  // - ?0x...                        → open mission directly in GAME STAGE (new)
   // ───────────────────────────────────────────────────────────────
   try {
-    const q = new URLSearchParams(location.search);
-    const view = (q.get("view") || "").toLowerCase();
-    const missionAddr = q.get("mission");
+    const rawQuery = (location.search || "").replace(/^\?/, "");
+    const q        = new URLSearchParams(location.search);
+    const view     = (q.get("view") || "").toLowerCase();
+    const missionParam = q.get("mission");
 
-    if (missionAddr) {
-      // open a specific mission’s detail
+    // Helper: extract bare 0x… from a query like "?0xabc..." or "?[0xabc...]"
+    const bareAddr = (() => {
+      if (!rawQuery) return null;
+      // decode and strip brackets if user used "[0x...]" form
+      let s = decodeURIComponent(rawQuery).trim();
+      s = s.replace(/^\[|\]$/g, "");         // remove leading "[" or trailing "]"
+      // only accept pure single token, no "&", no "="
+      if (/[&=]/.test(s)) return null;
+      return /^0x[a-fA-F0-9]{40}$/.test(s) ? s : null;
+    })();
+
+    if (bareAddr) {
+      // NEW: open the GAME STAGE directly for a bare address deep-link
+      await cleanupMissionDetail();
+      // prevent pill bleed from any previous mission
+      resetMissionLocalState?.();
+
+      currentMissionAddr = String(bareAddr).toLowerCase();
+      await startHub?.();
+      await subscribeToMission(currentMissionAddr);
+      lockScroll?.();
+
+      // load and enrich before showing the stage
+      const data = await apiMission(currentMissionAddr, true);
+      if (!data) {
+        showAlert("Mission not found.", "warning");
+      } else {
+        const m = enrichMissionFromApi?.(data) || data;
+        await showGameStage(m);
+        // make sure stage-side refresh & ended panel logic runs as normal
+        await apiMission(currentMissionAddr, true);
+        await renderStageEndedPanelIfNeeded?.(m);
+      }
+    } else if (missionParam) {
+      // existing: open a specific mission’s DETAIL
       await cleanupMissionDetail();
       showOnlySection("missionDetailSection");
-      const data = await apiMission(missionAddr, true);
+      const data = await apiMission(missionParam, true);
       if (data) {
         renderMissionDetail(data);
       } else {
@@ -4880,14 +4940,12 @@ async function init(){
       // statuses 2,3,4 = Arming/Active/Paused in your UI filter
       __allSelected = new Set([2,3,4]);
       applyAllMissionFiltersAndRender();
-      // reflect checkbox if present
       const fltActive = document.getElementById("fltActive");
       if (fltActive) fltActive.checked = true;
     } else if (view === "all") {
       await cleanupMissionDetail();
       showOnlySection("allMissionsSection");
       __allSelected = null; // clear filters
-      // uncheck all checkboxes if present
       const host = document.getElementById("allFilters");
       host?.querySelectorAll('input[type="checkbox"]').forEach(i => i.checked = false);
       applyAllMissionFiltersAndRender();
