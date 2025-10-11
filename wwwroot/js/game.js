@@ -2352,19 +2352,31 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
                                                  ? formatDurationShort(Number(m.mission_end) - Number(m.mission_start)) : "—" },
   fee:            { label: "Mission Fee",      value: m => (m && m.enrollment_amount_wei != null) ? `${weiToCro(m.enrollment_amount_wei, 2)} CRO` : "—" },
   poolStart:      { label: "Pool (start)",     value: m => (m && m.cro_start_wei    != null)      ? `${weiToCro(m.cro_start_wei, 2)} CRO`    : "—" },
-  poolCurrent:    { label: "Pool (current)",   value: m => {
-    // During Enrolling prefer the derived value (API may still return the initial snapshot)
-    if (Number(m?.status) === 1 && Array.isArray(m?.enrollments) &&
-        m?.cro_initial_wei != null && m?.enrollment_amount_wei != null) {
-      const initialWei = BigInt(String(m.cro_initial_wei || "0"));
-      const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
-      const joined     = BigInt(m.enrollments.length || 0);
-      return `${weiToCro((initialWei + feeWei * joined).toString(), 2)} CRO`;
+  // game.js — PILL_LIBRARY
+  poolCurrent: {
+    label: "Pool (current)",
+    value: m => {
+      // 1) Prefer the live/optimistic value set by rehydratePillsFromChain / handleEnrollClick
+      if (m?.cro_current_wei != null) {
+        return `${weiToCro(m.cro_current_wei, 2)} CRO`;
+      }
+      // 2) Enrolling fallback: compute from initial + fee * joined
+      if (Number(m?.status) === 1 &&
+          m?.cro_initial_wei != null &&
+          m?.enrollment_amount_wei != null) {
+        const initialWei = BigInt(String(m.cro_initial_wei || "0"));
+        const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
+        // Use the same sources as the Players pill so both numbers move together
+        const joined = BigInt(Math.max(
+          Array.isArray(m?.enrollments) ? m.enrollments.length : 0,
+          Number(__lastChainPlayers || 0),
+          Number(optimisticGuard?.players || 0)
+        ));
+        return `${weiToCro((initialWei + feeWei * joined).toString(), 2)} CRO`;
+      }
+      return "—";
     }
-    if (m?.cro_current_wei != null) return `${weiToCro(m.cro_current_wei, 2)} CRO`;
-    return "—";
-  }},
-
+  },
   playersCap:     { label: "Players cap",      value: m => (m?.enrollment_max_players ?? "—") },
   players: { label: "Players",                 value: m => Math.max(
     Array.isArray(m?.enrollments) ? m.enrollments.length : 0,
@@ -4916,7 +4928,6 @@ function enableVaultSoundOnce() {
   const vaultVideo = document.getElementById('vaultVideo');
   if (vaultVideo) {
     vaultVideo.muted = false;
-    vaultVideo.play().catch(err => console.warn('Autoplay with sound blocked:', err));
   }
 }
 

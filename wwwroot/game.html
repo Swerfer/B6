@@ -132,10 +132,16 @@
               <!-- Metal bezel -->
               <defs>
                 <!-- Darker, more “vault-like” dial that matches top/bottom tones -->
-                <radialGradient id="vdBezel" cx="50%" cy="44%" r="70%">
+                <radialGradient id="vdBezel" cx="50%" cy="42%" r="74%" fx="50%" fy="36%">
+                  <!-- inner highlight -->
                   <stop offset="0%"   stop-color="#1b242c"/>
-                  <stop offset="62%"  stop-color="#141b22"/>
-                  <stop offset="100%" stop-color="#0a1016"/>
+                  <stop offset="55%"  stop-color="#2a3641"/>
+
+                  <!-- near the rim, match the vault surface tone you sampled -->
+                  <stop offset="86%"  stop-color="rgba(19,25,32,0.7)"/>  <!-- <- key fix -->
+
+                  <!-- very edge slightly darker for separation -->
+                  <stop offset="100%" stop-color="rgba(10,16,22,0.7)"/>
                 </radialGradient>
                 <linearGradient id="vdGlass" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%"   stop-color="rgba(170,230,255,.28)"/>
@@ -231,7 +237,7 @@
 
           <!-- ▼ NEW: vault opening video layer (scales exactly like the vault image) -->
           <div id="vaultVideoLayer" class="stage-overlay" style="display:none">
-            <video id="vaultVideo" class="vault-video" preload="auto" loop playsinline>
+            <video id="vaultVideo" class="vault-video" preload="auto" playsinline>
               <source src="assets/videos/Vault opening.mp4" type="video/mp4" />
             </video>
           </div>
