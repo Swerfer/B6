@@ -432,12 +432,11 @@ function        showOnlySection(sectionId) {
 
   document.getElementById('gameMain').classList.toggle('stage-mode', sectionId === 'gameStage');
 
-  // Remember the last list view the user opened (now includes All Missions)
   if (["joinableSection","myMissionsSection","allMissionsSection"].includes(sectionId)) {
+    lastListShownId = sectionId;                     // <-- keep runtime value updated
     try { localStorage.setItem("b6:lastList", sectionId); } catch {}
   }
 
-  // NEW: throttle the visible refresh control for 5s when a list is shown
   const REFRESH_THROTTLE_MS = 5000;
   if (sectionId === "allMissionsSection") {
     disableTemporarily(els.refreshAllBtn, REFRESH_THROTTLE_MS);
@@ -4721,7 +4720,14 @@ async function  closeMission(){
 
   stageReturnTo = null;
   currentMissionAddr = null;
-  showOnlySection(lastListShownId);
+
+  let target = lastListShownId;
+  try {
+    const saved = localStorage.getItem("b6:lastList");
+    if (saved) target = saved;
+  } catch {}
+
+  showOnlySection(target);
 }
 
 async function  subscribeToMission(addr){

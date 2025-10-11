@@ -56,7 +56,7 @@ namespace B6.Indexer
         private readonly Dictionary<string, Dictionary<string,int>> _rpc1hByCaller = new(StringComparer.InvariantCulture);
         private DateTime                                _nextRpcSummaryUtc  = DateTime.MinValue;
         private bool                                    _firstRPCSummary    = true;
-        private static readonly TimeSpan                _rpcSummaryPeriod   = TimeSpan.FromMinutes(5);
+        private static readonly TimeSpan                _rpcSummaryPeriod   = TimeSpan.FromMinutes(60);
         // =====================================================
         // --- Benign provider hiccup rollup (daily, UTC) -------------------------------
         private DateTime                                _benignDayUtc       = DateTime.MinValue;
@@ -67,7 +67,7 @@ namespace B6.Indexer
         private readonly int                            _maxWinTotal;
         private readonly string                         _ownerPk;                           // from Key Vault / config
         // ---- Realtime poll schedule -----------------------------------------------
-        private static readonly TimeSpan                _rtPollPeriod       = TimeSpan.FromMinutes(60);
+        private static readonly TimeSpan                _rtPollPeriod       = TimeSpan.FromMinutes(5);
         private DateTime                                _nextRtPollUtc      = DateTime.MinValue;
         // ---- Circuit breaker -------------------------------------------------------
         private int                                     _consecErrors       = 0;
