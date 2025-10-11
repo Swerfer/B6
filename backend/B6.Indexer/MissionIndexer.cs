@@ -1988,34 +1988,76 @@ namespace B6.Indexer
             return new Web3(acct, url);
         }
 
-        private async Task<bool>                        RefreshPotFromChainAsync(string mission, CancellationToken token, RpcCycleCache? cache = null) {
-            var wrap = cache is null ? 
-                await RunRpc(
+        private async Task<bool>                        RefreshPotFromChainAsync    (string mission, CancellationToken token, RpcCycleCache? cache = null)
+        {
+            // STEP 1: Read on-chain mission data (cached when available)
+            var wrap = cache is null
+                ? await RunRpc(
                     w => w.Eth.GetContractQueryHandler<GetMissionDataFunction>()
-                        .QueryDeserializingToObjectAsync<MissionDataWrapper>(
-                            new GetMissionDataFunction(), mission, null),
+                            .QueryDeserializingToObjectAsync<MissionDataWrapper>(
+                                new GetMissionDataFunction(), mission, null),
                     "Call.getMissionData")
                 : await GetMissionDataCachedAsync(mission, cache);
-            var md = wrap.Data;
 
-            // 2) Update only when changed (uses PostgreSQL IS DISTINCT FROM to avoid false positives)
+            var md = wrap.Data; // contains CroStart & CroCurrent (BigInteger)
+
+            // STEP 2: Fetch enrollment fee (wei) and enrolled player count from DB
+            BigInteger feeWei = 0;
+            int enrolledCount = 0;
+
+            await using (var c0 = new NpgsqlConnection(_pg))
+            {
+                await c0.OpenAsync(token);
+
+                // 2a) Enrollment fee from missions.enrollment_amount_wei (NUMERIC)
+                await using (var cmdFee = new NpgsqlCommand(@"
+                    select coalesce(enrollment_amount_wei, '0')::numeric
+                    from missions
+                    where mission_address = @a;", c0))
+                {
+                    cmdFee.Parameters.AddWithValue("a", mission);
+                    var v = await cmdFee.ExecuteScalarAsync(token);
+                    if (v != null && v != DBNull.Value)
+                        feeWei = new BigInteger((decimal)v);
+                }
+
+                // 2b) Enrolled players count from mission_enrollments (all rows)
+                await using (var cmdCnt = new NpgsqlCommand(@"
+                    select count(*)::int
+                    from mission_enrollments
+                    where mission_address = @a;", c0))
+                {
+                    cmdCnt.Parameters.AddWithValue("a", mission);
+                    enrolledCount = (int)(await cmdCnt.ExecuteScalarAsync(token) ?? 0);
+                }
+            }
+
+            // STEP 3: Derive CRO Initial = CroStart − (enrolledCount × feeWei), clamped at 0
+            BigInteger calcInitial = md.CroStart - (feeWei * enrolledCount);
+            if (calcInitial < 0) calcInitial = 0;
+
+            // STEP 4: Persist new values if any changed (uses IS DISTINCT FROM to avoid no-op writes)
             await using var c = new NpgsqlConnection(_pg);
             await c.OpenAsync(token);
+
             await using var up = new NpgsqlCommand(@"
                 update missions
                 set cro_start_wei   = @cs,
                     cro_current_wei = @cc,
+                    cro_initial_wei = @ci,
                     updated_at      = now()
                 where mission_address = @a
-                and (cro_start_wei   is distinct from @cs
-                    or cro_current_wei is distinct from @cc);", c);
+                and (cro_start_wei    is distinct from @cs
+                    or cro_current_wei  is distinct from @cc
+                    or cro_initial_wei  is distinct from @ci);", c);
 
             up.Parameters.AddWithValue("a", mission);
             up.Parameters.Add("cs", NpgsqlTypes.NpgsqlDbType.Numeric).Value = md.CroStart;
             up.Parameters.Add("cc", NpgsqlTypes.NpgsqlDbType.Numeric).Value = md.CroCurrent;
+            up.Parameters.Add("ci", NpgsqlTypes.NpgsqlDbType.Numeric).Value = calcInitial;
 
             var rows = await up.ExecuteNonQueryAsync(token);
-            return rows > 0; // true → pot changed and DB was updated
+            return rows > 0;
         }
 
         private async Task<bool>                        ReconcileEnrollmentsFromChainAsync(string addr, CancellationToken token, RpcCycleCache? cache = null) {

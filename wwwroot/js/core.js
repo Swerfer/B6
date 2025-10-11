@@ -99,6 +99,7 @@ export const MISSION_ABI = [
   "function forceFinalizeMission()",
   "function owner() view returns (address)",
   "function enrollPlayer() payable",
+  "function increasePot() payable",
   "function callRound()",
 ];
 

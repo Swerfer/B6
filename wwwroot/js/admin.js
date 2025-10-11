@@ -184,16 +184,25 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       refundedPlayers
     ] = await mc.getMissionData();
 
+    // Read realtime status from chain (unchanged)
     const status        = await mc.getRealtimeStatus();
     const realtimeLabel = statusText(status);
     const rtColor       = colorForStatusLabel(realtimeLabel);
 
-    if (btnRef && btnRef.dataset.loading){
-      await new Promise(res => {
-        setBtnLoading(btnRef, false);
-        btnRef.addEventListener("transitionend", res, { once:true });
-      });
-    }
+    // NEW: fetch CRO Initial from the backend API (/api/missions/mission/{addr})
+    let croInitialDisplay = "—";
+    try {
+      const r = await fetch(`/api/missions/mission/${item.addr.toLowerCase()}`);
+      if (r.ok) {
+        const j = await r.json();
+        const wei = j?.mission?.cro_initial_wei;   // string (wei) per Program.cs
+        if (wei && /^\d+$/.test(wei)) {
+          croInitialDisplay = `${ethers.utils.formatEther(wei)} CRO`;
+        } else {
+          croInitialDisplay = "0 CRO";
+        }
+      }
+    } catch {}
 
     /* build rows */
     const rowTemplates = [
@@ -212,10 +221,22 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       `<tr><th>Rounds</th>             <td>${missionRounds}</td></tr>`,
       `<tr><th>Mission round Count</th><td>${roundCount}</td></tr>`,
       `<tr><th>Enrollment Amount</th>  <td>${ethers.utils.formatEther(enrollmentAmount)} CRO</td></tr>`,
+      // NEW: CRO Initial (from API)
+      `<tr><th>CRO Initial</th>        <td>${croInitialDisplay}</td></tr>`,
       `<tr><th>CRO Start</th>          <td>${ethers.utils.formatEther(croStart)} CRO</td></tr>`,
       `<tr><th>CRO Current</th>        <td>${ethers.utils.formatEther(croCurrent)} CRO</td></tr>`,
       `<tr><th>Players Won</th>        <td>${playersWon.length}</td></tr>`,
-      `<tr><th>Refunded Players</th>   <td>${refundedPlayers.length}</td></tr>`
+      `<tr><th>Refunded Players</th>   <td>${refundedPlayers.length}</td></tr>`,
+      // NEW: inline Increase Pot input + button
+      `<tr><th>Increase Pot</th><td>
+        <div class="d-flex align-items-center gap-2">
+          <input type="number" id="increasePotAmount" class="form-control form-control-sm" 
+                 placeholder="Amount in CRO" min="0" step="any" style="max-width:120px;">
+          <button class="btn btn-sm btn-outline-success" id="increasePotBtn">
+            <i class="fa-solid fa-plus"></i> Add
+          </button>
+        </div>
+      </td></tr>`
     ];
 
     const shouldRefund = (
@@ -311,6 +332,18 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       );
     }
 
+    // NEW: delegate click for Increase Pot (rows are appended async)
+    modalBody.addEventListener("click", (e) => {
+      const incBtn = e.target.closest("#increasePotBtn");
+      if (!incBtn) return;
+      e.preventDefault();
+      const incIn = modalBody.querySelector("#increasePotAmount");
+      if (!incIn) {
+        return showAlert("Amount input is missing.", "error");
+      }
+      increasePot(item.addr, incIn, incBtn);
+    });
+
     adminSections.forEach(sec => sec.classList.add("hidden"));
     missionModal.classList.remove("hidden");
 
@@ -404,6 +437,29 @@ async function forceFinalizeMission(address, btnRef, factoryStatus = null) {
     showAlert("Unable to finalize: " + e.message, "error");
     openMissionModal({ addr: address }, null, factoryStatus);
   }
+}
+
+async function increasePot(address, amountInput, btn) {
+  const val = amountInput.value.trim();
+  if (!val || isNaN(val) || Number(val) <= 0) {
+    return showAlert("Invalid amount", "warning");
+  }
+
+  showConfirm(`Add <strong>${val} CRO</strong> to the pot?`, async () => {
+    setBtnLoading(btn, true, "Sending");
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const signer   = provider.getSigner();
+      const mc       = new ethers.Contract(address, MISSION_ABI, signer);
+      const tx       = await mc.increasePot({ value: ethers.utils.parseEther(val) });
+      await tx.wait();
+      showAlert("Pot increased successfully!", "success");
+      openMissionModal({ addr: address }, null); // reload modal to update values
+    } catch (err) {
+      showAlert(decodeError(err), "error");
+    }
+    setBtnLoading(btn, false, "Add", false);
+  });
 }
 
 function updateConnectButton(state = "idle", address = ""){

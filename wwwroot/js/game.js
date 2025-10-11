@@ -121,6 +121,16 @@ const __missionInflight     = new Map();
 const __missionMicroCache   = new Map();           // addr -> { ts, payload }
 const MICRO_TTL_MS          = 900;   
 
+// --- add near other runtime flags (top of file) ---
+let __allListLastFetchAt    = 0;
+const LIST_FETCH_COOLDOWN_MS= 2000;   // soft guard vs stampede
+const DETAIL_BATCH_SIZE     = 3;      // small, polite batches
+const DETAIL_BATCH_DELAY_MS = 600;    // gap between batches
+const PRIMARY_FAST_COUNT    = 12;     // "first 10 fairly quick"
+let __allListInflight       = null;
+let __allListLastDone       = 0;
+const ALL_LIST_COOLDOWN_MS  = 5000;
+
 // miscellaneous 
 let   staleWarningShown     = false;
 let   ctaBusy               = false;
@@ -297,25 +307,23 @@ function        joinedCacheAdd(addr, me){
 
 // Enrichment:
 
-function        enrichMissionFromApi(data){
+function enrichMissionFromApi(data){
   const m = data?.mission || data || {};
   if (data && Array.isArray(data.enrollments)) m.enrollments = data.enrollments;
   if (data && Array.isArray(data.rounds))      m.rounds      = data.rounds;
 
-  // Fallbacks so HUD pills show live values even if API hasn’t denormalized yet
-  if (Array.isArray(m.enrollments)) {
-
-    // Pool (current) during Enrolling: initial + fee * joined (no payouts yet)
-    if (Number(m.status) === 1 &&
-        m.cro_initial_wei != null &&
-        m.enrollment_amount_wei != null) {
-      const initialWei = BigInt(String(m.cro_initial_wei || "0"));
-      const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
-      const joined     = BigInt((Array.isArray(m.enrollments) ? m.enrollments.length : 0));
-      m.cro_current_wei = (initialWei + feeWei * joined).toString();
+  if (Number(m.status) === 1 &&
+      m.cro_initial_wei != null &&
+      m.enrollment_amount_wei != null) {
+    const initialWei = BigInt(String(m.cro_initial_wei || "0"));
+    const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
+    let joined = BigInt(Array.isArray(m.enrollments) ? m.enrollments.length : 0);
+    if (joined === 0n) {
+      joined = BigInt(Math.max(Number(__lastChainPlayers || 0),
+                               Number(optimisticGuard?.players || 0)));
     }
+    m.cro_current_wei = (initialWei + feeWei * joined).toString();
   }
-
   return m;
 }
 
@@ -426,7 +434,15 @@ function        showOnlySection(sectionId) {
 
   // Remember the last list view the user opened (now includes All Missions)
   if (["joinableSection","myMissionsSection","allMissionsSection"].includes(sectionId)) {
-    lastListShownId = sectionId;
+    try { localStorage.setItem("b6:lastList", sectionId); } catch {}
+  }
+
+  // NEW: throttle the visible refresh control for 5s when a list is shown
+  const REFRESH_THROTTLE_MS = 5000;
+  if (sectionId === "allMissionsSection") {
+    disableTemporarily(els.refreshAllBtn, REFRESH_THROTTLE_MS);
+  } else if (sectionId === "joinableSection") {
+    disableTemporarily(els.refreshJoinableBtn, REFRESH_THROTTLE_MS);
   }
 }
 
@@ -448,6 +464,7 @@ async function  cleanupMissionDetail(){
   }
   subscribedAddr = null;
   currentMissionAddr = null;
+  resetMissionLocalState();
 }
 
 // Status→slug:
@@ -1785,66 +1802,79 @@ function        scheduleDetailRefresh(reset=false){
 
 // #region API wrappers
 
-async function  fetchAndRenderAllMissions(){
-  try {
-    // 1) Factory call (chain): get the full mission index
-    const provider = getReadProvider();
-    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
-    const [addrs, statuses, names] = await withTimeout(factory.getAllMissions(), 10000);
+async function fetchAndRenderAllMissions() {
+  const now = Date.now();
 
-    // 2) Map and reverse (NEWEST FIRST)
-    const rows = addrs.map((a, i) => ({
-      mission_address: a,
-      status: Number(statuses[i]),
-      name: names[i]
-    }));
+  // If a load is already running, return the same promise (coalesce callers)
+  if (__allListInflight) return __allListInflight;
 
-    // 3) Hydrate with details from your API (address → mission object)
-    //    Only for the newest PRIMARY; older ones render lightweight (no detail call)
-    const PRIMARY = 12;
-    const primaryRows    = rows.slice(0, PRIMARY);
-    const secondaryRows  = rows.slice(PRIMARY);
+  // Within cool-down? Just repaint from cache and skip network
+  if ((now - __allListLastDone) < ALL_LIST_COOLDOWN_MS) {
+    return;
+  }
 
-    const details = await Promise.all(
-      primaryRows.map(r => apiMission(r.mission_address, true).catch(() => null))
-    );
-    const primaryMissions = details.filter(Boolean).map(d => {
-      const m = d.mission;
+  const p = (async () => {
+    try {
+      // 1) Factory call (chain): get the full mission index
+      const provider = getReadProvider();
+      const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
+      const [addrs, statuses, names] = await withTimeout(factory.getAllMissions(), 10000);
 
-      // enrich with fields the All Missions renderer expects
-      m.current_players  = (d.enrollments?.length || 0);
-      m.min_players      = m.enrollment_min_players;
-      m.max_players      = m.enrollment_max_players;
-      m.rounds           = m.round_count;
-      m.max_rounds       = m.mission_rounds_total;
-      m.mission_duration = (m.mission_start && m.mission_end)
-                            ? (Number(m.mission_end) - Number(m.mission_start)) : 0;
-      m.mission_fee      = m.enrollment_amount_wei;   // show fee in CRO via weiToCro
-      return m;
-    });
-    // lightweight rows for the rest (no API call)
-    const secondaryMissions = secondaryRows.map(r => ({
-      mission_address: r.mission_address,
-      status: r.status,
-      name: r.name
-    }));
-    const missions = [...primaryMissions, ...secondaryMissions];
+      // 2) Map and reverse (NEWEST FIRST)
+      const rows = addrs.map((a, i) => ({
+        mission_address: a,
+        status: Number(statuses[i]),
+        name: names[i]
+      }));
 
-    // if you use the filtered cache path:
-    if (typeof __allMissionsCache !== "undefined") {
+      // 3) Hydrate details only for the first 10, keep the rest lightweight
+      const PRIMARY = 10;
+      const primaryRows    = rows.slice(0, PRIMARY);
+      const secondaryRows  = rows.slice(PRIMARY);
+
+      const details = await Promise.all(
+        primaryRows.map(r => apiMission(r.mission_address, true).catch(() => null))
+      );
+
+      const primaryMissions = details.filter(Boolean).map(d => {
+        const m = d.mission;
+        m.current_players  = (d.enrollments?.length || 0);
+        m.min_players      = m.enrollment_min_players;
+        m.max_players      = m.enrollment_max_players;
+        m.rounds           = m.round_count;
+        m.max_rounds       = m.mission_rounds_total;
+        m.mission_duration = (m.mission_start && m.mission_end)
+                              ? (Number(m.mission_end) - Number(m.mission_start)) : 0;
+        m.mission_fee      = m.enrollment_amount_wei;
+        return m;
+      });
+
+      const secondaryMissions = secondaryRows.map(r => ({
+        mission_address: r.mission_address,
+        status: r.status,
+        name: r.name
+      }));
+
+      const missions = [...primaryMissions, ...secondaryMissions];
+
       __allMissionsCache = missions;
       applyAllMissionFiltersAndRender();
-    } else {
-      renderAllMissions(missions);
-    }
 
-    startJoinableTicker();                            // update any data-start/data-end timers
-    hydrateAllMissionsRealtime(els.allMissionsList);  // NEW: live status (concurrency 4)
-  } catch (e) {
-    console.error(e);
-    showAlert("Failed to load All Missions.", "error");
-    renderAllMissions([]);                       // show empty state
-  }
+      startJoinableTicker();
+      hydrateAllMissionsRealtime(els.allMissionsList);
+    } catch (e) {
+      console.error(e);
+      showAlert("Failed to load All Missions.", "error");
+      renderAllMissions([]);
+    } finally {
+      __allListLastDone = Date.now();
+      try { sessionStorage.setItem("_allListLastLoadAt", String(__allListLastDone)); } catch {}
+    }
+  })();
+
+  __allListInflight = p;
+  try { return await p; }
+  finally { __allListInflight = null; }
 }
 
 async function  apiJoinable(){
@@ -2184,6 +2214,16 @@ function finalizeVaultOpenVideoWin(){
   __vaultVideoPendingWin = null;
 }
 
+function disableTemporarily(btn, ms = 5000) {
+  if (!btn) return;
+  btn.disabled = true;
+  btn.classList.add("is-disabled"); // optional CSS hook
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.classList.remove("is-disabled");
+  }, ms);
+}
+
 // #endregion
 
 
@@ -2228,7 +2268,7 @@ async function  showGameStage(missionRaw){
 
   // Build lower HUD pills using chain for Enrolling/Arming
   if (Number(mission?.status) === 1 || Number(mission?.status) === 2) {
-    await rehydratePillsFromChain(mission, "openStage");
+    await rehydratePillsFromChain(mission, "openStage", true);
   } else {
     buildStageLowerHudForStatus(mission);
   }
@@ -2356,23 +2396,22 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
   poolCurrent: {
     label: "Pool (current)",
     value: m => {
-      // 1) Prefer the live/optimistic value set by rehydratePillsFromChain / handleEnrollClick
-      if (m?.cro_current_wei != null) {
-        return `${weiToCro(m.cro_current_wei, 2)} CRO`;
-      }
-      // 2) Enrolling fallback: compute from initial + fee * joined
-      if (Number(m?.status) === 1 &&
-          m?.cro_initial_wei != null &&
-          m?.enrollment_amount_wei != null) {
+      const st = Number(m?.status);
+      if (st === 1 && m?.cro_initial_wei != null && m?.enrollment_amount_wei != null) {
         const initialWei = BigInt(String(m.cro_initial_wei || "0"));
         const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
-        // Use the same sources as the Players pill so both numbers move together
+        // Use the same sources as the Players pill so both move together
         const joined = BigInt(Math.max(
           Array.isArray(m?.enrollments) ? m.enrollments.length : 0,
           Number(__lastChainPlayers || 0),
           Number(optimisticGuard?.players || 0)
         ));
-        return `${weiToCro((initialWei + feeWei * joined).toString(), 2)} CRO`;
+        const derived = initialWei + feeWei * joined;
+        const current = BigInt(String(m?.cro_current_wei || "0"));
+        return `${weiToCro((current > derived ? current : derived).toString(), 2)} CRO`;
+      }
+      if (m?.cro_current_wei != null) {
+        return `${weiToCro(m.cro_current_wei, 2)} CRO`;
       }
       return "—";
     }
@@ -2477,18 +2516,17 @@ async function  rehydratePillsFromChain(missionOverride = null, why = "", force 
     const initialWei = BigInt(String(mSnap.cro_initial_wei       || "0"));
     const derived    = (initialWei + feeWei * BigInt(playersCnt)).toString();
 
+    // Enrolling should always be computed from initial + fee * playersCnt
     let croNow;
     const stNum = Number(mSnap?.status);
-    if (chainNow) {
+    if (stNum === 1) {
+      croNow = derived;               // <- ignore chainNow while Enrolling
+    } else if (chainNow) {
       croNow = chainNow;
-    } else if (stNum === 1) {
-      // Enrolling only: initial + fee * joined
-      croNow = derived;
     } else {
-      // keep last known current (don’t pass empty string through)
       croNow = (mSnap.cro_current_wei != null && mSnap.cro_current_wei !== "")
               ? String(mSnap.cro_current_wei)
-              : String(__lastChainCroWei || ""); // or leave undefined to show "—"
+              : String(__lastChainCroWei || "");
     }
 
     // NEW: keep a cache of the last chain-truth so UI never regresses
@@ -4468,7 +4506,9 @@ connectBtn.addEventListener     ("click", () => {
 btnAllMissions?.addEventListener("click", async () => {
   await cleanupMissionDetail();
   showOnlySection("allMissionsSection");
-  await fetchAndRenderAllMissions(); 
+  // fast paint from cache; guarded fetch will no-op during cool-down
+  try { applyAllMissionFiltersAndRender(); } catch {}
+  fetchAndRenderAllMissions();
 });
 
 btnJoinable?.addEventListener   ("click", async () => {
@@ -4721,15 +4761,24 @@ function        updateConnectText(){
   if (span) span.textContent = walletAddress ? shorten(walletAddress) : "Connect Wallet";
 }
 
-async function  init(){
+async function init(){
   // 0) show list immediately
   showOnlySection("allMissionsSection");
+
+  // Disable All-Missions refresh button for 5 seconds after showing the page
+  try {
+    if (els.refreshAllBtn) {
+      els.refreshAllBtn.disabled = true;
+      setTimeout(() => { try { els.refreshAllBtn.disabled = false; } catch {} }, 5000);
+    }
+  } catch {}
 
   document.addEventListener('click', enableVaultSoundOnce, { once: true });
 
   // 1) wire buttons BEFORE any awaited network work
   els.refreshJoinableBtn?.addEventListener("click", async () => {
     try {
+      disableTemporarily(els.refreshJoinableBtn, 5000);
       const joinable = await apiJoinable();
       renderJoinable(joinable);
       startJoinableTicker();
@@ -4742,6 +4791,7 @@ async function  init(){
     if (allLoadBusy) return;
     allLoadBusy = true;
     try {
+      disableTemporarily(els.refreshAllBtn, 5000);
       await withTimeout(fetchAndRenderAllMissions(), 12000);
     } catch (e) {
       console.warn("Refresh All Missions timed out/failed:", e);
@@ -4754,9 +4804,31 @@ async function  init(){
   // 2) other existing listeners (unchanged)
   els.closeMissionBtn?.addEventListener("click", closeMission);
 
-  // 3) kick off first load with a timeout so init never “hangs”
+  // 3) kick off first load; add a small delay if page was reloaded to avoid stampede
+  let __startupDelayMs = 0;
   try {
-    await withTimeout(fetchAndRenderAllMissions(), 12000);
+    const nav = performance.getEntriesByType?.("navigation");
+    const isReload = !!(nav && nav[0] && nav[0].type === "reload");
+    if (isReload) __startupDelayMs = 800;
+  } catch {}
+
+  // 3) kick off first load, but throttle if the tab was just hard-refreshed
+  try {
+    const key = "_allListLastLoadAt";
+    const last = Number(sessionStorage.getItem(key) || 0);
+    const gap  = Date.now() - last;
+
+    const start = async () => {
+      await withTimeout(fetchAndRenderAllMissions(), 12000);
+      try { sessionStorage.setItem(key, String(Date.now())); } catch {}
+    };
+
+    if (gap < 3500) {
+      // Delay just enough so the total gap is ≥ 3.5s
+      setTimeout(() => { start().catch(()=>{}); }, 3500 - gap);
+    } else {
+      await start();
+    }
   } catch (e) {
     console.warn("Initial All Missions load timed out/failed:", e);
     showAlert("Loading All Missions timed out. Tap Refresh to retry.", "warning");
