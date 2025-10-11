@@ -4348,7 +4348,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
               : `${formatLocalDateTime(mission.mission_end)}`}
           </div>
 
-        <div class="label">Data updated</div>
+        <div class="label">Data updated at</div>
         <div class="value">
           <span id="updatedAtStamp"
                 data-updated="${Math.max(mission.updated_at || 0, Math.floor((__lastPushTs || 0)/1000))}">
