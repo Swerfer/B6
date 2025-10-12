@@ -1852,7 +1852,7 @@ namespace B6.Indexer
             return ex.InnerException != null && TryGetBenignProviderCode(ex.InnerException, out code);
         }
 
-        private void                                    NoteBenign(string kind, string code){
+        private void                                    NoteBenign                  (string kind, string code){
             try
             {
                 string key;
@@ -2346,33 +2346,38 @@ namespace B6.Indexer
             }
         }
 
-       private async Task<bool>                         NeedsAutoFinalizeAsync      (string mission, CancellationToken token, byte? cachedRt = null) {
+        private async Task<bool>                        NeedsAutoFinalizeAsync      (string mission, CancellationToken token, byte? cachedRt = null) {
 
-            // 1) DB guard: skip only if already fully final (status in 6,7)
+            // DB read: prefer realtime_status when present
             short? dbStatus = null;
+            short? dbRt     = null;
             await using (var c = new NpgsqlConnection(_pg))
             {
                 await c.OpenAsync(token);
-                const string sql = @"select status from missions where mission_address=@a limit 1;";
+                const string sql = @"select status, realtime_status from missions where mission_address=@a limit 1;";
                 await using var cmd = new NpgsqlCommand(sql, c);
                 cmd.Parameters.AddWithValue("a", mission);
-                var v = await cmd.ExecuteScalarAsync(token);
-                if (v is short s) dbStatus = s;
+                await using var rd = await cmd.ExecuteReaderAsync(token);
+                if (await rd.ReadAsync(token))
+                {
+                    if (!(rd["status"] is DBNull))           dbStatus = (short)rd["status"];
+                    if (!(rd["realtime_status"] is DBNull))  dbRt     = (short)rd["realtime_status"];
+                }
             }
+
             // If DB already fully final or refunded, no need to finalize.
             if (dbStatus == 6 || dbStatus == 7) return false;
 
-            // 2) finalize iff getRealtimeStatus() reports PartlySuccess (5).
-            var rt = cachedRt ?? await RunRpc(
-                w => w.Eth.GetContractQueryHandler<GetRealtimeStatusFunction>()
-                        .QueryAsync<byte>(mission, new GetRealtimeStatusFunction()),
-                "Call.getRealtimeStatus");
+            // Compute effective status: cached RT (if provided) → DB realtime_status → DB status
+            var eff = (byte)((cachedRt.HasValue ? cachedRt.Value
+                    : (dbRt.HasValue ? dbRt.Value
+                    : (dbStatus ?? 0))));
 
-            return rt == 5; // PartlySuccess
+            // Only finalize when effective status is PartlySuccess (5)
+            return eff == 5;
         }
 
-
-        private async Task                              TryAutoFinalizeAsync(string mission, CancellationToken token, byte? cachedRt = null) {
+        private async Task                              TryAutoFinalizeAsync        (string mission, CancellationToken token, byte? cachedRt = null) {
             //_log.LogInformation("TryAutoFinalizeAsync - {mission}", mission);
             if (string.IsNullOrWhiteSpace(_ownerPk)) {
                 _log.LogDebug("Auto-finalize skipped for {mission}: missing Owner--PK/Owner:PK", mission);
