@@ -3510,33 +3510,33 @@ function        renderCtaPaused         (host, mission){
     return; // important: no Cooldown button
   }
 
-  // OLD path (unchanged): show disabled Cooldown button + normal lines
+  // Paused: disabled button with visible "Cooldown: mm:ss"
   const g = document.createElementNS(SVG_NS, "g");
   g.setAttribute("class", "cta-btn cta-disabled");
   g.setAttribute("transform", `translate(${x},${y})`);
 
-  const rect = document.createElementNS(SVG_NS, "rect");
-  rect.setAttribute("x", "0"); rect.setAttribute("y", "0");
-  rect.setAttribute("width", String(btnW));
-  rect.setAttribute("height", String(btnH));
-  rect.setAttribute("rx", "12");
-  rect.setAttribute("class", bg);
+  // draw the PNG button background (bg is an image path, not a CSS class)
+  g.appendChild(svgImage(bg, 0, 0, btnW, btnH));
 
+  // centered countdown text on top of the button
   const label = document.createElementNS(SVG_NS, "text");
-  label.setAttribute("class", text);
-  label.setAttribute("x", String(Math.round(btnW/2)));
-  label.setAttribute("y", String(Math.round(btnH/2) + txtDy + 5));
+  label.setAttribute("x", String(Math.round(btnW / 2)));
+  label.setAttribute("y", String(Math.round(btnH / 2) + txtDy + 5));
   label.setAttribute("text-anchor", "middle");
   label.setAttribute("dominant-baseline", "middle");
+  label.setAttribute("class", "cta-sub");
+  label.style.fill = stageTextFill();
   label.textContent = "Cooldown: ";
-  const t = document.createElementNS(SVG_NS, "tspan");
-  // Use the real cooldown end (pause_timestamp + pause duration)
-  const info = cooldownInfo(mission);
-  t.setAttribute("data-cooldown-end", String(info.pauseEnd || 0));
-  t.textContent = "—";
-  label.appendChild(t);
 
-  g.appendChild(rect);
+  // live-updating countdown value (ticked elsewhere via data-cooldown-end)
+  const t = document.createElementNS(SVG_NS, "tspan");
+  const info = cooldownInfo(mission);
+  const end = Number(info.pauseEnd || 0);
+  t.setAttribute("data-cooldown-end", String(end));
+  // paint an initial value to avoid a dash flash
+  t.textContent = end > 0 ? formatMMSS(Math.max(0, end - Math.floor(Date.now() / 1000))) : "—";
+
+  label.appendChild(t);
   g.appendChild(label);
   host.appendChild(g);
 
