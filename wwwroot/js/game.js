@@ -1131,9 +1131,10 @@ function        setVaultDisplay(valueStr){
   const num  = valueStr.slice(0, -1);
 
   // Left-pad number to 2 digits (blank is allowed on the left)
-  let d0 = " ", d1 = " ";
-  if (num.length === 1) d1 = num;
-  else if (num.length >= 2){ d0 = num[num.length - 2]; d1 = num[num.length - 1]; }
+  // Always show 2 digits (e.g. 03 instead of 3)
+  const padded = num.padStart(2, "0");
+  const d0 = padded[0];
+  const d1 = padded[1];
 
   // Update two digit groups
   const map   = root.__segMap;
