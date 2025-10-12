@@ -2877,6 +2877,15 @@ async function  handleBankItClick       (mission){
   const signer = getSigner?.();
   if (!signer) { showAlert("Connect your wallet first.", "error"); return; }
 
+  // Disable BANK IT CTA during tx to prevent multiple clicks
+  try {
+    const btn = document.querySelector("#stageCtaGroup .cta-btn");
+    if (btn) {
+      btn.classList.add("cta-disabled");
+      btn.setAttribute("tabindex", "-1");
+    }
+  } catch {}
+
   // Show immediately for the clicking player (prevents race with fast RoundResult)
   showAlert("Round called. Waiting for result…", "info");
 
@@ -2983,6 +2992,16 @@ async function  handleBankItClick       (mission){
                             startedAt: Math.floor(Date.now()/1000),
                             hadResult: false };
       setTimeout(() => { __bankingInFlight = null; }, 12000);
+
+      // Re-enable BANK IT (we didn't change status)
+      try {
+        const btn = document.querySelector("#stageCtaGroup .cta-btn");
+        if (btn) {
+          btn.classList.remove("cta-disabled");
+          btn.setAttribute("tabindex", "0");
+        }
+      } catch {}
+
       return;
     } else {
       const custom = missionCustomErrorMessage(err);
@@ -2993,6 +3012,17 @@ async function  handleBankItClick       (mission){
       if (stageCurrentStatus === 3 && (isCooldownError(err) || /Cooldown/i.test(custom || ""))) {
         await flipStageToPausedOptimistic(mission);
       }
+
+      // If we are still in Active (3), re-enable BANK IT; otherwise (Paused), renderer controls state
+      try {
+        if (Number(stageCurrentStatus) === 3) {
+          const btn = document.querySelector("#stageCtaGroup .cta-btn");
+          if (btn) {
+            btn.classList.remove("cta-disabled");
+            btn.setAttribute("tabindex", "0");
+          }
+        }
+      } catch {}
     }
   }
 }
