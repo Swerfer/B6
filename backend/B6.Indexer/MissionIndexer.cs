@@ -186,27 +186,34 @@ namespace B6.Indexer
             await using var conn = new NpgsqlConnection(_pg);
             await conn.OpenAsync(token);
             await using var cmd = new NpgsqlCommand(@"
+                with base as (
+                    select
+                        m.mission_address,
+                        coalesce(m.last_seen_block,0)::bigint                as from_block,
+                        coalesce((
+                            select max(h.block_number)::bigint
+                            from mission_status_history h
+                            where h.mission_address = m.mission_address
+                            and h.to_status in (6,7)
+                        ), null)                                             as final_blk,
+                        coalesce(m.realtime_status, m.status, 0)::smallint   as eff_status
+                    from missions m
+                    where coalesce(m.last_seen_block,0) < @tipSafe
+                    and coalesce(m.status,0) not in (0,2)
+                )
                 select
-                    m.mission_address,
-                    coalesce(m.last_seen_block,0)::bigint as from_block,
-                    coalesce((
-                        select max(h.block_number)::bigint
-                        from mission_status_history h
-                        where h.mission_address = m.mission_address
-                        and h.to_status in (6,7)          -- Ended or Refunded
-                    ), null) as final_blk,
-                    coalesce(m.status,0)::smallint as status,
-                    case when coalesce(m.status,0) = 7 then
+                    from_block,
+                    final_blk,
+                    eff_status as status,
+                    case when eff_status = 7 then
                         not exists (
                             select 1
                             from mission_enrollments e
-                            where e.mission_address = m.mission_address
+                            where e.mission_address = base.mission_address
                             and coalesce(e.refunded, false) = false
                         )
                     else true end as all_refunded_or_not_needed
-                from missions m
-                where coalesce(m.last_seen_block,0) < @tipSafe
-                and coalesce(m.status,0) not in (0,2);", conn);
+                from base;", conn);
 
             cmd.Parameters.AddWithValue("tipSafe", tipSafe);
 
@@ -217,7 +224,7 @@ namespace B6.Indexer
                 var status  = Convert.ToInt16(rd["status"]);
                 var finalObj = rd["final_blk"];
                 long? final  = finalObj is DBNull ? (long?)null : (long)finalObj;
-                var allOk    = (bool)rd["all_refunded_or_not_needed"];   // true for status 6, or 7 with all refunded
+                var allOk    = (bool)rd["all_refunded_or_not_needed"];
 
                 long to = tipSafe;
                 if (final is long fb && (status == 6 || (status == 7 && allOk)))
@@ -821,8 +828,9 @@ namespace B6.Indexer
         }
 
         private async Task                              ScanMissionEventsAsync      (CancellationToken token, long? latestOverride = null) {
-            // load missions + last_seen_block
-            var missions = new List<(string addr, long fromBlock, long stopAt)>();
+            // load missions + last_seen_block (+ effective status + refund flag)
+            var missions = new List<(string addr, long fromBlock, long stopAt, short status, bool allOk)>();
+
             var latest  = latestOverride ?? await GetLatestBlockAsync();
             var tipSafe = latest - REORG_CUSHION;
             if (tipSafe <= 0) return;
@@ -831,28 +839,36 @@ namespace B6.Indexer
             {
                 await conn.OpenAsync(token);
                 await using var cmd = new NpgsqlCommand(@"
+                    with base as (
+                        select
+                            m.mission_address,
+                            coalesce(m.last_seen_block,0)::bigint                       as from_block,
+                            coalesce((
+                                select max(h.block_number)::bigint
+                                from mission_status_history h
+                                where h.mission_address = m.mission_address
+                                and h.to_status in (6,7)
+                            ), null)                                                   as final_blk,
+                            coalesce(m.realtime_status, m.status, 0)::smallint          as eff_status
+                        from missions m
+                        where coalesce(m.last_seen_block,0) < @safeTip
+                        and coalesce(m.status,0) not in (0,2)  -- keep your existing skip for Pending/Arming
+                    )
                     select
-                        m.mission_address,
-                        coalesce(m.last_seen_block,0)::bigint as from_block,
-                        coalesce((
-                            select max(h.block_number)::bigint
-                            from mission_status_history h
-                            where h.mission_address = m.mission_address
-                            and h.to_status in (6,7)
-                        ), null) as final_blk,
-                        coalesce(m.status,0)::smallint as status,
-                        case when coalesce(m.status,0) = 7 then
+                        mission_address,
+                        from_block,
+                        final_blk,
+                        eff_status as status,  -- surface as `status` for downstream code
+                        case when eff_status = 7 then
                             not exists (
                                 select 1
                                 from mission_enrollments e
-                                where e.mission_address = m.mission_address
+                                where e.mission_address = base.mission_address
                                 and coalesce(e.refunded, false) = false
                             )
                         else true end as all_refunded_or_not_needed
-                    from missions m
-                    where coalesce(m.last_seen_block,0) < @safeTip
-                    and coalesce(m.status,0) not in (0,2)
-                    order by m.mission_address;", conn);
+                    from base
+                    order by mission_address;", conn);
                 cmd.Parameters.AddWithValue("safeTip", tipSafe);
 
                 await using var rd = await cmd.ExecuteReaderAsync(token);
@@ -860,7 +876,7 @@ namespace B6.Indexer
                 {
                     var a       = (rd["mission_address"] as string ?? "").ToLower(CultureInfo.InvariantCulture);
                     var from    = Convert.ToInt64(rd["from_block"]);
-                    var status  = Convert.ToInt16(rd["status"]);
+                    var status  = Convert.ToInt16(rd["status"]);                // ← now "effective status"
                     var finalOb = rd["final_blk"];
                     long? final = finalOb is DBNull ? (long?)null : (long)finalOb;
                     var allOk   = (bool)rd["all_refunded_or_not_needed"];
@@ -872,7 +888,7 @@ namespace B6.Indexer
                         stopAt = Math.Min(tipSafe, freeze);
                     }
                     // Forced mission scans the entire window to tipSafe
-                    missions.Add((a, from, stopAt));
+                    missions.Add((a, from, stopAt, status, allOk));             // ← carry status+allOk forward
                 }
             }
             if (missions.Count == 0)
@@ -882,7 +898,7 @@ namespace B6.Indexer
 
             var windowsBudget = _maxWinTotal;
 
-            foreach (var (addr, lastSeen, stopAt) in missions)
+            foreach (var (addr, lastSeen, stopAt, status, allOk) in missions)
             {
                 if (windowsBudget <= 0) break;
                 var start = Math.Max(0, lastSeen + 1);
@@ -1094,12 +1110,12 @@ namespace B6.Indexer
                             }
 
                             // ── Fallback: if broad filter found nothing, probe RoundCalled directly once ──────────
-                            if ((rawLogs == null || rawLogs.Length == 0) && roundLogs.Count == 0)
+                            // Gate by effective mission status: only probe rounds for ACTIVE missions (status == 3)
+                            if ((rawLogs == null || rawLogs.Length == 0) && roundLogs.Count == 0 && status == 3)
                             {
                                 try
                                 {
                                     var eRound = _web3.Eth.GetEvent<RoundCalledEventDTO>(addr);
-
                                     var probe  = await RunRpc(
                                         w => {
                                             var f = eRound.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
@@ -1107,11 +1123,9 @@ namespace B6.Indexer
                                             return eRound.GetAllChangesAsync(f);
                                         },
                                         "GetLogs.Mission.RoundCalled.Probe");
-
                                     if (probe != null && probe.Count > 0)
                                     {
-                                        foreach (var dec in probe)
-                                            roundLogs.Add(dec);
+                                        foreach (var dec in probe) roundLogs.Add(dec);
                                         _log.LogWarning("MissionScanner: {addr} window {from}-{to} broad filter missed rounds; probe found {n}",
                                             addr, windowFrom, windowTo, probe.Count);
                                     }
@@ -1123,33 +1137,43 @@ namespace B6.Indexer
                             }
 
                             // If broad filter returned 0, also probe other mission events once
+                            // Gate by effective mission status to avoid impossible probes:
+                            // - PlayerEnrolled only during ENROLLING (status == 1)
+                            // - Refunds only when REFUNDED (status == 7) AND not all refunded (allOk == false)
                             if ((rawLogs == null || rawLogs.Length == 0))
                             {
                                 try
                                 {
-                                    // Enrollments
-                                    var ePE = _web3.Eth.GetEvent<PlayerEnrolledEventDTO>(addr);
-                                    var pe  = await RunRpc(
-                                        w => ePE.GetAllChangesAsync(ePE.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
-                                                                                        new BlockParameter(new HexBigInteger(windowTo)))),
-                                        "GetLogs.Mission.PlayerEnrolled.Probe");
-                                    if (pe != null && pe.Count > 0) peLogs.AddRange(pe);
+                                    // Enrollments (only when enrolling)
+                                    if (status == 1)
+                                    {
+                                        var ePE = _web3.Eth.GetEvent<PlayerEnrolledEventDTO>(addr);
+                                        var pe  = await RunRpc(
+                                            w => ePE.GetAllChangesAsync(ePE.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
+                                                                                            new BlockParameter(new HexBigInteger(windowTo)))),
+                                            "GetLogs.Mission.PlayerEnrolled.Probe");
+                                        if (pe != null && pe.Count > 0) peLogs.AddRange(pe);
+                                    }
 
-                                    // Single refunds
-                                    var ePR = _web3.Eth.GetEvent<PlayerRefundedEventDTO>(addr);
-                                    var pr  = await RunRpc(
-                                        w => ePR.GetAllChangesAsync(ePR.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
-                                                                                        new BlockParameter(new HexBigInteger(windowTo)))),
-                                        "GetLogs.Mission.PlayerRefunded.Probe");
-                                    if (pr != null && pr.Count > 0) prLogs.AddRange(pr);
+                                    // Refunds (only when refunded state and there is still work to do)
+                                    if (status == 7 && !allOk)
+                                    {
+                                        // Single refunds
+                                        var ePR = _web3.Eth.GetEvent<PlayerRefundedEventDTO>(addr);
+                                        var pr  = await RunRpc(
+                                            w => ePR.GetAllChangesAsync(ePR.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
+                                                                                            new BlockParameter(new HexBigInteger(windowTo)))),
+                                            "GetLogs.Mission.PlayerRefunded.Probe");
+                                        if (pr != null && pr.Count > 0) prLogs.AddRange(pr);
 
-                                    // Batch refunds
-                                    var eMR = _web3.Eth.GetEvent<MissionRefundedEventDTO>(addr);
-                                    var mr  = await RunRpc(
-                                        w => eMR.GetAllChangesAsync(eMR.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
-                                                                                        new BlockParameter(new HexBigInteger(windowTo)))),
-                                        "GetLogs.Mission.MissionRefunded.Probe");
-                                    if (mr != null && mr.Count > 0) mrLogs.AddRange(mr);
+                                        // Batch refunds
+                                        var eMR = _web3.Eth.GetEvent<MissionRefundedEventDTO>(addr);
+                                        var mr  = await RunRpc(
+                                            w => eMR.GetAllChangesAsync(eMR.CreateFilterInput(new BlockParameter(new HexBigInteger(windowFrom)),
+                                                                                            new BlockParameter(new HexBigInteger(windowTo)))),
+                                            "GetLogs.Mission.MissionRefunded.Probe");
+                                        if (mr != null && mr.Count > 0) mrLogs.AddRange(mr);
+                                    }
                                 }
                                 catch (Exception ex)
                                 {
@@ -1734,25 +1758,31 @@ namespace B6.Indexer
 
             foreach (var n in byCtx.Values) total += n;
 
-            // Build compact messages
-            string ctxPart = (byCtx.Count == 0)
-                ? "none"
-                : string.Join(", ", byCtx.OrderByDescending(kv => kv.Value)
-                                        .Select(kv => $"{kv.Key}={kv.Value}"));
+                // Build pretty multi-line message for Event Viewer
+                var nl = Environment.NewLine;
 
-            string callerPart = (byCaller.Count == 0)
-                ? "none"
-                : string.Join(" | ", byCaller.OrderByDescending(kv => kv.Value.Values.Sum())
+                string ctxPretty = (byCtx.Count == 0)
+                    ? "  - none"
+                    : string.Join(nl, byCtx.OrderByDescending(kv => kv.Value)
+                                        .Select(kv => $"  - {kv.Key}={kv.Value}"));
+
+                string callerPretty = (byCaller.Count == 0)
+                    ? "  - none"
+                    : string.Join(nl, byCaller.OrderByDescending(kv => kv.Value.Values.Sum())
                                             .Select(kv =>
-                                                $"{kv.Key}: " + string.Join(", ", kv.Value.OrderByDescending(x => x.Value)
-                                                                                        .Select(x => $"{x.Key}={x.Value}"))));
-            if (_firstRPCSummary) {
+                                                $"  - {kv.Key}:{nl}" +
+                                                string.Join(nl, kv.Value.OrderByDescending(x => x.Value)
+                                                                        .Select(x => $"    - {x.Key}={x.Value}"))));
+
+                string header = _firstRPCSummary ? "RPC Summary (first minute)" : "RPC Summary (last hour)";
                 _firstRPCSummary = false;
-                _log.LogInformation(new EventId(9001, "RpcSummary"), "RPC Summary (first minute) total={total}; ByContext: {ctx}; ByCaller: {caller}", total, ctxPart, callerPart);
-            }
-            else {
-                _log.LogInformation(new EventId(9001, "RpcSummary"), "RPC Summary (last hour) total={total}; ByContext: {ctx}; ByCaller: {caller}", total, ctxPart, callerPart);
-            }
+
+                string msg =
+                    $"{header} total={total}{nl}" +
+                    $"ByContext:{nl}{ctxPretty}{nl}{nl}" +
+                    $"ByCaller:{nl}{callerPretty}";
+
+                _log.LogInformation(new EventId(9001, "RpcSummary"), "{msg}", msg);
 
         }
 
