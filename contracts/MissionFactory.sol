@@ -52,7 +52,8 @@
  *
  * ## 🏦 Economics & settlement
  * After refunds are secured/reserved:
- * - **InviteOnly**: **100%** of leftover goes to the **factory owner** (`missionFactory.owner()`).
+ * - **InviteOnly**: **100%** of leftover goes to the **factory owner**
+ * - **UserMission**: **50%** to the factory owner; **50%** to the **creator**
  * - **Other types**: **25%** to the factory owner; **75%** to the **per-type reserve**
  *   `reservedFunds[missionType]`.
  * On creating a new mission, the factory **optionally boosts** it with

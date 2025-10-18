@@ -54,7 +54,6 @@ var host = Host.CreateDefaultBuilder(args)
     .ConfigureServices((ctx, services) =>
     {
         services.AddHostedService<MissionIndexer>();
-        services.AddHostedService<RealtimeStatusRefresher>();
     })
     .Build();
 
