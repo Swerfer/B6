@@ -76,17 +76,48 @@ var app = builder.Build();
 app.UseCors("AllowFrontend");
 
 /* --------------------- Helpers ---------------------*/
-static long     ToUnixSeconds(DateTime dtUtc){
+static long         ToUnixSeconds(DateTime dtUtc){
     if (dtUtc.Kind != DateTimeKind.Utc)
         dtUtc = DateTime.SpecifyKind(dtUtc, DateTimeKind.Utc);
     return new DateTimeOffset(dtUtc).ToUnixTimeSeconds();
 }
 
-static string   GetRequired(IConfiguration cfg, string key){
+static string       GetRequired(IConfiguration cfg, string key){
     var v = cfg[key];
     if (string.IsNullOrWhiteSpace(v))
         throw new InvalidOperationException($"Missing configuration key: {key}");
     return v;
+}
+
+static async Task   KickMissionAsync(string mission, string? txHash, IConfiguration cfg){
+    try
+    {
+        var cs = cfg.GetConnectionString("Db");
+        await using var conn = new Npgsql.NpgsqlConnection(cs);
+        await conn.OpenAsync();
+
+        await using (var cmd = new Npgsql.NpgsqlCommand(@"
+            insert into indexer_kicks (mission_address, tx_hash)
+            values (@m, @h);", conn))
+        {
+            cmd.Parameters.AddWithValue("m", mission);
+            cmd.Parameters.AddWithValue("h", (object?)txHash ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        await using (var cmd2 = new Npgsql.NpgsqlCommand("NOTIFY b6_indexer_kick, @payload;", conn))
+        {
+            cmd2.Parameters.AddWithValue("payload", mission);
+            await cmd2.ExecuteNonQueryAsync();
+        }
+
+        await hub.Clients.Group(mission).SendAsync("MissionUpdated", mission);
+    }
+    catch (Exception ex)
+    {
+        // non-fatal: kick/notify failure shouldn't break response
+        Console.WriteLine($"indexer kick failed for {mission}: {ex.Message}");
+    }
 }
 
 /* ------------------- API endpoints ----------------- */
@@ -132,7 +163,7 @@ app.MapPost("/rpc",                     async (HttpRequest req, IHttpClientFacto
 });
 
 // /api/secrets -> list all Key Vault secrets (for admin use only)
-app.MapGet("/secrets", async (HttpRequest req, IConfiguration cfg) =>{
+app.MapGet("/secrets",                  async (HttpRequest req, IConfiguration cfg) =>{
     // --- 1) Ask the browser for Basic credentials if none present
     var auth = req.Headers["Authorization"].ToString();
     if (string.IsNullOrWhiteSpace(auth) || !auth.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
@@ -206,26 +237,32 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
     // status < 5  → Pending/Enrolling/Arming/Active/Paused (not ended)
     var sql = @"
       select
-        mission_address,
-        name,
-        mission_type,
-        status,
-        enrollment_start,
-        enrollment_end,
-        enrollment_amount_wei::text  as enrollment_amount_wei,
-        enrollment_min_players,
-        enrollment_max_players,
-        mission_start,
-        mission_end,
-        mission_rounds_total,
-        round_count,
-        cro_start_wei::text          as cro_start_wei,
-        cro_current_wei::text        as cro_current_wei,
-        cro_initial_wei::text        as cro_initial_wei,
-        pause_timestamp,
-        last_seen_block,
-        updated_at
-      from missions
+        m.mission_address,
+        m.name,
+        m.mission_type,
+        m.status,
+        m.enrollment_start,
+        m.enrollment_end,
+        m.enrollment_amount_wei::text  as enrollment_amount_wei,
+        m.enrollment_min_players,
+        m.enrollment_max_players,
+        m.mission_start,
+        m.mission_end,
+        m.mission_rounds_total,
+        m.round_count,
+        m.cro_initial_wei::text        as cro_initial_wei,
+        m.cro_start_wei::text          as cro_start_wei,
+        m.cro_current_wei::text        as cro_current_wei,
+        m.pause_timestamp,
+        m.updated_at,
+        m.mission_created,
+        m.round_pause_secs,
+        m.last_round_pause_secs,
+        m.creator_address,
+        m.all_refunded,
+        coalesce(c.enrolled,0)       as enrolled_players
+      from missions m
+      left join counts c using (mission_address)
       where status < 5
       order by enrollment_end asc nulls last, mission_end asc nulls last;";
 
@@ -253,8 +290,13 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
             cro_current_wei        = (string)rd["cro_current_wei"],
             cro_initial_wei        = (string)rd["cro_initial_wei"],
             pause_timestamp        = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
-            last_seen_block        = rd["last_seen_block"]  is DBNull ? null : (long?) rd["last_seen_block"],
-            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime())
+            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
+            mission_created        = (long)  rd["mission_created"],
+            round_pause_secs       = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
+            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],
+            creator_address        = rd["creator_address"] as string,
+            all_refunded           = (bool)  rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            enrolled_players       = (int)   rd["enrolled_players"]
         });
     }
 
@@ -285,12 +327,23 @@ app.MapGet("/missions/joinable",        async (IConfiguration cfg) => {
         m.mission_start,
         m.mission_end,
         m.mission_rounds_total,
+        m.round_count,                               
+        m.cro_initial_wei::text      as cro_initial_wei, 
+        m.cro_start_wei::text        as cro_start_wei,  
+        m.cro_current_wei::text      as cro_current_wei, 
+        m.pause_timestamp,                            
+        m.updated_at,                               
+        m.mission_created,  
+        m.round_pause_secs,
+        m.last_round_pause_secs,                          
+        m.creator_address,                           
+        m.all_refunded,                               
         coalesce(c.enrolled,0)          as enrolled_players
-      from missions m
-      left join counts c using (mission_address)
-      where m.status = 1
-        and m.enrollment_end > (extract(epoch from now())::bigint)
-      order by m.enrollment_end asc;";
+    from missions m
+    left join counts c using (mission_address)
+    where m.status = 1
+    and m.enrollment_end > (extract(epoch from now())::bigint)
+    order by m.enrollment_end asc;";
 
     await using var cmd = new NpgsqlCommand(sql, conn);
     await using var rd  = await cmd.ExecuteReaderAsync();
@@ -311,6 +364,17 @@ app.MapGet("/missions/joinable",        async (IConfiguration cfg) => {
             mission_start          = (long)  rd["mission_start"],
             mission_end            = (long)  rd["mission_end"],
             mission_rounds_total   = (short) rd["mission_rounds_total"],
+            round_count            = (short) rd["round_count"],            
+            cro_start_wei          = (string)rd["cro_start_wei"],          
+            cro_current_wei        = (string)rd["cro_current_wei"],          
+            cro_initial_wei        = (string)rd["cro_initial_wei"],          
+            pause_timestamp        = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
+            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),        
+            mission_created        = (long)  rd["mission_created"],
+            round_pause_secs       = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
+            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],       
+            creator_address        = rd["creator_address"] as string,      
+            all_refunded           = (bool)  rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
             enrolled_players       = (int)   rd["enrolled_players"]
         });
     }
@@ -337,17 +401,27 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
         m.name,
         m.mission_type,
         m.status,
+        m.enrollment_start,
+        m.enrollment_end,
+        m.enrollment_amount_wei::text  as enrollment_amount_wei,
+        m.enrollment_min_players,
+        m.enrollment_max_players,
         m.mission_start,
         m.mission_end,
         m.mission_rounds_total,
-        m.round_count,
-        m.enrollment_min_players,
+        m.round_count,                               
+        m.cro_initial_wei::text      as cro_initial_wei, 
+        m.cro_start_wei::text        as cro_start_wei,  
+        m.cro_current_wei::text      as cro_current_wei, 
+        m.pause_timestamp,                            
+        m.updated_at,                               
+        m.mission_created,  
+        m.round_pause_secs,
+        m.last_round_pause_secs,                          
+        m.creator_address,                           
+        m.all_refunded,                          
         coalesce(c.enrolled,0) as enrolled_players,
-        case
-            when m.status = 7 and m.round_count = 0 and coalesce(c.enrolled,0) <  m.enrollment_min_players then 'Not enough players'
-            when m.status = 7 and m.round_count = 0 and coalesce(c.enrolled,0) >= m.enrollment_min_players then 'No rounds played'
-        else null
-        end as failure_reason,
+        case ... end as failure_reason,
         e.enrolled_at,
         e.refunded,
         e.refund_tx_hash
@@ -355,7 +429,8 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
     join missions m using (mission_address)
     left join counts c using (mission_address)
     where e.player_address = @p
-    order by m.status asc, m.mission_end asc nulls last;";
+    order by m.status asc, m.mission_end asc nulls last;
+    ";
 
     await using var cmd = new NpgsqlCommand(sql, conn);
     cmd.Parameters.AddWithValue("p", addr);
@@ -369,13 +444,26 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
             name                  = rd["name"] as string,
             mission_type          = (short) rd["mission_type"],
             status                = (short) rd["status"],
+            enrollment_start      = (long)  rd["enrollment_start"],
+            enrollment_end        = (long)  rd["enrollment_end"],
+            enrollment_amount_wei = (string)rd["enrollment_amount_wei"],
+            enrollment_max_players= (short) rd["enrollment_max_players"],
             mission_start         = (long)  rd["mission_start"],
             mission_end           = (long)  rd["mission_end"],
             mission_rounds_total  = (short) rd["mission_rounds_total"],
             round_count           = (short) rd["round_count"],
-            enrollment_min_players= (short) rd["enrollment_min_players"],   // +++
-            enrolled_players      = (int)   rd["enrolled_players"],         // +++
-            failure_reason        = rd["failure_reason"] as string,         // +++
+            cro_start_wei         = (string)rd["cro_start_wei"],
+            cro_current_wei       = (string)rd["cro_current_wei"],
+            cro_initial_wei       = (string)rd["cro_initial_wei"],
+            pause_timestamp       = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
+            updated_at            = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
+            mission_created       = (long)  rd["mission_created"],
+            round_pause_secs      = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
+            last_round_pause_secs = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],
+            creator_address       = rd["creator_address"] as string,
+            all_refunded          = (bool)  rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            enrolled_players      = (int)   rd["enrolled_players"],      
+            failure_reason        = rd["failure_reason"] as string,     
             enrolled_at           = rd["enrolled_at"] is DBNull
                 ? (long?)null
                 : ToUnixSeconds(((DateTime) rd["enrolled_at"]).ToUniversalTime()),
@@ -418,11 +506,14 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         m.round_count,
         m.cro_start_wei::text          as cro_start_wei,
         m.cro_current_wei::text        as cro_current_wei,
-        coalesce(m.cro_initial_wei, 0)::text as cro_initial_wei,
+        m.cro_initial_wei::text        as cro_initial_wei,
         m.pause_timestamp,
-        m.last_seen_block,
         m.updated_at,
         m.mission_created,
+        m.round_pause_secs,
+        m.last_round_pause_secs,
+        m.creator_address,
+        m.all_refunded,
         coalesce(c.enrolled,0)       as enrolled_players
       from missions m
       left join counts c using (mission_address)
@@ -443,7 +534,6 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         enrollment_amount_wei  = (string)rd["enrollment_amount_wei"],
         enrollment_min_players = (short) rd["enrollment_min_players"],
         enrollment_max_players = (short) rd["enrollment_max_players"],
-        enrolled_players       = (int)   rd["enrolled_players"],
         mission_start          = (long)  rd["mission_start"],
         mission_end            = (long)  rd["mission_end"],
         mission_rounds_total   = (short) rd["mission_rounds_total"],
@@ -452,9 +542,13 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         cro_current_wei        = (string)rd["cro_current_wei"],
         cro_initial_wei        = (string)rd["cro_initial_wei"],
         pause_timestamp        = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
-        last_seen_block        = rd["last_seen_block"]  is DBNull ? null : (long?) rd["last_seen_block"],
         updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
-        mission_created        = (long)  rd["mission_created"]
+        mission_created        = (long)  rd["mission_created"],
+        round_pause_secs       = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
+        last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],
+        creator_address        = rd["creator_address"] as string,
+        all_refunded           = (bool)  rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+        enrolled_players       = (int)   rd["enrolled_players"]
     };
     await rd.CloseAsync();
 
@@ -606,7 +700,7 @@ app.MapGet("/debug/push/{addr}",        async (string addr, IHubContext<GameHub>
     return Results.Ok(new { pushed = g });
 });
 
-app.MapGet("/debug/push-subs/{wallet}", async (string wallet, PushFanout fan) => {
+app.MapGet("/debug/push-subs/{wallet}",                                     async (string wallet,                  PushFanout fan) => {
     // intentionally minimal output so we can see if the server has anything to send to
     // uses the same DB read PushFanout uses
     var method = typeof(B6.Backend.Services.PushFanout).GetMethod("GetType"); // no-op to keep compiler happy with DI
@@ -616,19 +710,18 @@ app.MapGet("/debug/push-subs/{wallet}", async (string wallet, PushFanout fan) =>
 });
 
 // Debug: prune push subscriptions for a wallet.
-// If ?keep=<endpoint> is provided, keep only that endpoint; otherwise delete all.
-app.MapDelete("/debug/push-subs/{wallet}", async (string wallet, HttpRequest req, PushFanout fan) =>{
+app.MapDelete("/debug/push-subs/{wallet}",                                  async (string wallet, HttpRequest req, PushFanout fan) => {
     var keep = req.Query["keep"].ToString();
     var removed = await fan.PruneSubsAsync(wallet, string.IsNullOrWhiteSpace(keep) ? null : keep);
     return Results.Ok(new { wallet = wallet.ToLowerInvariant(), kept = string.IsNullOrWhiteSpace(keep) ? null : keep, removed });
 });
 
-app.MapMethods("/debug/push-web/{wallet}", new[] { "GET", "POST" }, async (string wallet, PushFanout fan) => {
+app.MapMethods("/debug/push-web/{wallet}",        new[] { "GET", "POST" },  async (string wallet,                  PushFanout fan) => {
     var (count, attempts) = await fan.DebugPushVerboseAsync(wallet);
     return Results.Ok(new { wallet = wallet.ToLowerInvariant(), subscriptionCount = count, attempts });
 });
 
-app.MapMethods("/debug/push-web-empty/{wallet}", new[] { "GET", "POST" }, async (string wallet, PushFanout fan) => {
+app.MapMethods("/debug/push-web-empty/{wallet}",  new[] { "GET", "POST" },  async (string wallet,                  PushFanout fan) => {
     var (count, attempts) = await fan.DebugPushVerboseAsync(wallet, noPayload: true);
     return Results.Ok(new { wallet = wallet.ToLowerInvariant(), subscriptionCount = count, attempts });
 });
@@ -687,9 +780,92 @@ app.MapGet("/debug/indexer/errors",     async (HttpRequest req, IConfiguration c
 /* ---------- HUB ---------- */
 app.MapHub<GameHub>("/hub/game");
 
-var bankPingThrottle = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+var createdPingThrottle = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+var enrollPingThrottle  = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+var bankPingThrottle    = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
-app.MapPost("/events/banked", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushFanout fan) => {
+app.MapPost("/events/created",          async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                      ) => {
+    string mission = null;
+    string txHash  = null; // optional – if you want to verify like /events/banked
+
+    try
+    {
+        using var doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
+        var root = doc.RootElement;
+
+        mission = root.TryGetProperty("mission", out var m) ? m.GetString() : null;
+        txHash  = root.TryGetProperty("txHash",  out var h) ? h.GetString() : null;
+    }
+    catch
+    {
+        return Results.BadRequest("Invalid JSON");
+    }
+
+    if (string.IsNullOrWhiteSpace(mission))
+        return Results.BadRequest("Missing mission");
+
+    mission = mission.ToLowerInvariant();
+
+    // Throttle: once per ~2s per mission (light abuse protection)
+    var now = DateTime.UtcNow;
+    if (createdPingThrottle.TryGetValue(mission, out var prev) && (now - prev) < TimeSpan.FromSeconds(2))
+        return Results.Ok(new { pushed = false, reason = "throttled" });
+    createdPingThrottle[mission] = now;
+
+    // Optional: verify tx (skip if txHash not provided)
+    if (!string.IsNullOrWhiteSpace(txHash))
+    {
+        var rpc  = cfg["Cronos:Rpc"] ?? "https://evm.cronos.org";
+        var web3 = new Nethereum.Web3.Web3(rpc);
+
+        var tx = await web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(txHash);
+        if (tx == null) return Results.BadRequest("Transaction not found");
+        var rc = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+        if (rc == null || rc.Status == null || rc.Status.Value != 1)
+            return Results.BadRequest("Transaction not successful");
+    }
+
+    await KickMissionAsync(mission, txHash, cfg);
+
+    return Results.Ok(new { pushed = true });
+});
+
+app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                      ) => {
+    string mission = null;
+    string player  = null;
+    string txHash  = null; // optional – verify if you want
+
+    try
+    {
+        using var doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
+        var root = doc.RootElement;
+
+        mission = root.TryGetProperty("mission", out var m) ? m.GetString() : null;
+        player  = root.TryGetProperty("player",  out var p) ? p.GetString() : null;
+        txHash  = root.TryGetProperty("txHash",  out var h) ? h.GetString() : null;
+    }
+    catch
+    {
+        return Results.BadRequest("Invalid JSON");
+    }
+
+    if (string.IsNullOrWhiteSpace(mission))
+        return Results.BadRequest("Missing mission");
+
+    mission = mission.ToLowerInvariant();
+
+    // Throttle per mission: once per ~2s
+    var now = DateTime.UtcNow;
+    if (enrollPingThrottle.TryGetValue(mission, out var prev) && (now - prev) < TimeSpan.FromSeconds(2))
+        return Results.Ok(new { pushed = false, reason = "throttled" });
+    enrollPingThrottle[mission] = now;
+
+    await KickMissionAsync(mission, txHash, cfg);
+
+    return Results.Ok(new { pushed = true });
+});
+
+app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub,                                     ) => {
     string mission = null;
     string txHash  = null;
 
@@ -731,37 +907,7 @@ app.MapPost("/events/banked", async (HttpRequest req, IConfiguration cfg, IHubCo
     if (rc == null || rc.Status == null || rc.Status.Value != 1)
         return Results.BadRequest("Transaction not successful");
 
-    // Emit immediate MissionUpdated to the mission group; spectators will refresh
-    await hub.Clients.Group(mission).SendAsync("MissionUpdated", mission);
-    await fan.OnMissionUpdatedAsync(mission);
-
-    // NEW: enqueue a kick for the indexer and NOTIFY listeners to wake immediately
-    try
-    {
-        var cs = cfg.GetConnectionString("Db");
-        await using var conn = new Npgsql.NpgsqlConnection(cs);
-        await conn.OpenAsync();
-
-        await using (var cmd = new Npgsql.NpgsqlCommand(@"
-            insert into indexer_kicks (mission_address, tx_hash)
-            values (@m, @h);", conn))
-        {
-            cmd.Parameters.AddWithValue("m", mission);
-            cmd.Parameters.AddWithValue("h", txHash);
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        await using (var cmd2 = new Npgsql.NpgsqlCommand("NOTIFY b6_indexer_kick, @payload;", conn))
-        {
-            cmd2.Parameters.AddWithValue("payload", mission);
-            await cmd2.ExecuteNonQueryAsync();
-        }
-    }
-    catch (Exception ex)
-    {
-        // non-fatal: kick/notify failing should not break the push path
-        Console.WriteLine($"indexer kick failed for {mission}: {ex.Message}");
-    }
+    await KickMissionAsync(mission, txHash, cfg);
 
     return Results.Ok(new { pushed = true });
 });
@@ -775,7 +921,7 @@ app.MapPost("/push/mission",            async (HttpRequest req, IConfiguration c
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/push/status",             async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto body,   PushFanout fan) => {
+app.MapPost("/push/status",             async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto  body,  PushFanout fan) => {
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
     var g = (body.Mission ?? "").ToLowerInvariant();
@@ -784,7 +930,7 @@ app.MapPost("/push/status",             async (HttpRequest req, IConfiguration c
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/push/round",              async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto body,    PushFanout fan) => {
+app.MapPost("/push/round",              async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto   body,  PushFanout fan) => {
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
     var g = (body.Mission ?? "").ToLowerInvariant();

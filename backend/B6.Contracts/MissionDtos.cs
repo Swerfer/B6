@@ -36,27 +36,43 @@ namespace B6.Contracts
     }
 
     [FunctionOutput]
-    public class MissionDataTuple : IFunctionOutputDTO {
-        [Parameter("address[]", "players",                1)]  public List<string>    Players                { get; set; } = new();
-        [Parameter("uint8",     "missionType",            2)]  public byte            MissionType            { get; set; }
-        [Parameter("uint256",   "enrollmentStart",        3)]  public BigInteger      EnrollmentStart        { get; set; }
-        [Parameter("uint256",   "enrollmentEnd",          4)]  public BigInteger      EnrollmentEnd          { get; set; }
-        [Parameter("uint256",   "enrollmentAmount",       5)]  public BigInteger      EnrollmentAmount       { get; set; }
-        [Parameter("uint8",     "enrollmentMinPlayers",   6)]  public byte            EnrollmentMinPlayers   { get; set; }
-        [Parameter("uint8",     "enrollmentMaxPlayers",   7)]  public byte            EnrollmentMaxPlayers   { get; set; }
-        [Parameter("uint8",     "roundPauseDuration",     8)]  public byte            RoundPauseDuration     { get; set; }
-        [Parameter("uint8",     "lastRoundPauseDuration", 9)]  public byte            LastRoundPauseDuration { get; set; }
-        [Parameter("uint256",   "missionStart",          10)]  public BigInteger      MissionStart           { get; set; }
-        [Parameter("uint256",   "missionEnd",            11)]  public BigInteger      MissionEnd             { get; set; }
-        [Parameter("uint8",     "missionRounds",         12)]  public byte            MissionRounds          { get; set; }
-        [Parameter("uint8",     "roundCount",            13)]  public byte            RoundCount             { get; set; }
-        [Parameter("uint256",   "croStart",              14)]  public BigInteger      CroStart               { get; set; } 
-        [Parameter("uint256",   "croCurrent",            15)]  public BigInteger      CroCurrent             { get; set; } 
-        [Parameter("tuple[]",   "playersWon",            16)]  public List<PlayerWin> PlayersWon             { get; set; } = new();
-        [Parameter("uint256",   "pauseTimestamp",        17)]  public BigInteger      PauseTimestamp         { get; set; }
-        [Parameter("address[]", "refundedPlayers",       18)]  public List<string>    RefundedPlayers        { get; set; } = new();
-        [Parameter("string",    "name",                  19)]  public string          Name                   { get; set; } = string.Empty;
-        [Parameter("uint256",   "missionCreated",        20)]  public BigInteger      MissionCreated         { get; set; }
+    public class MissionDataTuple : IFunctionOutputDTO
+    {
+        // keep players at the top (as you requested)
+        [Parameter("address[]", "players",                1)] public List<string>    Players                 { get; set; } = new();
+
+        // mission_type, schedule, enrollment, and pauses (order aligned with your API projections)
+        [Parameter("uint8",     "missionType",            2)] public byte            MissionType             { get; set; }
+        [Parameter("uint256",   "enrollmentStart",        3)] public BigInteger      EnrollmentStart         { get; set; }
+        [Parameter("uint256",   "enrollmentEnd",          4)] public BigInteger      EnrollmentEnd           { get; set; }
+        [Parameter("uint256",   "enrollmentAmount",       5)] public BigInteger      EnrollmentAmount        { get; set; }
+        [Parameter("uint8",     "enrollmentMinPlayers",   6)] public byte            EnrollmentMinPlayers    { get; set; }
+        [Parameter("uint8",     "enrollmentMaxPlayers",   7)] public byte            EnrollmentMaxPlayers    { get; set; }
+
+        [Parameter("uint256",   "missionStart",           8)] public BigInteger      MissionStart            { get; set; }
+        [Parameter("uint256",   "missionEnd",             9)] public BigInteger      MissionEnd              { get; set; }
+        [Parameter("uint8",     "missionRounds",         10)] public byte            MissionRounds           { get; set; }
+        [Parameter("uint8",     "roundCount",            11)] public byte            RoundCount              { get; set; }
+
+        // CRO values (add croInitial, then croStart/croCurrent)
+        [Parameter("uint256",   "croInitial",            12)] public BigInteger      CroInitial              { get; set; }   
+        [Parameter("uint256",   "croStart",              13)] public BigInteger      CroStart                { get; set; }
+        [Parameter("uint256",   "croCurrent",            14)] public BigInteger      CroCurrent              { get; set; }
+
+        // pauses (seconds) + pause timestamp
+        [Parameter("uint32",    "roundPauseDuration",    15)] public uint            RoundPauseDuration      { get; set; }
+        [Parameter("uint32",    "lastRoundPauseDuration",16)] public uint            LastRoundPauseDuration  { get; set; }
+        [Parameter("uint256",   "pauseTimestamp",        17)] public BigInteger      PauseTimestamp          { get; set; }
+
+        // win/refund lists, name, created
+        [Parameter("tuple[]",   "playersWon",            18)] public List<PlayerWin> PlayersWon              { get; set; } = new();
+        [Parameter("address[]", "refundedPlayers",       19)] public List<string>    RefundedPlayers         { get; set; } = new();
+        [Parameter("string",    "name",                  20)] public string          Name                    { get; set; } = string.Empty;
+        [Parameter("uint256",   "missionCreated",        21)] public BigInteger      MissionCreated          { get; set; }
+
+        // creator + allRefunded (added in your contract update)
+        [Parameter("address",   "creator",               22)] public string          Creator                 { get; set; } = string.Empty;  // NEW
+        [Parameter("bool",      "allRefunded",           23)] public bool            AllRefunded             { get; set; }                  // NEW
     }
 
     // ───────── Events: Factory ─────────

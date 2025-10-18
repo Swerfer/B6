@@ -30,56 +30,54 @@ namespace B6.Indexer
     public class MissionIndexer : BackgroundService
     {
         // Logger on/off ------------------------------------------------------------------------------------------------
-        private static readonly bool                    logRpcCalls         = false;                // ← toggle RPC file logging
+        private static readonly bool                    logRpcCalls         = false;                                        // ← toggle RPC file logging
         // --------------------------------------------------------------------------------------------------------------
-        private readonly ILogger<MissionIndexer>        _log;
-        private readonly string                         _rpc;
-        private readonly string                         _factory;
-        private readonly string                         _pg;
-        private Web3                                    _web3               = default!;
-        private readonly List<string>                   _rpcEndpoints       = new();
-        private int                                     _rpcIndex           = 0;
-        private const bool                              scanMissionStatus   = true;           // ← toggle mission-level status logs
-        private readonly HttpClient                     _http               = new HttpClient();
-        private readonly string                         _pushBase;                          // e.g. https://b6missions.com/api
-        private readonly string                         _pushKey;
+        private readonly ILogger<MissionIndexer>        _log;                                                               // injected
+        private readonly string                         _rpc;                                                               // primary RPC endpoint
+        private readonly string                         _factory;                                                           // MissionFactory contract address              
+        private readonly string                         _pg;                                                                // Postgres connection string                                  
+        private Web3                                    _web3               = default!;                                     // current RPC client
+        private readonly List<string>                   _rpcEndpoints       = new();                                        // pool of RPC endpoints
+        private int                                     _rpcIndex           = 0;                                            // current RPC endpoint index
+        private readonly HttpClient                     _http               = new HttpClient();                             // for push notifications
+        private readonly string                         _pushBase;                                                          // e.g. https://b6missions.com/api
+        private readonly string                         _pushKey;                                                           // e.g. secret key for push auth
         private readonly object                         _rpcLogLock         = new();
-        private DateTime                                _rpcLogDay          = DateTime.MinValue;  // UTC date boundary
-        private string                                  _rpcLogPath         = string.Empty;
-        private readonly Dictionary<string,int>         _rpcCounts          = new(StringComparer.InvariantCulture);
-        // ======== NEW: 5-minute RPC summary counters ========
-        private readonly Dictionary<string,int>         _rpc5mByContext     = new(StringComparer.InvariantCulture);
-        private readonly Dictionary<string, Dictionary<string,int>> _rpc1hByCaller = new(StringComparer.InvariantCulture);
-        private DateTime                                _nextRpcSummaryUtc  = DateTime.MinValue;
-        private bool                                    _firstRPCSummary    = true;
-        private static readonly TimeSpan                _rpcSummaryPeriod   = TimeSpan.FromMinutes(60);
-        // =====================================================
-        // --- Benign provider hiccup rollup (daily, UTC) -------------------------------
-        private DateTime                                _benignDayUtc       = DateTime.MinValue;
-        private readonly Dictionary<string,int>         _benignCounts       = new(StringComparer.InvariantCulture);
-        private static readonly TimeSpan                _benignRetryDelay   = TimeSpan.FromMilliseconds(800);
-        // -----------------------------------------------------------------------------         
-        private readonly string                         _ownerPk;                           // from Key Vault / config
+        private DateTime                                _rpcLogDay          = DateTime.MinValue;                            // UTC date boundary
+        private string                                  _rpcLogPath         = string.Empty;                                 // current log file path
+        private readonly Dictionary<string,int>         _rpcCounts          = new(StringComparer.InvariantCulture);         // kind → count
+        // ------- NEW: 5-minute RPC summary counters --------------------------------------------------------------------
+        private readonly Dictionary<string,int>         _rpc5mByContext     = new(StringComparer.InvariantCulture);         // context → count
+        private readonly Dictionary<string, Dictionary<string,int>> _rpc1hByCaller = new(StringComparer.InvariantCulture);  // caller → (context → count)
+        private DateTime                                _nextRpcSummaryUtc  = DateTime.MinValue;                            // next summary time
+        private bool                                    _firstRPCSummary    = true;                                         // first-ever flag
+        private static readonly TimeSpan                _rpcSummaryPeriod   = TimeSpan.FromMinutes(60);                     // every 60 minutes
+        // --------------------------------------------------------------------------------------------------------------
+        // --- Benign provider hiccup rollup (daily, UTC) ---------------------------------------------------------------
+        private DateTime                                _benignDayUtc       = DateTime.MinValue;                            // current day
+        private readonly Dictionary<string,int>         _benignCounts       = new(StringComparer.InvariantCulture);         // key = "{kind}.{code}" → count
+        private static readonly TimeSpan                _benignRetryDelay   = TimeSpan.FromMilliseconds(800);               // wait before retrying benign errors
+        // --------------------------------------------------------------------------------------------------------------      
+        private readonly string                         _ownerPk;                                                           // from Key Vault 
 
-        private static readonly TimeSpan                RATE_LIMIT_COOLDOWN        = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan                RATE_LIMIT_COOLDOWN        = TimeSpan.FromSeconds(30);              // wait after 429 before retrying
 
-        private volatile bool _kickRequested = false;
-        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _kickMissions = new();
+        private volatile bool _kickRequested = false;                                                                       // set by listener
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _kickMissions = new();                       // mission addresses to refresh
 
-        // /mnt/data/MissionIndexer.cs  (locator: near other private fields)
-        private DateTime _factorySweepNextUtc;   // getMissionsNotEnded every 1 minute
-        private DateTime _enrollTickNextUtc;     // enrollment-open missions, 1 minute
-        private DateTime _activeTickNextUtc;     // active missions, 5 seconds
-        private DateTime _finalizingNextUtc;     // ended-but-not-finalized, 1 minute
+        private DateTime _factorySweepNextUtc;                                                                              // getMissionsNotEnded every 1 minute
+        private DateTime _enrollTickNextUtc;                                                                                // enrollment-open missions, 1 minute
+        private DateTime _activeTickNextUtc;                                                                                // active missions, 5 seconds
+        private DateTime _finalizingNextUtc;                                                                                // ended-but-not-finalized, 1 minute
 
-        private static readonly TimeSpan PendingArmingBuffer = TimeSpan.FromSeconds(2); // -2s before enrollmentStart/missionStart
-        private static readonly TimeSpan FactorySweep        = TimeSpan.FromMinutes(1); 
-        private static readonly TimeSpan EnrollPoll          = TimeSpan.FromMinutes(1);
-        private static readonly TimeSpan ActivePoll          = TimeSpan.FromSeconds(5);
-        private static readonly TimeSpan FinalizingPoll      = TimeSpan.FromMinutes(1);
-        // ------------------------------------------------------------------------------
+        private static readonly TimeSpan PendingArmingBuffer = TimeSpan.FromSeconds(2);                                     // -2s before enrollmentStart/missionStart
+        private static readonly TimeSpan FactorySweep        = TimeSpan.FromMinutes(1);                                     // every 1 minute                     
+        private static readonly TimeSpan EnrollPoll          = TimeSpan.FromMinutes(1);                                     // every 1 minute
+        private static readonly TimeSpan ActivePoll          = TimeSpan.FromSeconds(5);                                     // every 5 seconds
+        private static readonly TimeSpan FinalizingPoll      = TimeSpan.FromMinutes(1);                                     // every 1 minute
+        // --------------------------------------------------------------------------------------------------------------
 
-        [Function("refundPlayers")]
+        [Function("refundPlayers")] 
         public class RefundPlayersFunction : FunctionMessage {
             // no args
         }
@@ -150,129 +148,6 @@ namespace B6.Indexer
 
         private static DateTime FromUnix(BigInteger ts) => DateTimeOffset.FromUnixTimeSeconds((long)ts).UtcDateTime;
 
-        private async Task<SnapshotChanges>             ApplySnapshotToDatabaseAsync        (string mission, MissionDataTuple md, CancellationToken token) {
-            var changes = new SnapshotChanges { HasMeaningfulChange = false };
-
-            short? oldStatus = null;
-            short? newStatus = null;
-            short? oldRound  = null;
-            short? newRound  = (short)md.RoundCount;
-
-            // Read current stored values (status/round/cro/name/type/finalized/etc)
-            short? curStatus = null;
-            short? curRound  = null;
-            string? curName  = null;
-            byte?   curType  = null;
-            bool    curFinal = false;
-
-            await using (var conn = new NpgsqlConnection(_pg))
-            {
-                await conn.OpenAsync(token);
-
-                // Load current
-                await using (var read = new NpgsqlCommand(@"
-                    select status, round_count, name, mission_type, coalesce(finalized,false)
-                    from missions where mission_address = @a;", conn))
-                {
-                    read.Parameters.AddWithValue("a", mission);
-                    await using var rdr = await read.ExecuteReaderAsync(token);
-                    if (await rdr.ReadAsync(token))
-                    {
-                        if (!rdr.IsDBNull(0)) curStatus = rdr.GetInt16(0);
-                        if (!rdr.IsDBNull(1)) curRound  = rdr.GetInt16(1);
-                        if (!rdr.IsDBNull(2)) curName   = rdr.GetString(2);
-                        if (!rdr.IsDBNull(3)) curType   = rdr.GetByte(3);
-                        curFinal = !rdr.IsDBNull(4) && rdr.GetBoolean(4);
-                    }
-                }
-
-                // Derive newStatus from schedule windows (snapshot is the source of truth)
-                // (0..7 mapping should match your existing usage; finalized when now >= mission_end and payouts settled)
-                var now = DateTime.UtcNow;
-                var es  = FromUnix(md.EnrollmentStart);
-                var ee  = FromUnix(md.EnrollmentEnd);
-                var ms  = FromUnix(md.MissionStart);
-                var me  = FromUnix(md.MissionEnd);
-
-                if (now < es)           newStatus = 0; // Pending
-                else if (now < ee)      newStatus = 1; // Enrollment
-                else if (now < ms)      newStatus = 2; // Arming
-                else if (now < me)      newStatus = 3; // Active
-                else                    newStatus = 5; // Ended/Finalizing (5..7 range in your system)
-
-                oldStatus = curStatus;
-                oldRound  = curRound;
-
-                // Update missions row from snapshot
-                await using (var upd = new NpgsqlCommand(@"
-                    update missions
-                    set
-                        mission_type      = @mt,
-                        name              = coalesce(@nm, name),
-                        enrollment_start  = @es,
-                        enrollment_end    = @ee,
-                        mission_start     = @ms,
-                        mission_end       = @me,
-                        round_count       = @rc,
-                        cro_start_wei     = @cs,
-                        cro_current_wei   = @cc,
-                        pause_timestamp   = @pt,
-                        status            = @st,
-                        updated_at        = now()
-                    where mission_address = @a;", conn))
-                {
-                    upd.Parameters.AddWithValue("a", mission);
-                    upd.Parameters.AddWithValue("mt", md.MissionType);
-                    upd.Parameters.AddWithValue("nm", (object?)md.Name ?? DBNull.Value);
-                    upd.Parameters.AddWithValue("es", md.EnrollmentStart);
-                    upd.Parameters.AddWithValue("ee", md.EnrollmentEnd);
-                    upd.Parameters.AddWithValue("ms", md.MissionStart);
-                    upd.Parameters.AddWithValue("me", md.MissionEnd);
-                    upd.Parameters.AddWithValue("rc", (short)md.RoundCount);
-                    upd.Parameters.AddWithValue("cs", md.CroStart);
-                    upd.Parameters.AddWithValue("cc", md.CroCurrent);
-                    upd.Parameters.AddWithValue("pt", (object?)md.PauseTimestamp ?? DBNull.Value);
-                    upd.Parameters.AddWithValue("st", newStatus ?? (object)DBNull.Value);
-                    await upd.ExecuteNonQueryAsync(token);
-                }
-
-                // Detect status transition
-                if (oldStatus.HasValue && newStatus.HasValue && oldStatus.Value != newStatus.Value)
-                {
-                    changes.StatusTransition = (oldStatus.Value, newStatus.Value);
-                    changes.HasMeaningfulChange = true;
-
-                    await using var hist = new NpgsqlCommand(@"
-                        insert into mission_status_history (mission_address, from_status, to_status, changed_at, block_number)
-                        values (@a,@f,@t, now(), 0)
-                        on conflict do nothing;", conn);
-                    hist.Parameters.AddWithValue("a", mission);
-                    hist.Parameters.AddWithValue("f", oldStatus.Value);
-                    hist.Parameters.AddWithValue("t", newStatus.Value);
-                    await hist.ExecuteNonQueryAsync(token);
-                }
-
-                // Detect round increment
-                if (oldRound != newRound)
-                {
-                    changes.NewRound = newRound ?? 0;     // ← assign to the nullable short
-                    changes.HasMeaningfulChange = true;
-                }
-
-                // If ended and snapshot indicates finality, you can set finalized = true here as appropriate.
-                if (now >= me && !curFinal)
-                {
-                    await using var fin = new NpgsqlCommand(@"
-                        update missions set finalized = true, updated_at = now()
-                        where mission_address = @a;", conn);
-                    fin.Parameters.AddWithValue("a", mission);
-                    await fin.ExecuteNonQueryAsync(token);
-                }
-            }
-
-            return changes;
-        }
-
         public                                          MissionIndexer                      (ILogger<MissionIndexer> log, IConfiguration cfg) {
             _log = log;
 
@@ -330,6 +205,149 @@ namespace B6.Indexer
             _pushBase = cfg["Push:BaseUrl"] ?? "";
             _pushKey  = cfg["Push:Key"]     ?? "";
             _ownerPk  = cfg["Owner:PK"] ?? cfg["Owner--PK"] ?? string.Empty;
+        }
+
+        private async Task<SnapshotChanges>             ApplySnapshotToDatabaseAsync        (string mission, MissionDataTuple md, CancellationToken token) {
+            var changes = new SnapshotChanges { HasMeaningfulChange = false };
+
+            short? oldStatus = null;
+            short? newStatus = null;
+            short? oldRound  = null;
+            short? newRound  = (short)md.RoundCount;
+
+            // Read current stored values (status/round/cro/name/type/finalized/etc)
+            short? curStatus = null;
+            short? curRound  = null;
+            string? curName  = null;
+            byte?   curType  = null;
+            bool    curFinal = false;
+
+            await using (var conn = new NpgsqlConnection(_pg))
+            {
+                await conn.OpenAsync(token);
+
+                // Load current
+                await using (var read = new NpgsqlCommand(@"
+                    select status, round_count, name, mission_type, coalesce(finalized,false)
+                    from missions where mission_address = @a;", conn))
+                {
+                    read.Parameters.AddWithValue("a", mission);
+                    await using var rdr = await read.ExecuteReaderAsync(token);
+                    if (await rdr.ReadAsync(token))
+                    {
+                        if (!rdr.IsDBNull(0)) curStatus = rdr.GetInt16(0);
+                        if (!rdr.IsDBNull(1)) curRound  = rdr.GetInt16(1);
+                        if (!rdr.IsDBNull(2)) curName   = rdr.GetString(2);
+                        if (!rdr.IsDBNull(3)) curType   = rdr.GetByte(3);
+                        curFinal = !rdr.IsDBNull(4) && rdr.GetBoolean(4);
+                    }
+                }
+
+                // Derive newStatus from schedule windows (snapshot is the source of truth)
+                // (0..7 mapping should match your existing usage; finalized when now >= mission_end and payouts settled)
+                var now = DateTime.UtcNow;
+                var es  = FromUnix(md.EnrollmentStart);
+                var ee  = FromUnix(md.EnrollmentEnd);
+                var ms  = FromUnix(md.MissionStart);
+                var me  = FromUnix(md.MissionEnd);
+
+                if (now < es)           newStatus = 0; // Pending
+                else if (now < ee)      newStatus = 1; // Enrollment
+                else if (now < ms)      newStatus = 2; // Arming
+                else if (now < me)      newStatus = 3; // Active
+                else                    newStatus = 5; // Ended/Finalizing (5..7 range in your system)
+
+                oldStatus = curStatus;
+                oldRound  = curRound;
+
+                // Update missions row from snapshot
+                await using (var upd = new NpgsqlCommand(@"
+                    update missions
+                    set
+                        name                     = coalesce(@nm, name),
+                        mission_type             = @mt,
+                        status                   = @st,
+                        enrollment_start         = @es,
+                        enrollment_end           = @ee,
+                        enrollment_amount_wei    = @ea,
+                        enrollment_min_players   = @emin,
+                        enrollment_max_players   = @emax,
+                        mission_start            = @ms,
+                        mission_end              = @me,
+                        mission_rounds_total     = @rt,
+                        round_count              = @rc,
+                        cro_initial_wei          = @ci,
+                        cro_start_wei            = @cs,
+                        cro_current_wei          = @cc,
+                        pause_timestamp          = @pt,
+                        updated_at               = now(),
+                        mission_created          = @mc,
+                        round_pause_secs         = @rpd,
+                        last_round_pause_secs    = @lrpd,
+                        creator_address          = @cr,
+                        all_refunded             = @ar
+                    where mission_address = @a;", conn))
+                {
+                    upd.Parameters.AddWithValue("a", mission);
+                    upd.Parameters.AddWithValue("nm", (object?)md.Name ?? DBNull.Value);
+                    upd.Parameters.AddWithValue("mt", md.MissionType);
+                    upd.Parameters.AddWithValue("st", newStatus ?? (object)DBNull.Value);
+                    upd.Parameters.AddWithValue("es", md.EnrollmentStart);
+                    upd.Parameters.AddWithValue("ee", md.EnrollmentEnd);
+                    upd.Parameters.AddWithValue("ea", md.EnrollmentAmount);
+                    upd.Parameters.AddWithValue("emin", md.EnrollmentMinPlayers);
+                    upd.Parameters.AddWithValue("emax", md.EnrollmentMaxPlayers);
+                    upd.Parameters.AddWithValue("ms", md.MissionStart);
+                    upd.Parameters.AddWithValue("me", md.MissionEnd);
+                    upd.Parameters.AddWithValue("rt", (short)md.MissionRounds);
+                    upd.Parameters.AddWithValue("rc", (short)md.RoundCount);
+                    upd.Parameters.AddWithValue("ci", md.CroInitial);
+                    upd.Parameters.AddWithValue("cs", md.CroStart);
+                    upd.Parameters.AddWithValue("cc", md.CroCurrent);
+                    upd.Parameters.AddWithValue("pt", md.PauseTimestamp == 0 ? (object)DBNull.Value : (object)md.PauseTimestamp);
+                    upd.Parameters.AddWithValue("mc", md.MissionCreated);
+                    upd.Parameters.AddWithValue("rpd", md.RoundPauseDuration);
+                    upd.Parameters.AddWithValue("lrpd", md.LastRoundPauseDuration);
+                    upd.Parameters.AddWithValue("cr", (object?)md.Creator?.ToLowerInvariant() ?? DBNull.Value);
+                    upd.Parameters.AddWithValue("ar", md.AllRefunded);
+                    await upd.ExecuteNonQueryAsync(token);
+                }
+
+                // Detect status transition
+                if (oldStatus.HasValue && newStatus.HasValue && oldStatus.Value != newStatus.Value)
+                {
+                    changes.StatusTransition = (oldStatus.Value, newStatus.Value);
+                    changes.HasMeaningfulChange = true;
+
+                    await using var hist = new NpgsqlCommand(@"
+                        insert into mission_status_history (mission_address, from_status, to_status, changed_at, block_number)
+                        values (@a,@f,@t, now(), 0)
+                        on conflict do nothing;", conn);
+                    hist.Parameters.AddWithValue("a", mission);
+                    hist.Parameters.AddWithValue("f", oldStatus.Value);
+                    hist.Parameters.AddWithValue("t", newStatus.Value);
+                    await hist.ExecuteNonQueryAsync(token);
+                }
+
+                // Detect round increment
+                if (oldRound != newRound)
+                {
+                    changes.NewRound = newRound ?? 0;     // ← assign to the nullable short
+                    changes.HasMeaningfulChange = true;
+                }
+
+                // If ended and snapshot indicates finality, you can set finalized = true here as appropriate.
+                if (now >= me && !curFinal)
+                {
+                    await using var fin = new NpgsqlCommand(@"
+                        update missions set finalized = true, updated_at = now()
+                        where mission_address = @a;", conn);
+                    fin.Parameters.AddWithValue("a", mission);
+                    await fin.ExecuteNonQueryAsync(token);
+                }
+            }
+
+            return changes;
         }
 
         private static string                           NormalizeKind                       (string context) {
@@ -716,7 +734,7 @@ namespace B6.Indexer
 
                 try
                 {
-                    await EnsureMissionRowAsync(mission, token);       // insert-if-missing using your existing helper
+                    await EnsureMissionRowAsync(mission, token);        // insert-if-missing using your existing helper
                     await RefreshMissionSnapshotAsync(mission, token);  // single source of truth
                 }
                 catch (Exception ex)
