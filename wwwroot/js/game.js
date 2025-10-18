@@ -1853,47 +1853,47 @@ async function fetchAndRenderAllMissions() {
 
   const p = (async () => {
     try {
-      // 1) Factory call (chain): get the full mission index
-      const provider = getReadProvider();
-      const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
-      const [addrs, statuses, names] = await withTimeout(factory.getAllMissions(), 10000);
+      // Snapshot-driven backend: single API call, no on-chain factory scan.
+      // Endpoint returns uniform mission objects (same shape as detail).
+      const r = await fetch("/api/missions/not-ended", { credentials: "include" });
+      if (!r.ok) throw new Error("/api/missions/not-ended failed");
+      const list = await r.json(); // array of missions (some may include `enrolled_players`)
 
-      // 2) Map and reverse (NEWEST FIRST)
-      const rows = addrs.map((a, i) => ({
-        mission_address: a,
-        status: Number(statuses[i]),
-        name: names[i]
-      }));
+      // Normalize to the light model your renderer already uses.
+      const missions = (Array.isArray(list) ? list : []).map(m => {
+        const currentPlayers =
+          (m.enrolled_players != null ? Number(m.enrolled_players) : null) ??
+          (Array.isArray(m.enrollments) ? m.enrollments.length : null) ??
+          0;
 
-      // 3) Hydrate details only for the first 10, keep the rest lightweight
-      const PRIMARY = 10;
-      const primaryRows    = rows.slice(0, PRIMARY);
-      const secondaryRows  = rows.slice(PRIMARY);
+        const mission_duration =
+          (m.mission_start && m.mission_end)
+            ? (Number(m.mission_end) - Number(m.mission_start))
+            : 0;
 
-      const details = await Promise.all(
-        primaryRows.map(r => apiMission(r.mission_address, true).catch(() => null))
-      );
+        return {
+          // minimal fields used by All Missions cards:
+          mission_address: m.mission_address,
+          status:          Number(m.status),
+          name:            m.name,
 
-      const primaryMissions = details.filter(Boolean).map(d => {
-        const m = d.mission;
-        m.current_players  = (d.enrollments?.length || 0);
-        m.min_players      = m.enrollment_min_players;
-        m.max_players      = m.enrollment_max_players;
-        m.rounds           = m.round_count;
-        m.max_rounds       = m.mission_rounds_total;
-        m.mission_duration = (m.mission_start && m.mission_end)
-                              ? (Number(m.mission_end) - Number(m.mission_start)) : 0;
-        m.mission_fee      = m.enrollment_amount_wei;
-        return m;
+          // fields your card helpers expect:
+          current_players:  currentPlayers,
+          min_players:      m.enrollment_min_players,
+          max_players:      m.enrollment_max_players,
+          rounds:           m.round_count,
+          max_rounds:       m.mission_rounds_total,
+          mission_duration: mission_duration,
+          mission_fee:      m.enrollment_amount_wei,
+
+          // keep originals in case downstream helpers read them:
+          enrollment_amount_wei: m.enrollment_amount_wei,
+          mission_start:         m.mission_start,
+          mission_end:           m.mission_end,
+          mission_rounds_total:  m.mission_rounds_total,
+          round_count:           m.round_count
+        };
       });
-
-      const secondaryMissions = secondaryRows.map(r => ({
-        mission_address: r.mission_address,
-        status: r.status,
-        name: r.name
-      }));
-
-      const missions = [...primaryMissions, ...secondaryMissions];
 
       __allMissionsCache = missions;
       applyAllMissionFiltersAndRender();

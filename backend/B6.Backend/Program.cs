@@ -89,7 +89,7 @@ static string       GetRequired(IConfiguration cfg, string key){
     return v;
 }
 
-static async Task   KickMissionAsync(string mission, string? txHash, IConfiguration cfg){
+static async Task   KickMissionAsync(string mission, string? txHash, IConfiguration cfg, IHubContext<GameHub> hub){
     try
     {
         var cs = cfg.GetConnectionString("Db");
@@ -295,7 +295,7 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
             round_pause_secs       = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
             last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],
             creator_address        = rd["creator_address"] as string,
-            all_refunded           = (bool)  rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
             enrolled_players       = (int)   rd["enrolled_players"]
         });
     }
@@ -374,7 +374,7 @@ app.MapGet("/missions/joinable",        async (IConfiguration cfg) => {
             round_pause_secs       = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
             last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],       
             creator_address        = rd["creator_address"] as string,      
-            all_refunded           = (bool)  rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
             enrolled_players       = (int)   rd["enrolled_players"]
         });
     }
@@ -461,7 +461,7 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
             round_pause_secs      = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
             last_round_pause_secs = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],
             creator_address       = rd["creator_address"] as string,
-            all_refunded          = (bool)  rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            all_refunded          = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
             enrolled_players      = (int)   rd["enrolled_players"],      
             failure_reason        = rd["failure_reason"] as string,     
             enrolled_at           = rd["enrolled_at"] is DBNull
@@ -547,7 +547,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         round_pause_secs       = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
         last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],
         creator_address        = rd["creator_address"] as string,
-        all_refunded           = (bool)  rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+        all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
         enrolled_players       = (int)   rd["enrolled_players"]
     };
     await rd.CloseAsync();
@@ -825,7 +825,7 @@ app.MapPost("/events/created",          async (HttpRequest req, IConfiguration c
             return Results.BadRequest("Transaction not successful");
     }
 
-    await KickMissionAsync(mission, txHash, cfg);
+    await KickMissionAsync(mission, txHash, cfg, hub);
 
     return Results.Ok(new { pushed = true });
 });
@@ -860,12 +860,12 @@ app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration c
         return Results.Ok(new { pushed = false, reason = "throttled" });
     enrollPingThrottle[mission] = now;
 
-    await KickMissionAsync(mission, txHash, cfg);
+    await KickMissionAsync(mission, txHash, cfg, hub);
 
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub,                                     ) => {
+app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                      ) => {
     string mission = null;
     string txHash  = null;
 
@@ -907,7 +907,7 @@ app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration c
     if (rc == null || rc.Status == null || rc.Status.Value != 1)
         return Results.BadRequest("Transaction not successful");
 
-    await KickMissionAsync(mission, txHash, cfg);
+    await KickMissionAsync(mission, txHash, cfg, hub);
 
     return Results.Ok(new { pushed = true });
 });
