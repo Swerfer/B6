@@ -36,8 +36,7 @@ namespace B6.Contracts
     }
 
     [FunctionOutput]
-    public class MissionDataTuple : IFunctionOutputDTO
-    {
+    public class MissionDataTuple : IFunctionOutputDTO {
         // keep players at the top (as you requested)
         [Parameter("address[]", "players",                1)] public List<string>    Players                 { get; set; } = new();
 
