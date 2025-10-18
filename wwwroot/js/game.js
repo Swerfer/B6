@@ -143,6 +143,8 @@ let __pauseUntilSec         = 0;
 let __postCooldownUntilSec  = 0; 
 let __lastPauseTs           = 0;
 let __lastViewerAddr        = "";
+
+let __maxRoundSeen          = Object.create(null); // keyed by mission address LC
 // #endregion
 
 
@@ -616,6 +618,16 @@ function        formatMMSS(s){
   s = Math.max(0, Math.floor(Number(s)||0));
   const m = Math.floor(s/60), sec = s % 60;
   return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
+
+function nonDecreasingRound(m) {
+  const addr = String(m?.mission_address || "").toLowerCase();
+  const cApi = Number(m?.round_count ?? 0);
+  const cArr = Array.isArray(m?.rounds) ? m.rounds.length : 0; // final-round safe
+  const cMem = Number(__maxRoundSeen[addr] || 0);
+  const cur  = Math.max(cApi, cArr, cMem);
+  __maxRoundSeen[addr] = cur; // remember
+  return cur;
 }
 
 // Chain timestamp:
@@ -1493,6 +1505,9 @@ async function  startHub() { // SignalR HUB
             const prev = BigInt(String(m0.cro_current_wei ?? m0.cro_start_wei ?? "0"));
             croAfter   = (prev - BigInt(String(amountWei || "0"))).toString();
           } catch {}
+          const addrLc = String(currentMissionAddr || "").toLowerCase();
+          __maxRoundSeen[addrLc] = Math.max(Number(__maxRoundSeen[addrLc] || 0), played);
+
           const mFast = { ...m0, round_count: played, cro_current_wei: croAfter };
           buildStageLowerHudForStatus(mFast);   // pills: instant subtract
         } catch {}
@@ -2449,7 +2464,7 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
   roundsOff: { 
     label: "Round", 
     value: m => {
-      const cur = Number(m?.round_count ?? 0);
+      const cur   = nonDecreasingRound(m);
       const total = Number(m?.mission_rounds_total ?? 0);
       return `${Math.min(cur + 1, total)}/${total}`;
     }
@@ -2457,11 +2472,9 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
   roundsBanked: {
     label: "Rounds banked",
     value: m => {
-      const c1 = Number(m?.round_count ?? 0);
-      const c2 = Array.isArray(m?.rounds) ? m.rounds.length : 0; // final-round-safe
-      const played = Math.max(c1, c2);
+      const cur   = nonDecreasingRound(m);                            // includes array + memory
       const total  = Number(m?.mission_rounds_total ?? 0);
-      return `${played}/${total}`;
+      return `${Math.min(cur, total)}/${total}`;
     }
   },
   playersAllStats: {label: "Players",          value: m => {
@@ -2933,6 +2946,12 @@ async function  handleBankItClick       (mission){
     // Also bump round_count locally so “Round” pill stays in sync with pool
     const nextRoundCount = Number(mission.round_count || 0) + 1;
 
+    // Remember the highest round we've seen for this mission
+    try {
+      const addrLc = String(mission.mission_address || "").toLowerCase();
+      __maxRoundSeen[addrLc] = Math.max(Number(__maxRoundSeen[addrLc] || 0), nextRoundCount);
+    } catch {}
+
     // Paint HUD with both new pool + incremented round
     buildStageLowerHudForStatus({ ...mission, cro_current_wei: croAfter, round_count: nextRoundCount });
 
@@ -2976,9 +2995,6 @@ async function  handleBankItClick       (mission){
 
     // Pull pool from chain immediately in case push is slow
     rehydratePillsFromChain(mission, "post-callRound", true).catch(()=>{});
-
-    // Lightweight reconcile; the authoritative result popup comes via RoundResult
-    await refreshOpenStageFromServer(2);
 
   } catch (err) {
     // clear the local “banking in flight” marker on failure/cancel
