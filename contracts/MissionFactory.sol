@@ -80,8 +80,6 @@ pragma solidity ^0.8.30;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/proxy/Clones.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Strings.sol";
-using Strings for uint256;
 // #endregion
 
 
@@ -135,6 +133,12 @@ enum Limit      {
 
 
 
+// ############################################################
+// ####                                                    ####
+// ####     MissionFactory size is very close to the       ####
+// ####     maximum! Do not add code or it will refert     ####
+// ####                                                    ####
+// ############################################################
 
 // #region Contr. MissionFactory
 contract MissionFactory is Ownable, ReentrancyGuard {
@@ -169,11 +173,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     event FundsWithdrawn                        (address        indexed to,             uint256             amount                                  );    
     event OwnershipTransferProposed             (address        indexed proposer,       address             newOwner,       uint256 timestamp       );
     event OwnershipTransferConfirmed            (address        indexed confirmer,      address             newOwner,       uint256 timestamp       );
-    event EnrollmentLimitUpdated                (uint8                  newWeekly,      uint8               newMonthly                              );
-    event EnrollmentRecorded                    (address        indexed user,           uint256             timestamp                               );
     event MissionStatusUpdated                  (address        indexed mission,        uint8       indexed fromStatus,     uint8   indexed toStatus, uint256        timestamp);
     event MissionFinalized                      (address        indexed mission,        uint8       indexed finalStatus,    uint256 timestamp       );
-    event EnrollmentReverted                    (address        indexed user,           uint256             timestampRemoved                        );
     // #endregion
 
 
@@ -302,7 +303,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
                 if (earliest == 0 || h[i] < earliest) earliest = h[i];  // If this is the first valid enrollment or earlier than the current earliest, update earliest
             }
         }
-        return earliest == 0 ? 0 : earliest + 7 days - nowTs;    // If no valid enrollment found, return 0; otherwise, return the time until the next weekly slot
+        return earliest == 0 ? 0 : earliest + 7 days - nowTs;           // If no valid enrollment found, return 0; otherwise, return the time until the next weekly slot
     }
 
     /**
@@ -413,7 +414,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     function setEnrollmentLimits(uint8 _weekly, uint8 _monthly)                     external onlyOwnerOrAuthorized {
         weeklyLimit = _weekly;
         monthlyLimit = _monthly;
-        emit EnrollmentLimitUpdated(_weekly, _monthly);
     }
 
     /**
@@ -465,7 +465,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
     function recordEnrollment(address user)                                         external onlyMission() {
         uint256 nowTs = block.timestamp;                                            // Get the current timestamp
-        require(missionStatus[msg.sender] == Status.Enrolling, "Invalid caller");   // Ensure the caller is in the Enrolling status
+        require(missionStatus[msg.sender] == Status.Enrolling);                     // Ensure the caller is in the Enrolling status
 
         uint256 cutoff = nowTs - 30 days;                                           // Calculate the cutoff timestamp for pruning  
         uint256[] storage history = _enrollmentHistory[user];                       // Get the user's enrollment history    
@@ -485,7 +485,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         history.push(nowTs);                                                        // Add the current timestamp to the enrollment history  
         // touch changed set (status stays the same)
         _touchChangedKeepStatus(msg.sender);
-        emit EnrollmentRecorded(user, nowTs);                                       // Emit an event for the enrollment record
     }
 
     /**
@@ -537,7 +536,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param endTs The end timestamp of the enrollment window.
      */
     function undoEnrollmentInWindow(address user, uint256 startTs, uint256 endTs)   external onlyMission {
-        require(user != address(0), "Invalid user");
         uint256[] storage h = _enrollmentHistory[user];
         uint256 len = h.length;
         if (len == 0) return;
@@ -551,7 +549,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
                     h[j] = h[j + 1];
                 }
                 h.pop();
-                emit EnrollmentReverted(user, t);
                 return;
             }
         }
@@ -569,7 +566,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param account The address to authorize.
      */
     function addAuthorizedAddress(address account)                                  external onlyOwnerOrAuthorized {
-        require(account != address(0),  "Invalid address");                         // Ensure the account is valid
+        require(account != address(0),  "addr?");                                   // Ensure the account is valid
         require(!authorized[account],   "Already authorized");                      // Ensure the account is not already authorized
         authorized[account] = true;                                                 // Add authorization for the account  
         emit AuthorizedAddressAdded(account);                                       // Emit event for addition of authorization
@@ -580,8 +577,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param account The address to remove authorization from.
      */
     function removeAuthorizedAddress(address account)                               external onlyOwnerOrAuthorized {
-        require(account != address(0),  "Invalid address");                         // Ensure the account is valid
-        require(authorized[account],    "Not authorized");                          // Ensure the account is currently authorized
+        require(account != address(0),  "Addr?");                                   // Ensure the account is valid
+        require(authorized[account],    "!authorized");                             // Ensure the account is currently authorized
         authorized[account] = false;                                                // Remove authorization for the account
         emit AuthorizedAddressRemoved(account);                                     // Emit event for removal of authorization
     }
@@ -593,7 +590,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
     function proposeOwnershipTransfer(address newOwner)                             external onlyOwnerOrAuthorized {
         uint256 nowTs = block.timestamp;                                // Get the current timestamp
-        require(newOwner != address(0), "Invalid new owner");           // Ensure the new owner is a valid address
+        require(newOwner != address(0), "Addr?");                       // Ensure the new owner is a valid address
         proposedNewOwner = newOwner;
         proposalProposer = msg.sender;
         proposalTimestamp = block.timestamp;
@@ -606,7 +603,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
     function confirmOwnershipTransfer()                                             external onlyOwnerOrAuthorized {
         uint256 nowTs = block.timestamp;                                                                // Get the current timestamp
-        require(proposalProposer != msg.sender, "Cannot confirm your own proposal");                    // Ensure the confirmer is not the proposer
+        require(proposalProposer != msg.sender, "!Own proposal");                                       // Ensure the confirmer is not the proposer
         require(block.timestamp <= proposalTimestamp + OWNERSHIP_PROPOSAL_WINDOW, "Proposal expired");  // Ensure the proposal is still valid within the proposal window
 
         // Transfer ownership
@@ -658,43 +655,35 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         ) external payable onlyOwnerOrAuthorized nonReentrant returns (address, string memory) {
             if (_missionType == MissionType.InviteOnly || _missionType == MissionType.UserMission) {
                 // Specified rules for user-created missions
-                require(_missionRounds >= 2,                                "Min rounds = 2");                                                  // Ensure mission rounds is at least 2
-                require(_enrollmentMinPlayers >= 3,                         "Min players >= 3");                                                // Ensure minimum players is at least 3
-                require(_enrollmentMaxPlayers <= 25,                        "Max players <= 25");                                               // Ensure maximum players is at most 25
-                require(_missionRounds <= _enrollmentMinPlayers - 1,        "Rounds <= minPlayers-1");                                          // Ensure mission rounds is at most minimum players - 1
-                require(_enrollmentAmount >= 1,                             "Min enrollment fee = 1");                                          // Ensure enrollment amount is at least 1 CRO
+                require(_missionRounds >= 2,                                "Rounds>1");                                                        // Ensure mission rounds is at least 2
+                require(_enrollmentMinPlayers >= 3,                         "Min players>2");                                                   // Ensure minimum players is at least 3
+                require(_enrollmentMaxPlayers <= 25,                        "Max players<26");                                                  // Ensure maximum players is at most 25
+                require(_missionRounds <= _enrollmentMinPlayers - 1,        "Rounds<=minPlay-1");                                               // Ensure mission rounds is at most minimum players - 1
+                require(_enrollmentAmount >= 1,                             "Fee>=1");                                                          // Ensure enrollment amount is at least 1 CRO
                 if (_missionType == MissionType.InviteOnly) {
-                    require(_pinHash != bytes32(0),                         "InviteOnly: pinHash required");                                    // Ensure pin hash is provided
+                    require(_pinHash != bytes32(0),                         "pinHash?");                                                        // Ensure pin hash is provided
                 } else {
-                    require(_creator != address(0),                         "UserMission: user address required");                              // Ensure user address is provided
-                    require(block.timestamp >= lastUserMissionCreatedAt[_creator] + 1 days, "UserMission: min 1 day gap between creations");     // Ensure at least 1 day gap between user mission creations
+                    require(_creator != address(0),                         "Creator addr?");                                                   // Ensure user address is provided
+                    require(block.timestamp >= lastUserMissionCreatedAt[_creator] + 1 days, "Min 24h");                                         // Ensure at least 1 day gap between user mission creations
                 }
             } else {
-                require(_missionRounds          >= 1,                       "Mission rounds must be greater than or equal to 1");               // Ensure mission rounds is greater than or equal to 1
-                require(_enrollmentMinPlayers   >= _missionRounds,          "Minimum players must be greater than or equal to mission rounds"); // Ensure minimum players is at least equal to mission rounds
-                require(_enrollmentMaxPlayers   >= _enrollmentMinPlayers,   "Maximum players must be greater than or equal to minimum players");// Ensure maximum players is at least equal to minimum players
-                require(_enrollmentMaxPlayers   <= 100,                     "InviteOnly: max players <= 100");                                  // Ensure maximum players is at most 100
+                require(_missionRounds          >= 1,                       "Mission rnds<1");                                                  // Ensure mission rounds is greater than or equal to 1
+                require(_enrollmentMinPlayers   >= _missionRounds,          "Min players<mission rnds");                                        // Ensure minimum players is at least equal to mission rounds
+                require(_enrollmentMaxPlayers   >= _enrollmentMinPlayers,   "Max players<minimum players");                                     // Ensure maximum players is at least equal to minimum players
+                require(_enrollmentMaxPlayers   <= 100,                     "max players<=100");                                                // Ensure maximum players is at most 100
             }
-            require(_missionStart           >= _enrollmentEnd,              "Mission start must be on or after enrollment end");                // Ensure mission start is on or after enrollment end
-            require(_missionEnd             >  _missionStart,               "Mission start must be before end");                                // Ensure mission start is before end
-            require(_roundPauseDuration     >= 60,                          "Round pause duration must be at least 60 seconds");                // Ensure round pause duration is at least 1 minute
-            require(_lastRoundPauseDuration >= 60,                          "Last round pause duration must be at least 60 seconds");           // Ensure last round pause duration is at least 1 minute
-            require(_enrollmentStart        <  _enrollmentEnd,              "Enrollment start must be before end");                             // Ensure enrollment start is before end
+            require(_missionStart           >= _enrollmentEnd,              "M start<enroll end");                                              // Ensure mission start is on or after enrollment end
+            require(_missionEnd             >  _missionStart,               "M start>=end");                                                    // Ensure mission start is before end
+            require(_roundPauseDuration     >= 60,                          "Round pause duration<60s");                                        // Ensure round pause duration is at least 1 minute
+            require(_lastRoundPauseDuration >= 60,                          "Last round pause duration<60s");                                   // Ensure last round pause duration is at least 1 minute
+            require(_enrollmentStart        <  _enrollmentEnd,              "Enroll start>=end");                                               // Ensure enrollment start is before end
 			address clone = missionImplementation.clone(); 	    // EIP-1167 minimal proxy
 
-            // Increment mission type counter
-            missionTypeCounts[_missionType]++;                          // Increase mission counts by 1 and store for the mission type
-            string memory _finalName = bytes(_missionName).length > 0   // Check if mission name is not ""
-                ? _missionName                                          // Not empty --> the supplied name
-                : string(abi.encodePacked(
-                    _toHumanReadableName(_missionType),
-                    " - ",
-                    missionTypeCounts[_missionType].toString()  // "" --> calculated mission name
-                ));
+            require(bytes(_missionName).length > 0,                         "Mission name?");                                                   // Ensure a mission name is provided
 
             isMission[clone]     = true;                        // mark as a valid mission
             missionStatus[clone] = Status.Pending;              // placeholder so first callback passes onlyMission
-            missionNames[clone] = _finalName;                   // Store the supplied name or calculated name if nothing supplied
+            missionNames[clone] = _missionName;                 // Store the supplied name
 
             Mission(payable(clone)).initialize{value: msg.value} (
 				owner(),									    // Set the owner of the mission to the owner of MissionFactory
@@ -710,7 +699,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
                 _missionStart,                                  // Set the mission start time
                 _missionEnd,                                    // Set the mission end time
                 _missionRounds,                                 // Set the number of rounds in the mission
-                _finalName,                                     // The supplied name or calculated name if nothing supplied
+                _missionName,                                     // The supplied name or calculated name if nothing supplied
                 _pinHash,                                       // The mission pin hash (optional)
                 _creator                                        // The user address for UserMission type
             );
@@ -718,7 +707,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         missions.push(clone);                                   // Add the new mission to the list of missions
         emit MissionCreated(
             clone,
-            _finalName,
+            _missionName,
             _missionType,
             _enrollmentStart,
             _enrollmentEnd,
@@ -745,7 +734,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         }
         // initial touch for predictable polling
         _touchChangedKeepStatus(clone);
-        return (clone, _finalName);						                // Return the address of the newly created mission
+        return (clone, _missionName);						                // Return the address of the newly created mission
     }
 
     /**
@@ -799,9 +788,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param missionType The type of the mission.
      */
     function registerMissionFunds(MissionType missionType)                          external payable onlyMission nonReentrant {
-        require(msg.value > 0, "Amount must be greater than zero");                                                         // Ensure a positive amount is registered
         bool isEndedMission = missionStatus[msg.sender] == Status.Success || missionStatus[msg.sender] == Status.Failed;    // Accept only missions that have ended (Success or Failed)
-        require(isEndedMission, "Caller not a mission");                                                                    // Ensure the caller is a valid mission that has ended 
+        require(isEndedMission);                                                                                            // Ensure the caller is a valid mission that has ended 
         reservedFunds[missionType] += msg.value;                                                                            // Add the amount to the reserved funds for the specified mission type
         totalMissionFunds += msg.value;                                                                                     // Update the total mission funds
         totalOwnerEarnedFunds += msg.value / 3;                                                                             // Update the total funds earned by the owner (25% of the amount)
@@ -844,13 +832,13 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
     function withdrawFunds(uint256 amount)                                          external onlyOwner nonReentrant {
         address mgrOwner = owner();                                         // Get the owner of the MissionFactory contract
-        require(mgrOwner != address(0), "Invalid manager owner");           // Ensure the manager owner is valid
+        require(mgrOwner != address(0), "Not owner");                       // Ensure the manager owner is valid
         if (amount == 0) {
             amount = address(this).balance;                                 // If no amount specified, withdraw all funds
         }
-        require(amount <= address(this).balance, "Insufficient balance");   // Ensure the contract has enough balance to withdraw
+        require(amount <= address(this).balance, "> balance");              // Ensure the contract has enough balance to withdraw
         (bool ok, ) = payable(mgrOwner).call{ value: amount }("");          // Attempt to transfer the specified amount to the manager owner
-        require(ok, "Transfer failed");                                     // Ensure the transfer was successful
+        require(ok, "TX failed");                                           // Ensure the transfer was successful
         emit FundsWithdrawn(mgrOwner, amount);                              // Emit event for funds withdrawal
     }
     // #endregion
@@ -1136,58 +1124,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         }
 
         return (result, statuses, names);                       // Return arrays: addresses of missions not ended, their statuses and names  
-    }
-
-    /**
-     * @dev Returns a paginated list of missions that have ended.
-     * This function retrieves a subset of missions that have ended, based on the specified offset and limit.
-     * @param offset The starting index for pagination.
-     * @param limit The maximum number of missions to return.
-     * @return addrs An array of mission addresses that have ended.
-     * @return statuses An array of statuses corresponding to each mission.
-     * @return names An array of mission names corresponding to each mission.
-     */
-    function getMissionsEndedPaged(uint256 offset, uint256 limit)                   external view returns (address[] memory addrs, uint8[] memory statuses, string[] memory names) {
-        uint256 len = missions.length;
-        if (offset >= len) {
-            // IMPORTANT: construct arrays with [] length, not bare types
-            addrs    = new address[](0);
-            statuses = new uint8[](0);
-            names    = new string[](0);
-            return (addrs, statuses, names);
-        }
-
-        uint256 to = offset + limit;
-        if (to > len) to = len;
-
-        // First pass: count ended in the window
-        uint256 count;
-        for (uint256 i = offset; i < to; i++) {
-            Status s = missionStatus[missions[i]];
-            if (s == Status.PartlySuccess || s == Status.Success || s == Status.Failed) {
-                unchecked { count++; }
-            }
-        }
-
-        // Allocate exact-size arrays
-        addrs    = new address[](count);
-        statuses = new uint8[](count);
-        names    = new string[](count);
-
-        // Second pass: fill results
-        uint256 k;
-        for (uint256 i = offset; i < to; i++) {
-            address m = missions[i];
-            Status  s = missionStatus[m];
-            if (s == Status.PartlySuccess || s == Status.Success || s == Status.Failed) {
-                addrs[k]    = m;
-                statuses[k] = uint8(s);
-                names[k]    = missionNames[m];
-                unchecked { k++; }
-            }
-        }
-
-        return (addrs, statuses, names);
     }
 
     /**
@@ -1510,7 +1446,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         _missionData.pauseTimestamp         = 0;
         _missionData.allRefunded            = false;
         _enrollSecretHash                   = _pinHash;
-        _creator                            = _creator;
+        _missionData.creator                = _creator;
 
         emit MissionInitialized(_owner, _missionType, block.timestamp);
     }

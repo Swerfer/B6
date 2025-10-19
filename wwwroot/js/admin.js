@@ -1215,14 +1215,38 @@ form?.addEventListener("submit", async e => {
       toUnix(f.missionStart.value),            // missionStart
       toUnix(f.missionEnd.value),              // missionEnd
       parseInt(f.rounds.value),                // missionRounds
-      f.missionName.value.trim()
+      f.missionName.value.trim(),              // name
+      ethers.ZeroHash,                         // pinHash (bytes32) – zero for types 0–6
+      ethers.ZeroAddress                       // creator (address) – zero for types 0–6
     ];
     const tx = await factory.createMission(
       ...args,
       { value: eth.parseEther(f.initialPot.value || "0") }
     );
     showAlert("Transaction sent – waiting for confirmation…","info");
-    await tx.wait();
+    const rc = await tx.wait();
+
+    // Extract mission address from MissionCreated event
+    const iface = new ethers.utils.Interface(FACTORY_ABI);
+    let missionLc = null;
+    for (const l of rc.logs) {
+      try {
+        const log = iface.parseLog(l);
+        if (log.name === "MissionCreated") {
+          missionLc = (log.args.mission || log.args[0]).toLowerCase();
+          break;
+        }
+      } catch {}
+    }
+
+    // Fire the kick (optional but recommended)
+    if (missionLc) {
+      fetch("/api/events/created", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mission: missionLc, txHash: tx.hash })
+      }).catch(()=>{ /* non-fatal */ });
+    }
     showAlert("Mission created successfully!","success");
     await loadMissions();
     form.reset();

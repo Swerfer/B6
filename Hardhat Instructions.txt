@@ -70,16 +70,19 @@ Publish contract(s):
  
 For Cronos Explorer verification - public Etherscan-compatible API (cronos.org/explorer/api):
 
+    WERKT NIET! De 2e is wel te gebruiken om het argument te vinden benodigd voor handmatige verificatie
+
     2x Mission implementation address:
-    curl.exe -sS -H "Content-Type: application/x-www-form-urlencoded" -H "User-Agent: Mozilla/5.0" -H "Origin: https://cronos.org" -H "Referer: https://cronos.org/explorer/api-docs" --data-urlencode module=contract --data-urlencode action=verifysourcecode --data-urlencode codeformat=solidity-standard-json-input --data-urlencode contractaddress=0xb707db9B2449286C0673e323FD0ba6129c102A4B --data-urlencode "contractname=contracts/MissionFactory.sol:Mission" --data-urlencode "compilerversion=v0.8.30+commit.73712a01" --data-urlencode sourceCode@source.json "https://cronos.org/explorer/api"
-    node -e "const {AbiCoder}=require('ethers'); const coder=new AbiCoder(); console.log(coder.encode(['address'], ['0xb707db9B2449286C0673e323FD0ba6129c102A4B']));"
+    curl.exe -sS -H "Content-Type: application/x-www-form-urlencoded" -H "User-Agent: Mozilla/5.0" -H "Origin: https://cronos.org" -H "Referer: https://cronos.org/explorer/api-docs" --data-urlencode module=contract --data-urlencode action=verifysourcecode --data-urlencode codeformat=solidity-standard-json-input --data-urlencode contractaddress=0x650Bb899Be461d850dfDe84B4A70c36BC3672259 --data-urlencode "contractname=contracts/MissionFactory.sol:Mission" --data-urlencode "compilerversion=v0.8.30+commit.73712a01" --data-urlencode sourceCode@source.json "https://cronos.org/explorer/api"
+    node -e "const {AbiCoder}=require('ethers'); const coder=new AbiCoder(); console.log(coder.encode(['address'], ['0x650Bb899Be461d850dfDe84B4A70c36BC3672259']));"
 
     1x Factory address and 1x constructor args (result from node command above)
-    curl.exe -sS -H "Content-Type: application/x-www-form-urlencoded" -H "User-Agent: Mozilla/5.0" -H "Origin: https://cronos.org" -H "Referer: https://cronos.org/explorer/api-docs" --data-urlencode module=contract --data-urlencode action=verifysourcecode --data-urlencode codeformat=solidity-standard-json-input --data-urlencode contractaddress=0x9265Dde86D9346059e7a1AA4aC013C693E61fc3F --data-urlencode "contractname=contracts/MissionFactory.sol:MissionFactory" --data-urlencode "compilerversion=v0.8.30+commit.73712a01" --data-urlencode "constructorArguements=0x000000000000000000000000b707db9b2449286c0673e323fd0ba6129c102a4b" --data-urlencode sourceCode@source.json "https://cronos.org/explorer/api"
+    curl.exe -sS -H "Content-Type: application/x-www-form-urlencoded" -H "User-Agent: Mozilla/5.0" -H "Origin: https://cronos.org" -H "Referer: https://cronos.org/explorer/api-docs" --data-urlencode module=contract --data-urlencode action=verifysourcecode --data-urlencode codeformat=solidity-standard-json-input --data-urlencode contractaddress=0x4F5765a59be7Ae20681e74B9b0a041Fea0742dbd --data-urlencode "contractname=contracts/MissionFactory.sol:MissionFactory" --data-urlencode "compilerversion=v0.8.30+commit.73712a01" --data-urlencode "constructorArguements=0x000000000000000000000000650bb899be461d850dfde84b4a70c36bc3672259" --data-urlencode sourceCode@source.json "https://cronos.org/explorer/api"
 
 Via Cronos Explorer UI:
 
     node -e "const fs=require('fs'),p=require('path');const d='artifacts/build-info';const files=fs.readdirSync(d).filter(f=>f.endsWith('.json')).map(f=>p.join(d,f)).sort((a,b)=>fs.statSync(b).mtime-fs.statSync(a).mtime);if(!files[0]){throw new Error('No build-info found');}const j=JSON.parse(fs.readFileSync(files[0],'utf8'));fs.writeFileSync('source.json', JSON.stringify(j.input));console.log('wrote source.json from', files[0]);"
 
-    Then verify with the updated file in the UI (Choose HardHat JSON).
+    Then verify with the updated file (B6 root source.json) in the UI (Choose HardHat JSON).
     
+    Argument address all lower case. Voorbeeld: 000000000000000000000000650bb899be461d850dfde84b4a70c36bc3672259 (Mission address 0x650Bb899Be461d850dfDe84B4A70c36BC3672259)

@@ -71,7 +71,7 @@
                         <!-- Hamburger absolutely positioned in top-left -->
                         <div class="dropdown position-absolute top-0 start-0">
                             <button class="btn btn-sm btn-outline-info dropdown-toggle" type="button" id="missionFilterMenu"
-                                    data-bs-toggle="dropdown" aria-expanded="false">
+                                    data-bs-toggle="dropdown" aria-expanded="false" title="Filter Missions">
                                 <i class="fa-solid fa-bars"></i>
                             </button>
                             <ul class="dropdown-menu" aria-labelledby="missionFilterMenu">
@@ -107,7 +107,7 @@
 
                         <div class="col-12 col-md-6 offset-md-3">
                             <label class="form-label" for="missionName">Mission Name</label>
-                            <input id="missionName" name="missionName" type="text" class="form-control" maxlength="24" placeholder="">
+                            <input id="missionName" name="missionName" type="text" class="form-control" minlength="4" maxlength="24" placeholder="" required>
                         </div>
 
                         <div class="col-md-6">
@@ -219,7 +219,7 @@
                         </h2>
 
                         <!-- Reload button in top-right, with spinner overlaid -->
-                        <button id="reloadRead" class="btn btn-sm btn-outline-info position-absolute top-50 end-0 translate-middle-y me-2">
+                        <button id="reloadRead" class="btn btn-sm btn-outline-info position-absolute top-50 end-0 translate-middle-y me-2" title="Reload Read Functions">
                             <i class="fa-solid fa-rotate"></i>
                             <span id="readSpinner" class="fade-spinner position-absolute top-50 start-50 translate-middle">
                                 <span class="spinner"></span>
@@ -363,7 +363,7 @@
                 <!-- Mission details -->
                 <section id="missionModal" class="col-12 section-box hidden">
                     <div class="position-relative">
-                        <button id="missionModalClose" class="btn btn-sm btn-outline-info position-absolute top-0 end-0">
+                        <button id="missionModalClose" class="btn btn-sm btn-outline-info position-absolute top-0 end-0" title="Close Mission Modal">
                             <i class="fa-solid fa-xmark"></i>
                         </button>
                         <h2 id="missionModalTitle" class="section-title m-0"></h2>

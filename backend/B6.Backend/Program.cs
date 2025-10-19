@@ -78,43 +78,6 @@ var app = builder.Build();
 
 app.UseCors("AllowFrontend");
 
-// ===== Eligibility function DTOs (MissionFactory) =====
-[Function("canEnroll", "bool")]
-public class CanEnrollFunction : FunctionMessage{
-    [Parameter("address", "player", 1)]
-    public string Player { get; set; } = "";
-}
-
-[Function("secondsTillWeeklySlot", "uint256")]
-public class SecondsTillWeeklySlotFunction : FunctionMessage{
-    [Parameter("address", "player", 1)]
-    public string Player { get; set; } = "";
-}
-
-[Function("secondsTillMonthlySlot", "uint256")]
-public class SecondsTillMonthlySlotFunction : FunctionMessage{
-    [Parameter("address", "player", 1)]
-    public string Player { get; set; } = "";
-}
-
-[Function("getPlayerLimits", typeof(PlayerLimitsOutput))]
-public class GetPlayerLimitsFunction : FunctionMessage{
-    [Parameter("address", "player", 1)]
-    public string Player { get; set; } = "";
-}
-
-[FunctionOutput]
-public class PlayerLimitsOutput : IFunctionOutputDTO{
-    // Matches core.js ABI: getPlayerLimits(address) returns(uint8,uint8,uint8,uint8,uint256,uint256)
-    // (weeklyCount, monthlyCount, weeklyLimit, monthlyLimit, weeklyResetAt, monthlyResetAt)
-    [Parameter("uint8",   "weeklyCount",    1)] public byte     WeeklyCount     { get; set; }
-    [Parameter("uint8",   "monthlyCount",   2)] public byte     MonthlyCount    { get; set; }
-    [Parameter("uint8",   "weeklyLimit",    3)] public byte     WeeklyLimit     { get; set; }
-    [Parameter("uint8",   "monthlyLimit",   4)] public byte     MonthlyLimit    { get; set; }
-    [Parameter("uint256", "weeklyResetAt",  5)] public BigInteger WeeklyResetAt { get; set; }
-    [Parameter("uint256", "monthlyResetAt", 6)] public BigInteger MonthlyResetAt{ get; set; }
-}
-
 /* --------------------- Helpers ---------------------*/
 static long         ToUnixSeconds(DateTime dtUtc){
     if (dtUtc.Kind != DateTimeKind.Utc)
@@ -1068,3 +1031,41 @@ app.MapPost("/push/round",              async (HttpRequest req, IConfiguration c
 });
 
 app.Run();
+
+// ===== Eligibility function DTOs (MissionFactory) =====
+[Function("canEnroll", "bool")]
+public class CanEnrollFunction : FunctionMessage{
+    [Parameter("address", "player", 1)]
+    public string Player { get; set; } = "";
+}
+
+[Function("secondsTillWeeklySlot", "uint256")]
+public class SecondsTillWeeklySlotFunction : FunctionMessage{
+    [Parameter("address", "player", 1)]
+    public string Player { get; set; } = "";
+}
+
+[Function("secondsTillMonthlySlot", "uint256")]
+public class SecondsTillMonthlySlotFunction : FunctionMessage{
+    [Parameter("address", "player", 1)]
+    public string Player { get; set; } = "";
+}
+
+[Function("getPlayerLimits", typeof(PlayerLimitsOutput))]
+public class GetPlayerLimitsFunction : FunctionMessage{
+    [Parameter("address", "player", 1)]
+    public string Player { get; set; } = "";
+}
+
+[FunctionOutput]
+public class PlayerLimitsOutput : IFunctionOutputDTO{
+    // Matches core.js ABI: getPlayerLimits(address) returns(uint8,uint8,uint8,uint8,uint256,uint256)
+    // (weeklyCount, monthlyCount, weeklyLimit, monthlyLimit, weeklyResetAt, monthlyResetAt)
+    [Parameter("uint8",   "weeklyCount",    1)] public byte     WeeklyCount     { get; set; }
+    [Parameter("uint8",   "monthlyCount",   2)] public byte     MonthlyCount    { get; set; }
+    [Parameter("uint8",   "weeklyLimit",    3)] public byte     WeeklyLimit     { get; set; }
+    [Parameter("uint8",   "monthlyLimit",   4)] public byte     MonthlyLimit    { get; set; }
+    [Parameter("uint256", "weeklyResetAt",  5)] public BigInteger WeeklyResetAt { get; set; }
+    [Parameter("uint256", "monthlyResetAt", 6)] public BigInteger MonthlyResetAt{ get; set; }
+}
+

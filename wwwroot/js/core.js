@@ -33,8 +33,8 @@ if (res.ok) {
 
 export const FACTORY_ABI = [
   // --------- Factory methods ----------
-  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint8,uint8,uint256,uint256,uint8,string) payable returns(address,string)",
-  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint8 roundPauseDuration,uint8 lastRoundPauseDuration,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)",
+  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8,string,bytes32,address) payable returns (address,string)",
+  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint8 roundPauseDuration,uint8 lastRoundPauseDuration,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds, address creator)",
   // --------- Get missions views ----------
   "function getAllMissions() view returns(address[] missions, uint8[] statuses, string[] names)",
   "function getMissionsByStatus(uint8 status) view returns(address[] missions, uint8[] statuses, string[] names)",
