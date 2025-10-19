@@ -4,11 +4,7 @@ using Microsoft.Extensions.Logging;
 using Nethereum.ABI.FunctionEncoding.Attributes;
 using Nethereum.Contracts;
 using Nethereum.Contracts.ContractHandlers;
-using Nethereum.Contracts.CQS;
-using Nethereum.Hex.HexTypes;
-using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
-using Nethereum.Web3.Accounts;
 using Npgsql;
 using NpgsqlTypes;
 using System;
@@ -16,13 +12,12 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;         
 using System.Globalization;
-using System.IO;  
+using System.IO; 
+using System.Linq; 
 using System.Net.Http;        
 using System.Net.Http.Json; 
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Threading;
-using System.Threading.Tasks;
 
 using B6.Contracts;
 
@@ -38,9 +33,9 @@ namespace B6.Indexer
         private readonly string                         _factory;                                                           // MissionFactory contract address              
         private readonly string                         _pg;                                                                // Postgres connection string                                  
         private Web3                                    _web3               = default!;                                     // current RPC client
-        private readonly List<string>                   _rpcEndpoints       = new();                                        // pool of RPC endpoints
+        private readonly List<string>                   _rpcEndpoints       = [];                                           // pool of RPC endpoints
         private int                                     _rpcIndex           = 0;                                            // current RPC endpoint index
-        private readonly HttpClient                     _http               = new HttpClient();                             // for push notifications
+        private readonly HttpClient                     _http               = new();                                        // for push notifications
         private readonly string                         _pushBase;                                                          // e.g. https://b6missions.com/api
         private readonly string                         _pushKey;                                                           // e.g. secret key for push auth
         private readonly object                         _rpcLogLock         = new();
@@ -59,8 +54,6 @@ namespace B6.Indexer
         private readonly Dictionary<string,int>         _benignCounts       = new(StringComparer.InvariantCulture);         // key = "{kind}.{code}" → count
         private static readonly TimeSpan                _benignRetryDelay   = TimeSpan.FromMilliseconds(800);               // wait before retrying benign errors
         // --------------------------------------------------------------------------------------------------------------      
-        private readonly string                         _ownerPk;                                                           // from Key Vault 
-
         private static readonly TimeSpan                RATE_LIMIT_COOLDOWN = TimeSpan.FromSeconds(30);                     // wait after 429 before retrying
 
         private volatile bool                           _kickRequested      = false;                                        // set by listener
@@ -71,21 +64,6 @@ namespace B6.Indexer
 
         private static readonly TimeSpan                ActivePoll          = TimeSpan.FromSeconds(5);                      // every 5 seconds
         // --------------------------------------------------------------------------------------------------------------
-
-        [Function("refundPlayers")] 
-        public class RefundPlayersFunction : FunctionMessage {
-            // no args
-        }
-
-        [Function("getRealtimeStatus", "uint8")]
-        public class GetRealtimeStatusFunction : FunctionMessage {
-            // no args
-        }
-
-        [Function("forceFinalizeMission")]
-        public class ForceFinalizeMissionFunction : FunctionMessage {
-            // no args
-        }
 
         [Function("getChangesAfter", typeof(GetChangesAfterOutput))]
         public class GetChangesAfterFunction : FunctionMessage {
@@ -106,54 +84,6 @@ namespace B6.Indexer
 
             [Parameter("uint8[]",   "statuses",   4)]
             public List<byte> Statuses   { get; set; } = new();
-        }
-
-        private readonly                                RpcCyclePacer _pacer = new();
-
-
-        private sealed class                            RpcCyclePacer   {
-            private readonly SemaphoreSlim _mux = new(1,1);
-            private DateTime _startUtc = DateTime.MinValue;
-            private TimeSpan _budget = TimeSpan.Zero;
-            private int _planned = 0;
-            private DateTime _nextUtc = DateTime.MinValue;
-
-            public void Start(int planned, TimeSpan budget)
-            {
-                _planned  = Math.Max(1, planned);
-                _budget   = budget;
-                _startUtc = DateTime.UtcNow;
-                _nextUtc  = _startUtc; // first call can run immediately
-            }
-
-            public void Reserve(int more)
-            {
-                if (more <= 0) return;
-                Interlocked.Add(ref _planned, more);
-            }
-
-            public async Task GateAsync()
-            {
-                if (_budget == TimeSpan.Zero || _planned <= 0) return; // not started → no-op
-
-                await _mux.WaitAsync();
-                try
-                {
-                    var gapMs = Math.Max(1.0, _budget.TotalMilliseconds / Math.Max(1, _planned));
-                    var gap   = TimeSpan.FromMilliseconds(gapMs);
-
-                    var now   = DateTime.UtcNow;
-                    if (_nextUtc < now) _nextUtc = now;
-                    var wait = _nextUtc - now;
-                    _nextUtc = _nextUtc + gap;
-
-                    if (wait > TimeSpan.Zero)
-                    {
-                        try { await Task.Delay(wait); } catch { }
-                    }
-                }
-                finally { _mux.Release(); }
-            }
         }
 
         private sealed class                            SnapshotChanges {
@@ -220,14 +150,6 @@ namespace B6.Indexer
             // --- push config (optional; if empty, pushing is disabled) ---
             _pushBase = cfg["Push:BaseUrl"] ?? "";
             _pushKey  = cfg["Push:Key"]     ?? "";
-            _ownerPk  = cfg["Owner:PK"] ?? cfg["Owner--PK"] ?? string.Empty;
-        }
-
-        private void                                    UseRpc                              (int idx) {
-            _rpcIndex = idx % _rpcEndpoints.Count;
-            var url = _rpcEndpoints[_rpcIndex];
-            _web3 = new Web3(url);
-            //_log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
         }
 
         protected override async Task                   ExecuteAsync                        (CancellationToken token) {
@@ -282,6 +204,205 @@ namespace B6.Indexer
                 // Light beat for low-latency kicks; cadence timers throttle the real work
                 try { await Task.Delay(TimeSpan.FromSeconds(1), token); } catch { }
             }
+        }
+
+        private async Task<ulong>                       LoadFactoryLastSeqAsync             (CancellationToken ct) {
+            try
+            {
+                await using var conn = new Npgsql.NpgsqlConnection(_pg);
+                await conn.OpenAsync(ct);
+                await using var cmd = new Npgsql.NpgsqlCommand(
+                    "select last_seq from indexer_factory_cursor where id = 1;", conn);
+                var o = await cmd.ExecuteScalarAsync(ct);
+                if (o == null || o is DBNull) return 0UL;
+
+                // PG bigint → long → ulong (non-negative)
+                var v = Convert.ToInt64(o);
+                return v <= 0 ? 0UL : (ulong)v;
+            }
+            catch
+            {
+                // Table may not exist yet; treat as cold start
+                return 0UL;
+            }
+        }
+
+        private async Task                              ListenForKicksAsync                 (CancellationToken token) {
+            try
+            {
+                await using var conn = new Npgsql.NpgsqlConnection(_pg);
+                await conn.OpenAsync(token);
+
+                // Ensure the table exists is handled by API migration; just LISTEN here
+                await using (var cmd = new Npgsql.NpgsqlCommand("LISTEN b6_indexer_kick;", conn))
+                    await cmd.ExecuteNonQueryAsync(token);
+
+                conn.Notification += async (_, e) =>
+                {
+                    try
+                    {
+                        var mission = (e.Payload ?? string.Empty).ToLowerInvariant();
+                        if (!string.IsNullOrWhiteSpace(mission))
+                            _kickMissions.Enqueue(mission);
+
+                        _kickRequested = true;
+                        // Optional: also sweep pending kick rows to be safe
+                        await ProcessPendingKicksAsync(CancellationToken.None);
+                    }
+                    catch { /* swallow */ }
+                };
+
+                // Wait loop to receive notifications
+                while (!token.IsCancellationRequested)
+                {
+                    await conn.WaitAsync(token);
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Kick listener failed; continuing without NOTIFY/LISTEN");
+            }
+        }
+
+        private async Task                              ProcessPendingKicksAsync            (CancellationToken token) {
+            try
+            {
+                await using var conn = new Npgsql.NpgsqlConnection(_pg);
+                await conn.OpenAsync(token);
+
+                // Fetch and delete pending kicks (best-effort dedupe)
+                var kicks = new List<string>();
+                await using (var cmd = new Npgsql.NpgsqlCommand(@"
+                    delete from indexer_kicks
+                    where id in (
+                        select id from indexer_kicks
+                        order by id
+                        limit 200
+                    )
+                    returning mission_address;", conn))
+                await using (var rd = await cmd.ExecuteReaderAsync(token))
+                {
+                    while (await rd.ReadAsync(token))
+                        kicks.Add((rd.GetString(0) ?? string.Empty).ToLowerInvariant());
+                }
+
+                foreach (var m in kicks)
+                    _kickMissions.Enqueue(m);
+
+                if (kicks.Count > 0)
+                    _kickRequested = true;
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "ProcessPendingKicksAsync failed");
+            }
+        }
+
+        private async Task                              RefreshFactoryChangesAsync          (CancellationToken token) {
+            // 1) Query factory for changes after our last sequence
+            var output = await RunRpc(
+                w => w.Eth.GetContractQueryHandler<GetChangesAfterFunction>()
+                        .QueryDeserializingToObjectAsync<GetChangesAfterOutput>(
+                                new GetChangesAfterFunction { LastSeq = _factoryLastSeq }, _factory, null),
+                "Call.getChangesAfter");
+
+            if (output == null || output.Missions == null || output.Missions.Count == 0)
+                return;
+
+            // 2) Refresh only the changed missions
+            ulong newMaxSeq = _factoryLastSeq;
+            var count = output.Missions.Count;
+
+            for (int i = 0; i < count; i++)
+            {
+                var mission = (output.Missions[i] ?? string.Empty).ToLowerInvariant();
+                if (string.IsNullOrWhiteSpace(mission)) continue;
+
+                try
+                {
+                    await EnsureMissionRowAsync(mission, token);
+                    // Single source of truth: reuse existing snapshot path
+                    await RefreshMissionSnapshotAsync(mission, token);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogDebug(ex, "Factory change refresh failed for {mission}", mission);
+                }
+
+                // Track max seq
+                if (output.Seqs != null && i < output.Seqs.Count)
+                {
+                    try
+                    {
+                        var seqVal = (ulong)output.Seqs[i];
+                        if (seqVal > newMaxSeq) newMaxSeq = seqVal;
+                    }
+                    catch { /* ignore cast issues */ }
+                }
+            }
+
+            // 3) Advance and persist cursor
+            if (newMaxSeq != _factoryLastSeq)
+            {
+                _factoryLastSeq = newMaxSeq;
+                await SaveFactoryLastSeqAsync(_factoryLastSeq, token);
+            }
+        }
+
+        private async Task                              EnsureMissionRowAsync               (string mission, CancellationToken ct) {
+            await using var conn = new NpgsqlConnection(_pg);
+            await conn.OpenAsync(ct);
+            await using var cmd = new NpgsqlCommand(@"
+                insert into missions (mission_address, created_at, updated_at)
+                values (@a, now(), now())
+                on conflict (mission_address) do nothing;", conn);
+            cmd.Parameters.AddWithValue("a", mission);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        private async Task                              RefreshMissionSnapshotAsync         (string mission, CancellationToken token) {
+            var wrap = await RunRpc(
+                w => w.Eth.GetContractQueryHandler<B6.Contracts.GetMissionDataFunction>()
+                    .QueryDeserializingToObjectAsync<B6.Contracts.MissionDataWrapper>(
+                        new B6.Contracts.GetMissionDataFunction(), mission, null),
+                "Call.getMissionData");
+
+            var md = wrap.Data; // includes: players, missionType, schedule, rounds, croStart/current, wins, refunds, pauseTimestamp, name, created
+
+            // Apply the snapshot to DB and derive deltas
+            var changes = await ApplySnapshotToDatabaseAsync(mission, md, token);
+
+            // Push only when meaningful deltas exist
+            if (changes.HasMeaningfulChange)
+            {
+                await NotifyMissionUpdatedAsync(mission, token);
+
+                if (changes.StatusTransition != null)
+                {
+                    await NotifyStatusAsync(mission, changes.StatusTransition.Value.To, token);
+                }
+
+                if (changes.NewRound != null)
+                {
+                    string winner = "";
+                    string amountWei = "0";
+                    try
+                    {
+                        var ix = changes.NewRound.Value - 1;
+                        if (ix >= 0 && ix < md.PlayersWon.Count)
+                        {
+                            var rw = md.PlayersWon[ix];
+                            winner    = (rw.Player ?? "").ToLower(System.Globalization.CultureInfo.InvariantCulture);
+                            amountWei = (rw.Amount  ).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                    }
+                    catch { /* best effort */ }
+
+                    await NotifyRoundAsync(mission, changes.NewRound.Value, winner, amountWei, token);
+                }
+            }
+
         }
 
         private async Task<SnapshotChanges>             ApplySnapshotToDatabaseAsync        (string mission, MissionDataTuple md, CancellationToken token) {
@@ -427,42 +548,83 @@ namespace B6.Indexer
             return changes;
         }
 
-        private static string                           NormalizeKind                       (string context) {
-            if (string.IsNullOrWhiteSpace(context)) return "RPC";
-            var p = context.IndexOf('(');
-            return p > 0 ? context.Substring(0, p) : context;
-        }
-
-        private void                                    RpcFileLog                          (string kind, string line) {
+        private async Task                              SaveFactoryLastSeqAsync             (ulong seq, CancellationToken ct) {
             try
             {
-                var nowUtc = DateTime.UtcNow;
-                var dayUtc = nowUtc.Date;
+                await using var conn = new Npgsql.NpgsqlConnection(_pg);
+                await conn.OpenAsync(ct);
+                await using var cmd = new Npgsql.NpgsqlCommand(@"
+                    insert into indexer_factory_cursor (id, last_seq, updated_at)
+                    values (1, @s, now())
+                    on conflict (id) do update
+                    set last_seq  = greatest(indexer_factory_cursor.last_seq, @s),
+                        updated_at = now();", conn);
 
-                lock (_rpcLogLock)
-                {
-                    // rotate per UTC day
-                    if (dayUtc != _rpcLogDay)
-                    {
-                        _rpcLogDay  = dayUtc;
-                        _rpcCounts.Clear();
-                        var dir = Path.Combine(AppContext.BaseDirectory, "logs");
-                        Directory.CreateDirectory(dir);
-                        _rpcLogPath = Path.Combine(dir, $"rpc-{dayUtc:yyyyMMdd}.log");
-                        File.AppendAllText(_rpcLogPath, $"===== NEW DAY {dayUtc:yyyy-MM-dd} UTC ====={Environment.NewLine}");
-                    }
+                var p = cmd.Parameters.Add("s", NpgsqlTypes.NpgsqlDbType.Bigint);
+                p.Value = (long)(seq > long.MaxValue ? long.MaxValue : seq);
 
-                    var next = _rpcCounts.TryGetValue(kind, out var n) ? n + 1 : 1;
-                    _rpcCounts[kind] = next;
-
-                    var ts = nowUtc.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
-                    File.AppendAllText(_rpcLogPath, $"{ts} [{kind}] #{next} {line}{Environment.NewLine}");
-                }
+                await cmd.ExecuteNonQueryAsync(ct);
             }
             catch
             {
-                // Best-effort logging: never let IO errors affect the caller.
+                // If table missing, we’ll persist on next call after migration is applied
             }
+        }
+
+        private async Task                              ProcessKickQueueAsync               (CancellationToken token) {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (_kickMissions.TryDequeue(out var mission))
+            {
+                if (string.IsNullOrWhiteSpace(mission)) continue;
+                if (!seen.Add(mission)) continue;
+
+                try
+                {
+                    await RefreshMissionSnapshotAsync(mission, token);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogDebug(ex, "Kick refresh failed for {mission}", mission);
+                }
+            }
+        }
+
+        private async Task                              NotifyMissionUpdatedAsync           (string mission, CancellationToken ct = default) {
+            if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/mission");
+            req.Content = JsonContent.Create(new { Mission = mission });
+            req.Headers.Add("X-Push-Key", _pushKey);
+            try
+            {
+                var resp = await _http.SendAsync(req, ct);
+                _log.LogInformation("push/mission {mission} -> {code}", mission, (int)resp.StatusCode);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "push/mission failed for {mission}", mission);
+            }
+        }
+
+        private async Task                              NotifyStatusAsync                   (string mission, short newStatus, CancellationToken ct = default) {
+            if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/status")
+            {
+                Content = JsonContent.Create(new { Mission = mission, NewStatus = newStatus })
+            };
+            req.Headers.Add("X-Push-Key", _pushKey);
+            try { await _http.SendAsync(req, ct); }
+            catch (Exception ex) { _log.LogDebug(ex, "push/status failed for {mission}", mission); }
+        }
+
+        private async Task                              NotifyRoundAsync                    (string mission, short round, string winner, string amountWei, CancellationToken ct = default) {
+            if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/round")
+            {
+                Content = JsonContent.Create(new { Mission = mission, Round = round, Winner = winner, AmountWei = amountWei })
+            };
+            req.Headers.Add("X-Push-Key", _pushKey);
+            try { await _http.SendAsync(req, ct); }
+            catch (Exception ex) { _log.LogDebug(ex, "push/round failed for {mission} r{round}", mission, round); }
         }
 
         private async Task<T>                           RunRpc<T>                           (Func<Web3, Task<T>> fn, string context, [CallerMemberName] string caller = "") {
@@ -470,9 +632,6 @@ namespace B6.Indexer
 
             // Count this attempt (counts retries too, which reflects real request volume)
             NoteRpc(context, caller);
-
-            // Evenly space this call within the current cycle
-            await _pacer.GateAsync();
 
             var sw = Stopwatch.StartNew();
             try
@@ -534,23 +693,23 @@ namespace B6.Indexer
             }
         }
 
-        private void                                    NoteRpc                             (string context, string caller) {
-            var ctx = string.IsNullOrWhiteSpace(context) ? "RPC" : context;
-            var who = string.IsNullOrWhiteSpace(caller)  ? "Unknown" : caller;
-
-            lock (_rpcLogLock)
-            {
-                _rpc5mByContext[ctx] = _rpc5mByContext.TryGetValue(ctx, out var n) ? n + 1 : 1;
-
-                if (!_rpc1hByCaller.TryGetValue(who, out var map))
-                {
-                    map = new Dictionary<string,int>(StringComparer.InvariantCulture);
-                    _rpc1hByCaller[who] = map;
-                }
-                map[ctx] = map.TryGetValue(ctx, out var c) ? c + 1 : 1;
-            }
+        private void                                    UseRpc                              (int idx) {
+            _rpcIndex = idx % _rpcEndpoints.Count;
+            var url = _rpcEndpoints[_rpcIndex];
+            _web3 = new Web3(url);
+            //_log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
         }
 
+        private bool                                    SwitchRpc                           () {
+            if (_rpcEndpoints.Count <= 1) return false;
+            var next = (_rpcIndex + 1) % _rpcEndpoints.Count;
+            if (next == _rpcIndex) return false;
+            var oldUrl = _rpcEndpoints[_rpcIndex];
+            UseRpc(next);
+            _log.LogWarning("Switched RPC from {old} to {nu}", oldUrl, _rpcEndpoints[_rpcIndex]);
+            return true;
+        }
+    
         private void                                    FlushRpcSummaryIfDue                () {
             var now = DateTime.UtcNow;
             if (_nextRpcSummaryUtc == DateTime.MinValue) _nextRpcSummaryUtc = now + _rpcSummaryPeriod;
@@ -604,29 +763,53 @@ namespace B6.Indexer
 
         }
 
-        private bool                                    SwitchRpc                           () {
-            if (_rpcEndpoints.Count <= 1) return false;
-            var next = (_rpcIndex + 1) % _rpcEndpoints.Count;
-            if (next == _rpcIndex) return false;
-            var oldUrl = _rpcEndpoints[_rpcIndex];
-            UseRpc(next);
-            _log.LogWarning("Switched RPC from {old} to {nu}", oldUrl, _rpcEndpoints[_rpcIndex]);
-            return true;
-        }
-    
-        private static bool                             IsTransient                         (Exception ex) {
-            return ex is Nethereum.JsonRpc.Client.RpcResponseException
-                || ex is System.Net.Http.HttpRequestException
-                || ex is TaskCanceledException
-                || (ex.InnerException != null && IsTransient(ex.InnerException));
+        private void                                    NoteRpc                             (string context, string caller) {
+            var ctx = string.IsNullOrWhiteSpace(context) ? "RPC" : context;
+            var who = string.IsNullOrWhiteSpace(caller)  ? "Unknown" : caller;
+
+            lock (_rpcLogLock)
+            {
+                _rpc5mByContext[ctx] = _rpc5mByContext.TryGetValue(ctx, out var n) ? n + 1 : 1;
+
+                if (!_rpc1hByCaller.TryGetValue(who, out var map))
+                {
+                    map = new Dictionary<string,int>(StringComparer.InvariantCulture);
+                    _rpc1hByCaller[who] = map;
+                }
+                map[ctx] = map.TryGetValue(ctx, out var c) ? c + 1 : 1;
+            }
         }
 
-        private static bool                             IsRateLimited                       (Exception ex) {
-            if (ex == null) return false;
-            var msg = ex.Message ?? string.Empty;
-            if (msg.IndexOf("429", StringComparison.OrdinalIgnoreCase) >= 0) return true;
-            if (msg.IndexOf("Too Many Requests", StringComparison.OrdinalIgnoreCase) >= 0) return true;
-            return ex.InnerException != null && IsRateLimited(ex.InnerException);
+        private void                                    RpcFileLog                          (string kind, string line) {
+            try
+            {
+                var nowUtc = DateTime.UtcNow;
+                var dayUtc = nowUtc.Date;
+
+                lock (_rpcLogLock)
+                {
+                    // rotate per UTC day
+                    if (dayUtc != _rpcLogDay)
+                    {
+                        _rpcLogDay  = dayUtc;
+                        _rpcCounts.Clear();
+                        var dir = Path.Combine(AppContext.BaseDirectory, "logs");
+                        Directory.CreateDirectory(dir);
+                        _rpcLogPath = Path.Combine(dir, $"rpc-{dayUtc:yyyyMMdd}.log");
+                        File.AppendAllText(_rpcLogPath, $"===== NEW DAY {dayUtc:yyyy-MM-dd} UTC ====={Environment.NewLine}");
+                    }
+
+                    var next = _rpcCounts.TryGetValue(kind, out var n) ? n + 1 : 1;
+                    _rpcCounts[kind] = next;
+
+                    var ts = nowUtc.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+                    File.AppendAllText(_rpcLogPath, $"{ts} [{kind}] #{next} {line}{Environment.NewLine}");
+                }
+            }
+            catch
+            {
+                // Best-effort logging: never let IO errors affect the caller.
+            }
         }
 
         private static bool                             TryGetBenignProviderCode            (Exception ex, out string code) {
@@ -691,282 +874,26 @@ namespace B6.Indexer
             catch { /* never block caller */ }
         }
 
-        private async Task                              ProcessKickQueueAsync               (CancellationToken token) {
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            while (_kickMissions.TryDequeue(out var mission))
-            {
-                if (string.IsNullOrWhiteSpace(mission)) continue;
-                if (!seen.Add(mission)) continue;
-
-                try
-                {
-                    await RefreshMissionSnapshotAsync(mission, token);
-                }
-                catch (Exception ex)
-                {
-                    _log.LogDebug(ex, "Kick refresh failed for {mission}", mission);
-                }
-            }
+        // RunRpc helpers
+        private static string                           NormalizeKind                       (string context) {
+            if (string.IsNullOrWhiteSpace(context)) return "RPC";
+            var p = context.IndexOf('(');
+            return p > 0 ? context.Substring(0, p) : context;
         }
 
-        private async Task                              RefreshFactoryChangesAsync          (CancellationToken token) {
-            // 1) Query factory for changes after our last sequence
-            var output = await RunRpc(
-                w => w.Eth.GetContractQueryHandler<GetChangesAfterFunction>()
-                        .QueryDeserializingToObjectAsync<GetChangesAfterOutput>(
-                                new GetChangesAfterFunction { LastSeq = _factoryLastSeq }, _factory, null),
-                "Call.getChangesAfter");
-
-            if (output == null || output.Missions == null || output.Missions.Count == 0)
-                return;
-
-            // 2) Refresh only the changed missions
-            ulong newMaxSeq = _factoryLastSeq;
-            var count = output.Missions.Count;
-
-            for (int i = 0; i < count; i++)
-            {
-                var mission = (output.Missions[i] ?? string.Empty).ToLowerInvariant();
-                if (string.IsNullOrWhiteSpace(mission)) continue;
-
-                try
-                {
-                    await EnsureMissionRowAsync(mission, token);
-                    // Single source of truth: reuse existing snapshot path
-                    await RefreshMissionSnapshotAsync(mission, token);
-                }
-                catch (Exception ex)
-                {
-                    _log.LogDebug(ex, "Factory change refresh failed for {mission}", mission);
-                }
-
-                // Track max seq
-                if (output.Seqs != null && i < output.Seqs.Count)
-                {
-                    try
-                    {
-                        var seqVal = (ulong)output.Seqs[i];
-                        if (seqVal > newMaxSeq) newMaxSeq = seqVal;
-                    }
-                    catch { /* ignore cast issues */ }
-                }
-            }
-
-            // 3) Advance and persist cursor
-            if (newMaxSeq != _factoryLastSeq)
-            {
-                _factoryLastSeq = newMaxSeq;
-                await SaveFactoryLastSeqAsync(_factoryLastSeq, token);
-            }
+        private static bool                             IsTransient                         (Exception ex) {
+            return ex is Nethereum.JsonRpc.Client.RpcResponseException
+                || ex is System.Net.Http.HttpRequestException
+                || ex is TaskCanceledException
+                || (ex.InnerException != null && IsTransient(ex.InnerException));
         }
 
-        private async Task<ulong>                       LoadFactoryLastSeqAsync             (CancellationToken ct) {
-            try
-            {
-                await using var conn = new Npgsql.NpgsqlConnection(_pg);
-                await conn.OpenAsync(ct);
-                await using var cmd = new Npgsql.NpgsqlCommand(
-                    "select last_seq from indexer_factory_cursor where id = 1;", conn);
-                var o = await cmd.ExecuteScalarAsync(ct);
-                if (o == null || o is DBNull) return 0UL;
-
-                // PG bigint → long → ulong (non-negative)
-                var v = Convert.ToInt64(o);
-                return v <= 0 ? 0UL : (ulong)v;
-            }
-            catch
-            {
-                // Table may not exist yet; treat as cold start
-                return 0UL;
-            }
-        }
-
-        private async Task                              SaveFactoryLastSeqAsync             (ulong seq, CancellationToken ct) {
-            try
-            {
-                await using var conn = new Npgsql.NpgsqlConnection(_pg);
-                await conn.OpenAsync(ct);
-                await using var cmd = new Npgsql.NpgsqlCommand(@"
-                    insert into indexer_factory_cursor (id, last_seq, updated_at)
-                    values (1, @s, now())
-                    on conflict (id) do update
-                    set last_seq  = greatest(indexer_factory_cursor.last_seq, @s),
-                        updated_at = now();", conn);
-
-                var p = cmd.Parameters.Add("s", NpgsqlTypes.NpgsqlDbType.Bigint);
-                p.Value = (long)(seq > long.MaxValue ? long.MaxValue : seq);
-
-                await cmd.ExecuteNonQueryAsync(ct);
-            }
-            catch
-            {
-                // If table missing, we’ll persist on next call after migration is applied
-            }
-        }
-
-        private async Task                              RefreshMissionSnapshotAsync         (string mission, CancellationToken token) {
-            var wrap = await RunRpc(
-                w => w.Eth.GetContractQueryHandler<B6.Contracts.GetMissionDataFunction>()
-                    .QueryDeserializingToObjectAsync<B6.Contracts.MissionDataWrapper>(
-                        new B6.Contracts.GetMissionDataFunction(), mission, null),
-                "Call.getMissionData");
-
-            var md = wrap.Data; // includes: players, missionType, schedule, rounds, croStart/current, wins, refunds, pauseTimestamp, name, created
-
-            // Apply the snapshot to DB and derive deltas
-            var changes = await ApplySnapshotToDatabaseAsync(mission, md, token);
-
-            // Push only when meaningful deltas exist
-            if (changes.HasMeaningfulChange)
-            {
-                await NotifyMissionUpdatedAsync(mission, token);
-
-                if (changes.StatusTransition != null)
-                {
-                    await NotifyStatusAsync(mission, changes.StatusTransition.Value.To, token);
-                }
-
-                if (changes.NewRound != null)
-                {
-                    string winner = "";
-                    string amountWei = "0";
-                    try
-                    {
-                        var ix = changes.NewRound.Value - 1;
-                        if (ix >= 0 && ix < md.PlayersWon.Count)
-                        {
-                            var rw = md.PlayersWon[ix];
-                            winner    = (rw.Player ?? "").ToLower(System.Globalization.CultureInfo.InvariantCulture);
-                            amountWei = (rw.Amount  ).ToString(System.Globalization.CultureInfo.InvariantCulture);
-                        }
-                    }
-                    catch { /* best effort */ }
-
-                    await NotifyRoundAsync(mission, changes.NewRound.Value, winner, amountWei, token);
-                }
-            }
-
-        }
-
-        private async Task                              EnsureMissionRowAsync               (string mission, CancellationToken ct) {
-            await using var conn = new NpgsqlConnection(_pg);
-            await conn.OpenAsync(ct);
-            await using var cmd = new NpgsqlCommand(@"
-                insert into missions (mission_address, created_at, updated_at)
-                values (@a, now(), now())
-                on conflict (mission_address) do nothing;", conn);
-            cmd.Parameters.AddWithValue("a", mission);
-            await cmd.ExecuteNonQueryAsync(ct);
-        }
-
-        private async Task                              NotifyStatusAsync                   (string mission, short newStatus, CancellationToken ct = default) {
-            if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/status")
-            {
-                Content = JsonContent.Create(new { Mission = mission, NewStatus = newStatus })
-            };
-            req.Headers.Add("X-Push-Key", _pushKey);
-            try { await _http.SendAsync(req, ct); }
-            catch (Exception ex) { _log.LogDebug(ex, "push/status failed for {mission}", mission); }
-        }
-
-        private async Task                              NotifyMissionUpdatedAsync           (string mission, CancellationToken ct = default) {
-            if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/mission");
-            req.Content = JsonContent.Create(new { Mission = mission });
-            req.Headers.Add("X-Push-Key", _pushKey);
-            try
-            {
-                var resp = await _http.SendAsync(req, ct);
-                _log.LogInformation("push/mission {mission} -> {code}", mission, (int)resp.StatusCode);
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex, "push/mission failed for {mission}", mission);
-            }
-        }
-
-        private async Task                              NotifyRoundAsync                    (string mission, short round, string winner, string amountWei, CancellationToken ct = default) {
-            if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/round")
-            {
-                Content = JsonContent.Create(new { Mission = mission, Round = round, Winner = winner, AmountWei = amountWei })
-            };
-            req.Headers.Add("X-Push-Key", _pushKey);
-            try { await _http.SendAsync(req, ct); }
-            catch (Exception ex) { _log.LogDebug(ex, "push/round failed for {mission} r{round}", mission, round); }
-        }
-
-        private async Task                              ListenForKicksAsync                 (CancellationToken token) {
-            try
-            {
-                await using var conn = new Npgsql.NpgsqlConnection(_pg);
-                await conn.OpenAsync(token);
-
-                // Ensure the table exists is handled by API migration; just LISTEN here
-                await using (var cmd = new Npgsql.NpgsqlCommand("LISTEN b6_indexer_kick;", conn))
-                    await cmd.ExecuteNonQueryAsync(token);
-
-                conn.Notification += async (_, e) =>
-                {
-                    try
-                    {
-                        var mission = (e.Payload ?? string.Empty).ToLowerInvariant();
-                        if (!string.IsNullOrWhiteSpace(mission))
-                            _kickMissions.Enqueue(mission);
-
-                        _kickRequested = true;
-                        // Optional: also sweep pending kick rows to be safe
-                        await ProcessPendingKicksAsync(CancellationToken.None);
-                    }
-                    catch { /* swallow */ }
-                };
-
-                // Wait loop to receive notifications
-                while (!token.IsCancellationRequested)
-                {
-                    await conn.WaitAsync(token);
-                }
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex, "Kick listener failed; continuing without NOTIFY/LISTEN");
-            }
-        }
-
-        private async Task                              ProcessPendingKicksAsync            (CancellationToken token) {
-            try
-            {
-                await using var conn = new Npgsql.NpgsqlConnection(_pg);
-                await conn.OpenAsync(token);
-
-                // Fetch and delete pending kicks (best-effort dedupe)
-                var kicks = new List<string>();
-                await using (var cmd = new Npgsql.NpgsqlCommand(@"
-                    delete from indexer_kicks
-                    where id in (
-                        select id from indexer_kicks
-                        order by id
-                        limit 200
-                    )
-                    returning mission_address;", conn))
-                await using (var rd = await cmd.ExecuteReaderAsync(token))
-                {
-                    while (await rd.ReadAsync(token))
-                        kicks.Add((rd.GetString(0) ?? string.Empty).ToLowerInvariant());
-                }
-
-                foreach (var m in kicks)
-                    _kickMissions.Enqueue(m);
-
-                if (kicks.Count > 0)
-                    _kickRequested = true;
-            }
-            catch (Exception ex)
-            {
-                _log.LogDebug(ex, "ProcessPendingKicksAsync failed");
-            }
+        private static bool                             IsRateLimited                       (Exception ex) {
+            if (ex == null) return false;
+            var msg = ex.Message ?? string.Empty;
+            if (msg.IndexOf("429", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (msg.IndexOf("Too Many Requests", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return ex.InnerException != null && IsRateLimited(ex.InnerException);
         }
 
     }
