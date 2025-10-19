@@ -1,8 +1,8 @@
 {
   "network": "cronos",
   "deployer": "0x8fD91b46513485e7FbE153c5AF6057B9256F13bA",
-  "MissionImpl": "0x650Bb899Be461d850dfDe84B4A70c36BC3672259",
-  "MissionFactory": "0x4F5765a59be7Ae20681e74B9b0a041Fea0742dbd",
+  "MissionImpl": "0x5e10a8A6659A9bbC6d7D48f4278786E37Dc133f0",
+  "MissionFactory": "0x19345611813fFFe888b5f3f67ec42c5285E97aAe",
   "funded": "0 CRO",
-  "timestamp": "2025-10-19T14:29:21.919Z"
+  "timestamp": "2025-10-19T19:37:02.184Z"
 }

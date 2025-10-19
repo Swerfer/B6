@@ -35,12 +35,12 @@ export const FACTORY_ABI = [
   // --------- Factory methods ----------
   "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8,string,bytes32,address) payable returns (address,string)",
   "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint8 roundPauseDuration,uint8 lastRoundPauseDuration,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds, address creator)",
-  // --------- Get missions views ----------
-  "function getAllMissions() view returns(address[] missions, uint8[] statuses, string[] names)",
-  "function getMissionsByStatus(uint8 status) view returns(address[] missions, uint8[] statuses, string[] names)",
-  "function getMissionsEnded() view returns(address[] missions, uint8[] statuses, string[] names)",
-  "function getMissionsNotEnded() view returns(address[] missions, uint8[] statuses, string[] names)",
-  "function getLatestMissions(uint256) view returns(address[] missions, uint8[] statuses, string[] names)",
+  // --------- Get missions views (tuple array) ----------
+  "function getAllMissions() view returns((uint8,uint256,string,uint8,uint8,uint8,uint8,uint256,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint256,uint256,(address,uint256,uint256,uint256,bool,bool,uint256)[],uint8,uint8,uint256,bool,address)[])",
+  "function getMissionsByStatus(uint8 status) view returns((uint8,uint256,string,uint8,uint8,uint8,uint8,uint256,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint256,uint256,(address,uint256,uint256,uint256,bool,bool,uint256)[],uint8,uint8,uint256,bool,address)[])",
+  "function getMissionsEnded() view returns((uint8,uint256,string,uint8,uint8,uint8,uint8,uint256,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint256,uint256,(address,uint256,uint256,uint256,bool,bool,uint256)[],uint8,uint8,uint256,bool,address)[])",
+  "function getMissionsNotEnded() view returns((uint8,uint256,string,uint8,uint8,uint8,uint8,uint256,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint256,uint256,(address,uint256,uint256,uint256,bool,bool,uint256)[],uint8,uint8,uint256,bool,address)[])",
+  "function getLatestMissions(uint256) view returns((uint8,uint256,string,uint8,uint8,uint8,uint8,uint256,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint256,uint256,(address,uint256,uint256,uint256,bool,bool,uint256)[],uint8,uint8,uint256,bool,address)[])",
   // ------------ global views ------------
   "function getFactorySummary() view returns (address,address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[])",
   "function owner() view returns(address)",

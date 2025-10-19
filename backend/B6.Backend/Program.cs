@@ -717,27 +717,36 @@ app.MapGet("/debug/chain",              async (IConfiguration cfg) => {
 
 /* ---------- DEBUG: FACTORY COUNTS ---------- */
 app.MapGet("/debug/factory",            async (IConfiguration cfg) => {
-    var rpc     = GetRequired(cfg, "Cronos:Rpc");
-    var factory = GetRequired(cfg, "Contracts:Factory");
+    var cs = cfg.GetConnectionString("Db");
+    await using var conn = new Npgsql.NpgsqlConnection(cs);
+    await conn.OpenAsync();
 
-    var web3 = new Web3(rpc);
+    int all, notEnded;
 
-    var notEndedH = web3.Eth.GetContractQueryHandler<GetMissionsNotEndedFunction>();
-    var allH      = web3.Eth.GetContractQueryHandler<GetAllMissionsFunction>();
+    await using (var cmd = new Npgsql.NpgsqlCommand("select count(*) from missions;", conn))
+        all = Convert.ToInt32(await cmd.ExecuteScalarAsync());
 
-    var notEnded = await notEndedH.QueryDeserializingToObjectAsync<GetMissionsOutput>(
-        new GetMissionsNotEndedFunction(), factory, null);
+    // status < 5 → Pending/Enrolling/Arming/Active/Paused (not ended)
+    await using (var cmd = new Npgsql.NpgsqlCommand("select count(*) from missions where status < 5;", conn))
+        notEnded = Convert.ToInt32(await cmd.ExecuteScalarAsync());
 
-    var all = await allH.QueryDeserializingToObjectAsync<GetMissionsOutput>(
-        new GetAllMissionsFunction(), factory, null);
+    // optional tiny sample from DB to mimic previous shape (addresses only)
+    var sampleAll = new List<string>();
+    await using (var cmd = new Npgsql.NpgsqlCommand(@"
+        select mission_address
+        from missions
+        order by mission_created desc
+        limit 5;", conn))
+    await using (var rd = await cmd.ExecuteReaderAsync())
+    {
+        while (await rd.ReadAsync())
+            sampleAll.Add(rd["mission_address"] as string ?? "");
+    }
 
     return Results.Ok(new {
-        factory,
-        notEnded = notEnded?.Missions?.Count ?? 0,
-        all = all?.Missions?.Count ?? 0,
-        sampleAll = all?.Missions?.Count > 0
-          ? all.Missions.GetRange(0, Math.Min(5, all.Missions.Count))
-          : new List<string>()
+        notEnded,
+        all,
+        sampleAll
     });
 });
 

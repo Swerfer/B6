@@ -5,20 +5,6 @@ using Nethereum.Contracts;
 
 namespace B6.Contracts
 {
-    // ---- Factory views ----
-    [Function("getAllMissions", typeof(GetMissionsOutput))]
-    public class GetAllMissionsFunction : FunctionMessage { }
-
-    [Function("getMissionsNotEnded", typeof(GetMissionsOutput))]
-    public class GetMissionsNotEndedFunction : FunctionMessage { }
-
-    [FunctionOutput]
-    public class GetMissionsOutput : IFunctionOutputDTO {
-        [Parameter("address[]", "missions",  1)] public List<string> Missions  { get; set; } = new();
-        [Parameter("uint8[]",   "statuses",  2)] public List<byte>   Statuses  { get; set; } = new(); 
-        [Parameter("string[]",  "names",     3)] public List<string> Names     { get; set; } = new();
-    }
-
     // ---- Mission.getMissionData (wrapped single tuple) ----
     [Function("getMissionData", typeof(MissionDataWrapper))]
     public class GetMissionDataFunction : FunctionMessage { }

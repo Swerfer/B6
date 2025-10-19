@@ -133,12 +133,14 @@ enum Limit      {
 
 
 
-// ############################################################
-// ####                                                    ####
-// ####     MissionFactory size is very close to the       ####
-// ####     maximum! Do not add code or it will refert     ####
-// ####                                                    ####
-// ############################################################
+
+
+// #############################################################
+// ####                                                     ####
+// ####    Contract sizes are very close to the maximum!    ####
+// ####         Do not add code or they will refert         ####
+// ####                                                     ####
+// #############################################################
 
 // #region Contr. MissionFactory
 contract MissionFactory is Ownable, ReentrancyGuard {
@@ -169,8 +171,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     );
     event AuthorizedAddressAdded                (address        indexed addr                                                                        );
     event AuthorizedAddressRemoved              (address        indexed addr                                                                        );
-    event MissionFundsRegistered                (uint256                amount,         MissionType indexed missionType,    address indexed sender  );
-    event FundsWithdrawn                        (address        indexed to,             uint256             amount                                  );    
     event OwnershipTransferProposed             (address        indexed proposer,       address             newOwner,       uint256 timestamp       );
     event OwnershipTransferConfirmed            (address        indexed confirmer,      address             newOwner,       uint256 timestamp       );
     event MissionStatusUpdated                  (address        indexed mission,        uint8       indexed fromStatus,     uint8   indexed toStatus, uint256        timestamp);
@@ -187,9 +187,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      */
     modifier onlyOwnerOrAuthorized() {
         require(
-            msg.sender == owner() || authorized[msg.sender],    // Check if the caller is the owner or an authorized address
-            "Not owner or MissionFactory authorized"
-        );
+            msg.sender == owner() || authorized[msg.sender]); // Not owner or authorized
         _;
     }
 	
@@ -198,10 +196,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This ensures that the caller is a contract that has been registered as a mission.
      */
 	modifier onlyMission() {
-        require(
-            isMission[msg.sender],                                      // Check if the caller is a registered mission
-            "MissionFactory: caller is not a valid mission contract"
-        );
+        require(isMission[msg.sender]); // Not a mission
         _;
     }
     // #endregion
@@ -793,7 +788,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         reservedFunds[missionType] += msg.value;                                                                            // Add the amount to the reserved funds for the specified mission type
         totalMissionFunds += msg.value;                                                                                     // Update the total mission funds
         totalOwnerEarnedFunds += msg.value / 3;                                                                             // Update the total funds earned by the owner (25% of the amount)
-        emit MissionFundsRegistered(msg.value, missionType, msg.sender);                                                    // Emit an event for the registered mission funds
     }
 
     /**
@@ -839,7 +833,6 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         require(amount <= address(this).balance, "> balance");              // Ensure the contract has enough balance to withdraw
         (bool ok, ) = payable(mgrOwner).call{ value: amount }("");          // Attempt to transfer the specified amount to the manager owner
         require(ok, "TX failed");                                           // Ensure the transfer was successful
-        emit FundsWithdrawn(mgrOwner, amount);                              // Emit event for funds withdrawal
     }
     // #endregion
 
@@ -954,69 +947,79 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         return missions.length;             // Return the total number of missions
     }
 
+    // #region Missions getters
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Centralized list helper returning full MissionData[] with players cleared.
+    // mode: 0=All(with cutoff), 1=ByStatus(wanted), 2=NotEnded, 3=Ended, 4=Latest(nLatest)
+    // For mode 0, the same 60/30-day cutoffs as your current getAllMissions are applied.
+    // Order: newest → oldest. Early-break for cutoff and for Latest N.
+    // ─────────────────────────────────────────────────────────────────────────────
+    function _listMissionsMissionData(uint8  mode, Status wanted, uint256 nLatest)  internal view returns (Mission.MissionData[] memory out) {
+        uint256 len = missions.length;
+        if (len == 0) return new Mission.MissionData[](0);
+
+        // For "All" with cutoff: use same windows as your current function
+        uint256 nowTs      = block.timestamp;
+        uint256 startCutoff = nowTs - 60 days;   // skip if missionStart < startCutoff
+        uint256 endCutoff   = nowTs - 30 days;   // skip if (ended) missionEnd < endCutoff
+
+        // Temporary buffer up to len, then shrink at the end
+        Mission.MissionData[] memory buf = new Mission.MissionData[](len);
+        uint256 count;
+
+        // newest → oldest so cutoff and "latest N" can short-circuit
+        for (uint256 i = len; i > 0; ) {
+            unchecked { --i; }
+            address m = missions[i];
+            Status  s = missionStatus[m];
+
+            // Quick predicate by mode (using factory-tracked status)
+            bool pick;
+            if (mode == 1) {               // ByStatus
+                pick = (s == wanted);
+            } else if (mode == 2) {        // NotEnded
+                pick = !(s == Status.Success || s == Status.Failed);
+            } else if (mode == 3) {        // Ended
+                pick =  (s == Status.Success || s == Status.Failed);
+            } else {                       // mode 0=All(with cutoff) or 4=Latest
+                pick = true;
+            }
+            if (!pick) continue;
+
+            // Fetch once; clear players before storing
+            Mission.MissionData memory md = Mission(payable(m)).getMissionData();
+            delete md.players;
+
+            if (mode == 0) {
+                bool ended  = (s == Status.Success || s == Status.Failed);
+                bool tooOld = ended ? (md.missionEnd   < endCutoff)
+                                    : (md.missionStart < startCutoff);
+                if (tooOld) break; // because we iterate newest → oldest
+            }
+
+            buf[count] = md;
+            unchecked { ++count; }
+
+            if (mode == 4 && count == nLatest) break; // Latest N only
+        }
+
+        // Shrink to exact size
+        out = new Mission.MissionData[](count);
+        for (uint256 k = 0; k < count; ) { out[k] = buf[k]; unchecked { ++k; } }
+    }
+
     /**
      * @dev Returns the addresses and statuses of all missions.
      * This function retrieves all missions and their statuses, filtering out old missions.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getAllMissions()                                                       external view returns (address[] memory, Status[] memory, string[] memory) {
-        uint256 nowTs = block.timestamp;                                            // Get the current timestamp
-        uint256 len = missions.length;
-        if (len == 0) {                                                             // If there are no missions, return empty arrays
-            return (new address[](0), new Status[](0), new string[](0));
-        }
-
-        uint256 startCutoff = nowTs - 60 days;                                      // skip if missionStart < startCutoff
-        uint256 endCutoff   = nowTs - 30 days;                                      // skip if (ended) missionEnd < endCutoff
-        uint256 count;
-
-        // FIRST PASS ── count how many to return, scanning newest → oldest
-        for (uint256 i = len; i > 0;) {
-            unchecked { --i; }                                                      // safe because we check i>0 first
-            address m = missions[i];
-            Status  s = missionStatus[m];
-            Mission.MissionData memory md = Mission(payable(m)).getMissionData();
-
-            bool tooOld =
-                md.missionStart < startCutoff &&                                    // started > 60 days ago
-                (s == Status.Success || s == Status.Failed)
-                    ? md.missionEnd < endCutoff                                     // …and ended/failed > 30 days ago
-                    : md.missionStart < startCutoff;                                // or is still running but started > 60 days ago
-
-            if (tooOld) {
-                break;                                                              // every earlier mission will be older ⇒ stop
-            }
-            count++;
-        }
-
-        // SECOND PASS ── copy the selected missions into fixed-size arrays
-        address[] memory outAddrs  = new address[](count);                          // Create an array to hold the addresses of the missions
-        Status[]  memory outStatus = new Status[](count);                           // Create an array to hold the statuses of the missions
-        string[]  memory names     = new string[](count);                           // Create an array to hold the mission names
-        uint256 j;
-
-        for (uint256 i = len; i > 0 && j < count;) {                                // Loop through the missions from newest to oldest
-            unchecked { --i; }
-            address m = missions[i];                                                // Get the address of the current mission
-            Status  s = missionStatus[m];                                           // Get the status of the current mission    
-            Mission.MissionData memory md = Mission(payable(m)).getMissionData();   // Get the mission data for the current mission
-
-            bool tooOld =
-                md.missionStart < startCutoff &&
-                (s == Status.Success || s == Status.Failed)                         // If the mission has ended or failed, check if it ended more than 30 days ago
-                    ? md.missionEnd < endCutoff
-                    : md.missionStart < startCutoff;
-
-            if (tooOld) {                                                           // If the mission is too old, skip it
-                break;
-            }
-            outAddrs[j]  = m;                                                       // Add the mission address to the output array  
-            outStatus[j] = s;                                                       // Add the mission status to the output array
-            names[j] = missionNames[m];                                             // Add the mission name to the output array
-            unchecked { ++j; }                                                      // Increment the index for the output arrays
-        }
-
-        return (outAddrs, outStatus, names);                                        // Return arrays: addresses of missions not ended, their statuses and names 
+    function getAllMissions()                                                       external view returns (Mission.MissionData[] memory) {
+        return _listMissionsMissionData(
+            0,              // mode 0 = All (with 60/30-day cutoff)
+            Status.Pending, // unused in mode 0
+            0               // nLatest unused in mode 0
+        );
     }
 
     /**
@@ -1025,69 +1028,26 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param s The status to filter missions by.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsByStatus(Status s)                                          external view returns (address[] memory, uint8[] memory, string[] memory) {
-        uint256 len = missions.length;                              // Get the total number of missions
-        uint256 count;
-
-        // First pass: count missions with the specified status
-        for (uint256 i = 0; i < len; i++) {                         // Loop through all missions
-            if (missionStatus[missions[i]] == s) {                  // If the mission status matches the specified status
-                count++;                                            // Increment the count of matching missions
-            }
-        }
-
-        // Second pass: populate result arrays
-        address[] memory filteredMissions = new address[](count);   // Create an array to hold the addresses of matching missions
-        uint8[]   memory statuses         = new uint8[](count);     // Create a parallel array for statuses
-        string[]  memory names            = new string[](count);    // Create an array to hold the mission names
-        uint256 index;
-        for (uint256 i = 0; i < len; i++) {                         // Loop through all missions again
-            if (missionStatus[missions[i]] == s) {                  // If the mission status matches the specified status
-                filteredMissions[index] = missions[i];              // Add the mission address to the result array
-                statuses[index] = uint8(s);                         // Add the known status
-                names[index] = missionNames[missions[i]];           // Add the mission name to the output array
-                index++;
-            }
-        }
-
-        return (filteredMissions, statuses, names);                 // Return arrays: addresses of missions not ended, their statuses and names 
+    function getMissionsByStatus(Status s)                                          external view returns (Mission.MissionData[] memory){
+        return _listMissionsMissionData(
+            1,      // mode 1 = ByStatus
+            s,      // wanted status
+            0       // nLatest unused
+        );
     }
-    
+
     /**
      * @dev Returns the addresses of missions that have not ended.
      * This function filters out missions that are in the Ended or Failed status.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
     
-    function getMissionsNotEnded()                                                  external view returns (address[] memory, uint8[] memory, string[] memory) {
-        uint256 len = missions.length;                          // Get the total number of missions 
-        uint256 count;                                          // Variable to count how many missions are not ended    
-
-        // First pass: count how many missions are not ended
-        for (uint256 i = 0; i < len; i++) {                     // Loop through all missions    
-            Status s = missionStatus[missions[i]];
-            if (s != Status.Success && s != Status.Failed) {    // If the mission is not in Success or Failed status
-                count++;
-            }
-        }
-
-        // Second pass: populate arrays
-        address[] memory result   = new address[](count);       // Create an array to hold the addresses of missions that are not ended
-        uint8[]   memory statuses = new uint8[](count);         // Create a parallel array for statuses
-        string[]  memory names    = new string[](count);        // Create an array to hold the mission names
-        uint256 index;
-
-        for (uint256 i = 0; i < len; i++) {                     // Loop through all missions again
-            Status s = missionStatus[missions[i]];              // Get the status of the current mission
-            if (s != Status.Success && s != Status.Failed) {    // If the mission is not in Success or Failed status
-                result[index] = missions[i];                    // Add the mission address to the result array
-                statuses[index] = uint8(s);                     // Add the status to the statuses array
-                names[index] = missionNames[missions[i]];       // Add the mission name to the output array
-                index++;
-            }
-        }
-
-        return (result, statuses, names);                       // Return arrays: addresses of missions not ended, their statuses and names  
+    function getMissionsNotEnded()                                                  external view returns (Mission.MissionData[] memory) {
+        return _listMissionsMissionData(
+            2,              // mode 2 = NotEnded
+            Status.Pending, // unused here
+            0
+        );
     }
 
     /**
@@ -1095,35 +1055,12 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This function filters out missions that are in the Ended or Failed status.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsEnded()                                                     external view returns (address[] memory, uint8[] memory, string[] memory) {
-        uint256 len = missions.length;                          // Get the total number of missions
-        uint256 count;                                          // Variable to count how many missions have ended
-
-        // First pass: count how many missions are ended
-        for (uint256 i = 0; i < len; i++) {                     // Loop through all missions
-            Status s = missionStatus[missions[i]];              // Get the status of the current mission
-            if (s == Status.Success || s == Status.Failed) {    // If the mission is in Success or Failed status
-                count++;
-            }
-        }
-
-        // Second pass: populate arrays
-        address[] memory result   = new address[](count);       // Create an array to hold the addresses of missions that have ended
-        uint8[]   memory statuses = new uint8[](count);         // Create a parallel array for statuses
-        string[]  memory names    = new string[](count);        // Create an array to hold the mission names
-        uint256 index;
-
-        for (uint256 i = 0; i < len; i++) {                     // Loop through all missions again
-            Status s = missionStatus[missions[i]];              // Get the status of the current mission
-            if (s == Status.Success || s == Status.Failed) {    // If the mission is in Success or Failed status
-                result[index] = missions[i];                    // Add the mission address to the result array  
-                statuses[index] = uint8(s);                     // Add the status to the statuses array
-                names[index] = missionNames[missions[i]];       // Add the mission name to the output array
-                index++;
-            }
-        }
-
-        return (result, statuses, names);                       // Return arrays: addresses of missions not ended, their statuses and names  
+    function getMissionsEnded()                                                     external view returns (Mission.MissionData[] memory) {
+        return _listMissionsMissionData(
+            3,              // mode 3 = Ended
+            Status.Pending, // unused here
+            0
+        );
     }
 
     /**
@@ -1132,23 +1069,17 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param n The number of latest missions to return.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getLatestMissions(uint256 n)                                           external view returns (address[] memory, uint8[] memory, string[] memory) {
-        uint256 total = missions.length;                    // Get the total number of missions
-        if (n > total) n = total;                           // If n is greater than the total number of missions, adjust n to total
-
-        address[] memory result   = new address[](n);       // Create an array to hold the addresses of the latest missions
-        uint8[]   memory statuses = new uint8[](n);         // Create a parallel array for statuses
-        string[]  memory names    = new string[](n);        // Create an array to hold the mission names
-
-        for (uint256 i = 0; i < n; i++) {                   // Loop through the last n missions
-            address m = missions[total - 1 - i];            // Get the address of the mission
-            result[i] = m;                                  // Add the mission address to the result array  
-            statuses[i] = uint8(missionStatus[m]);          // Add the status of the mission to the statuses array
-            names[i] = missionNames[m];                     // Add the mission name to the output array
-       }
-
-        return (result, statuses, names);                   // Return arrays: addresses of missions not ended, their statuses and names  
+    function getLatestMissions(uint256 n)                                           external view returns (Mission.MissionData[] memory) {
+        uint256 len = missions.length;
+        if (n > len) n = len;
+        return _listMissionsMissionData(
+            4,              // mode 4 = Latest N
+            Status.Pending, // unused here
+            n
+        );
     }
+
+    // #endregion
 
     /**
      * @dev Returns the reserved funds for a specific mission type.

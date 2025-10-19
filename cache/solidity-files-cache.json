@@ -2,8 +2,8 @@
   "_format": "hh-sol-cache-2",
   "files": {
     "C:\\Users\\denni\\OneDrive\\B6\\contracts\\MissionFactory.sol": {
-      "lastModificationDate": 1760884055344,
-      "contentHash": "98298fe600d9dcf3dbaa8d0ccaa19c8d",
+      "lastModificationDate": 1760902432309,
+      "contentHash": "955e29534f1534d58742eb489ac9a50b",
       "sourceName": "contracts/MissionFactory.sol",
       "solcConfig": {
         "version": "0.8.30",
