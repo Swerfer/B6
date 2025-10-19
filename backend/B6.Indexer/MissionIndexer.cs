@@ -12,6 +12,7 @@ using Nethereum.Web3.Accounts;
 using Npgsql;
 using NpgsqlTypes;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;         
 using System.Globalization;
@@ -60,21 +61,15 @@ namespace B6.Indexer
         // --------------------------------------------------------------------------------------------------------------      
         private readonly string                         _ownerPk;                                                           // from Key Vault 
 
-        private static readonly TimeSpan                RATE_LIMIT_COOLDOWN        = TimeSpan.FromSeconds(30);              // wait after 429 before retrying
+        private static readonly TimeSpan                RATE_LIMIT_COOLDOWN = TimeSpan.FromSeconds(30);                     // wait after 429 before retrying
 
-        private volatile bool _kickRequested = false;                                                                       // set by listener
-        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _kickMissions = new();                       // mission addresses to refresh
+        private volatile bool                           _kickRequested      = false;                                        // set by listener
+        private readonly ConcurrentQueue<string>        _kickMissions       = new();                                        // mission addresses to refresh
+        private ulong                                   _factoryLastSeq     = 0;
 
-        private DateTime _factorySweepNextUtc;                                                                              // getMissionsNotEnded every 1 minute
-        private DateTime _enrollTickNextUtc;                                                                                // enrollment-open missions, 1 minute
-        private DateTime _activeTickNextUtc;                                                                                // active missions, 5 seconds
-        private DateTime _finalizingNextUtc;                                                                                // ended-but-not-finalized, 1 minute
+        private DateTime                                _activeTickNextUtc;                                                 // next active poll time
 
-        private static readonly TimeSpan PendingArmingBuffer = TimeSpan.FromSeconds(2);                                     // -2s before enrollmentStart/missionStart
-        private static readonly TimeSpan FactorySweep        = TimeSpan.FromMinutes(1);                                     // every 1 minute                     
-        private static readonly TimeSpan EnrollPoll          = TimeSpan.FromMinutes(1);                                     // every 1 minute
-        private static readonly TimeSpan ActivePoll          = TimeSpan.FromSeconds(5);                                     // every 5 seconds
-        private static readonly TimeSpan FinalizingPoll      = TimeSpan.FromMinutes(1);                                     // every 1 minute
+        private static readonly TimeSpan                ActivePoll          = TimeSpan.FromSeconds(5);                      // every 5 seconds
         // --------------------------------------------------------------------------------------------------------------
 
         [Function("refundPlayers")] 
@@ -90,6 +85,27 @@ namespace B6.Indexer
         [Function("forceFinalizeMission")]
         public class ForceFinalizeMissionFunction : FunctionMessage {
             // no args
+        }
+
+        [Function("getChangesAfter", typeof(GetChangesAfterOutput))]
+        public class GetChangesAfterFunction : FunctionMessage {
+            [Parameter("uint64", "lastSeq", 1)]
+            public ulong LastSeq { get; set; }
+        }
+
+        [FunctionOutput]
+        public class GetChangesAfterOutput : IFunctionOutputDTO {
+            [Parameter("address[]", "missions",   1)]
+            public List<string> Missions   { get; set; } = new();
+
+            [Parameter("uint40[]",  "timestamps", 2)]
+            public List<System.Numerics.BigInteger> Timestamps { get; set; } = new();
+
+            [Parameter("uint64[]",  "seqs",       3)]
+            public List<System.Numerics.BigInteger> Seqs       { get; set; } = new();
+
+            [Parameter("uint8[]",   "statuses",   4)]
+            public List<byte> Statuses   { get; set; } = new();
         }
 
         private readonly                                RpcCyclePacer _pacer = new();
@@ -205,6 +221,67 @@ namespace B6.Indexer
             _pushBase = cfg["Push:BaseUrl"] ?? "";
             _pushKey  = cfg["Push:Key"]     ?? "";
             _ownerPk  = cfg["Owner:PK"] ?? cfg["Owner--PK"] ?? string.Empty;
+        }
+
+        private void                                    UseRpc                              (int idx) {
+            _rpcIndex = idx % _rpcEndpoints.Count;
+            var url = _rpcEndpoints[_rpcIndex];
+            _web3 = new Web3(url);
+            //_log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
+        }
+
+        protected override async Task                   ExecuteAsync                        (CancellationToken token) {
+            // Snapshot-based indexer with state-aware cadence and POST kicks
+            try
+            {
+                // Keep kick listener (DB NOTIFY + fallback queue)
+                _ = Task.Run(() => ListenForKicksAsync(token), token);
+
+                // Warm-up
+                _activeTickNextUtc   = DateTime.UtcNow;
+                // Load factory change cursor (lastSeq = 0 if table/row missing)
+                _factoryLastSeq = await LoadFactoryLastSeqAsync(token);
+
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Scheduler bootstrap failed");
+            }
+
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    // 0) Process kicks first (mission-created / enroll-succeeded / bank-succeeded)
+                    if (_kickRequested || !_kickMissions.IsEmpty)
+                    {
+                        _kickRequested = false;
+                        await ProcessPendingKicksAsync(token);
+                        await ProcessKickQueueAsync(token); // refresh snapshots for kicked missions
+                    }
+
+                    var now = DateTime.UtcNow;
+
+                    // Single predictable poll every 5 seconds: factory change-set only
+                    if (now >= _activeTickNextUtc)
+                    {
+                        await RefreshFactoryChangesAsync(token);
+                        _activeTickNextUtc = now.Add(ActivePoll);
+                    }
+
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Scheduler loop failed");
+                }
+                FlushRpcSummaryIfDue();
+                // Light beat for low-latency kicks; cadence timers throttle the real work
+                try { await Task.Delay(TimeSpan.FromSeconds(1), token); } catch { }
+            }
         }
 
         private async Task<SnapshotChanges>             ApplySnapshotToDatabaseAsync        (string mission, MissionDataTuple md, CancellationToken token) {
@@ -386,13 +463,6 @@ namespace B6.Indexer
             {
                 // Best-effort logging: never let IO errors affect the caller.
             }
-        }
-
-        private void                                    UseRpc                              (int idx) {
-            _rpcIndex = idx % _rpcEndpoints.Count;
-            var url = _rpcEndpoints[_rpcIndex];
-            _web3 = new Web3(url);
-            //_log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
         }
 
         private async Task<T>                           RunRpc<T>                           (Func<Web3, Task<T>> fn, string context, [CallerMemberName] string caller = "") {
@@ -621,86 +691,6 @@ namespace B6.Indexer
             catch { /* never block caller */ }
         }
 
-        protected override async Task                   ExecuteAsync                        (CancellationToken token) {
-            // Snapshot-based indexer with state-aware cadence and POST kicks
-            try
-            {
-                // Keep kick listener (DB NOTIFY + fallback queue)
-                _ = Task.Run(() => ListenForKicksAsync(token), token);
-
-                // Warm-up: run the sweeps immediately
-                _factorySweepNextUtc = DateTime.UtcNow;
-                _enrollTickNextUtc   = DateTime.UtcNow.Add(EnrollPoll);
-                _activeTickNextUtc   = DateTime.UtcNow;
-                _finalizingNextUtc   = DateTime.UtcNow.Add(FinalizingPoll);
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "Scheduler bootstrap failed");
-            }
-
-            while (!token.IsCancellationRequested)
-            {
-                try
-                {
-                    // 0) Process kicks first (mission-created / enroll-succeeded / bank-succeeded)
-                    if (_kickRequested || !_kickMissions.IsEmpty)
-                    {
-                        _kickRequested = false;
-                        await ProcessPendingKicksAsync(token);
-                        await ProcessKickQueueAsync(token); // refresh snapshots for kicked missions
-                    }
-
-                    var now = DateTime.UtcNow;
-
-                    // 1) Factory sweep: discover not-ended missions every 1 minute
-                    if (now >= _factorySweepNextUtc)
-                    {
-                        await RefreshFactorySweepAsync(token);  // seeds/updates using getMissionsNotEnded + per-mission snapshots
-                        _factorySweepNextUtc = now.Add(FactorySweep);
-                    }
-
-                    // 2) Pending: no scans until enrollmentStart − 2s (handled via boundary crossing helper)
-                    await RefreshPendingBufferCrossingsAsync(token);
-
-                    // 3) Enrollment: light sweep every 1 minute (plus instant kicks after enroll POST)
-                    if (now >= _enrollTickNextUtc)
-                    {
-                        await RefreshEnrollmentMissionsAsync(token);
-                        _enrollTickNextUtc = now.Add(EnrollPoll);
-                    }
-
-                    // 4) Arming: no scans until missionStart − 2s
-                    await RefreshArmingBufferCrossingsAsync(token);
-
-                    // 5) Active: poll every 5 seconds
-                    if (now >= _activeTickNextUtc)
-                    {
-                        await RefreshActiveMissionsAsync(token);
-                        _activeTickNextUtc = now.Add(ActivePoll);
-                    }
-
-                    // 6) Finalizing: poll every 1 minute until finalized
-                    if (now >= _finalizingNextUtc)
-                    {
-                        await RefreshFinalizingMissionsAsync(token);
-                        _finalizingNextUtc = now.Add(FinalizingPoll);
-                    }
-                }
-                catch (OperationCanceledException) when (token.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    _log.LogError(ex, "Scheduler loop failed");
-                }
-                FlushRpcSummaryIfDue();
-                // Light beat for low-latency kicks; cadence timers throttle the real work
-                try { await Task.Delay(TimeSpan.FromSeconds(1), token); } catch { }
-            }
-        }
-
         private async Task                              ProcessKickQueueAsync               (CancellationToken token) {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             while (_kickMissions.TryDequeue(out var mission))
@@ -719,59 +709,99 @@ namespace B6.Indexer
             }
         }
 
-        private async Task                              RefreshFactorySweepAsync            (CancellationToken token) {
-            // Query not-ended missions (cheap, compared to logs)
+        private async Task                              RefreshFactoryChangesAsync          (CancellationToken token) {
+            // 1) Query factory for changes after our last sequence
             var output = await RunRpc(
-                w => w.Eth.GetContractQueryHandler<B6.Contracts.GetMissionsNotEndedFunction>()
-                    .QueryDeserializingToObjectAsync<B6.Contracts.GetMissionsOutput>(
-                        new B6.Contracts.GetMissionsNotEndedFunction(), _factory, null),
-                "Call.getMissionsNotEnded");
+                w => w.Eth.GetContractQueryHandler<GetChangesAfterFunction>()
+                        .QueryDeserializingToObjectAsync<GetChangesAfterOutput>(
+                                new GetChangesAfterFunction { LastSeq = _factoryLastSeq }, _factory, null),
+                "Call.getChangesAfter");
 
-            foreach (var addr in output.Missions)
+            if (output == null || output.Missions == null || output.Missions.Count == 0)
+                return;
+
+            // 2) Refresh only the changed missions
+            ulong newMaxSeq = _factoryLastSeq;
+            var count = output.Missions.Count;
+
+            for (int i = 0; i < count; i++)
             {
-                var mission = addr?.ToLowerInvariant();
-                if (string.IsNullOrEmpty(mission)) continue;
+                var mission = (output.Missions[i] ?? string.Empty).ToLowerInvariant();
+                if (string.IsNullOrWhiteSpace(mission)) continue;
 
                 try
                 {
-                    await EnsureMissionRowAsync(mission, token);        // insert-if-missing using your existing helper
-                    await RefreshMissionSnapshotAsync(mission, token);  // single source of truth
+                    await EnsureMissionRowAsync(mission, token);
+                    // Single source of truth: reuse existing snapshot path
+                    await RefreshMissionSnapshotAsync(mission, token);
                 }
                 catch (Exception ex)
                 {
-                    _log.LogDebug(ex, "Factory sweep refresh failed for {mission}", mission);
+                    _log.LogDebug(ex, "Factory change refresh failed for {mission}", mission);
                 }
+
+                // Track max seq
+                if (output.Seqs != null && i < output.Seqs.Count)
+                {
+                    try
+                    {
+                        var seqVal = (ulong)output.Seqs[i];
+                        if (seqVal > newMaxSeq) newMaxSeq = seqVal;
+                    }
+                    catch { /* ignore cast issues */ }
+                }
+            }
+
+            // 3) Advance and persist cursor
+            if (newMaxSeq != _factoryLastSeq)
+            {
+                _factoryLastSeq = newMaxSeq;
+                await SaveFactoryLastSeqAsync(_factoryLastSeq, token);
             }
         }
 
-        private async Task                              RefreshPendingBufferCrossingsAsync  (CancellationToken token) {
-            // Missions with now < enrollment_start and (enrollment_start - now) <= 2s
-            var list = await GetPendingMissionsAsync(PendingArmingBuffer, token);
-            foreach (var m in list) await RefreshMissionSnapshotAsync(m, token);
+        private async Task<ulong>                       LoadFactoryLastSeqAsync             (CancellationToken ct) {
+            try
+            {
+                await using var conn = new Npgsql.NpgsqlConnection(_pg);
+                await conn.OpenAsync(ct);
+                await using var cmd = new Npgsql.NpgsqlCommand(
+                    "select last_seq from indexer_factory_cursor where id = 1;", conn);
+                var o = await cmd.ExecuteScalarAsync(ct);
+                if (o == null || o is DBNull) return 0UL;
+
+                // PG bigint → long → ulong (non-negative)
+                var v = Convert.ToInt64(o);
+                return v <= 0 ? 0UL : (ulong)v;
+            }
+            catch
+            {
+                // Table may not exist yet; treat as cold start
+                return 0UL;
+            }
         }
 
-        private async Task                              RefreshEnrollmentMissionsAsync      (CancellationToken token) {
-            // Missions with now in [enrollment_start, enrollment_end)
-            var list = await GetEnrollingMissionsAsync(token);
-            foreach (var m in list) await RefreshMissionSnapshotAsync(m, token);
-        }
+        private async Task                              SaveFactoryLastSeqAsync             (ulong seq, CancellationToken ct) {
+            try
+            {
+                await using var conn = new Npgsql.NpgsqlConnection(_pg);
+                await conn.OpenAsync(ct);
+                await using var cmd = new Npgsql.NpgsqlCommand(@"
+                    insert into indexer_factory_cursor (id, last_seq, updated_at)
+                    values (1, @s, now())
+                    on conflict (id) do update
+                    set last_seq  = greatest(indexer_factory_cursor.last_seq, @s),
+                        updated_at = now();", conn);
 
-        private async Task                              RefreshArmingBufferCrossingsAsync   (CancellationToken token) {
-            // Missions with now < mission_start and (mission_start - now) <= 2s
-            var list = await GetArmingMissionsAsync(PendingArmingBuffer, token);
-            foreach (var m in list) await RefreshMissionSnapshotAsync(m, token);
-        }
+                var p = cmd.Parameters.Add("s", NpgsqlTypes.NpgsqlDbType.Bigint);
+                p.Value = (long)(seq > long.MaxValue ? long.MaxValue : seq);
 
-        private async Task                              RefreshActiveMissionsAsync          (CancellationToken token) {
-            // Missions with now in [mission_start, mission_end)
-            var list = await GetActiveMissionsAsync(token);
-            foreach (var m in list) await RefreshMissionSnapshotAsync(m, token);
-        }
-
-        private async Task                              RefreshFinalizingMissionsAsync      (CancellationToken token) {
-            // Missions with now >= mission_end AND finalized = false
-            var list = await GetFinalizingMissionsAsync(token);
-            foreach (var m in list) await RefreshMissionSnapshotAsync(m, token);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            catch
+            {
+                // If table missing, we’ll persist on next call after migration is applied
+            }
         }
 
         private async Task                              RefreshMissionSnapshotAsync         (string mission, CancellationToken token) {
@@ -816,82 +846,6 @@ namespace B6.Indexer
                 }
             }
 
-        }
-
-        private async Task<List<string>>                GetPendingMissionsAsync             (TimeSpan buffer, CancellationToken token) {
-            var result = new List<string>();
-            await using var conn = new NpgsqlConnection(_pg);
-            await conn.OpenAsync(token);
-            await using var cmd = new NpgsqlCommand(@"
-                select mission_address
-                from missions
-                where now() < enrollment_start
-                and (enrollment_start - now()) <= @buf
-                and coalesce(finalized, false) = false;", conn);
-            cmd.Parameters.AddWithValue("buf", NpgsqlDbType.Interval, buffer);
-            await using var rdr = await cmd.ExecuteReaderAsync(token);
-            while (await rdr.ReadAsync(token)) result.Add(rdr.GetString(0));
-            return result;
-        }
-
-        private async Task<List<string>>                GetEnrollingMissionsAsync           (CancellationToken token) {
-            var result = new List<string>();
-            await using var conn = new NpgsqlConnection(_pg);
-            await conn.OpenAsync(token);
-            await using var cmd = new NpgsqlCommand(@"
-                select mission_address
-                from missions
-                where now() >= enrollment_start
-                and now() <  enrollment_end
-                and coalesce(finalized, false) = false;", conn);
-            await using var rdr = await cmd.ExecuteReaderAsync(token);
-            while (await rdr.ReadAsync(token)) result.Add(rdr.GetString(0));
-            return result;
-        }
-
-        private async Task<List<string>>                GetArmingMissionsAsync              (TimeSpan buffer, CancellationToken token) {
-            var result = new List<string>();
-            await using var conn = new NpgsqlConnection(_pg);
-            await conn.OpenAsync(token);
-            await using var cmd = new NpgsqlCommand(@"
-                select mission_address
-                from missions
-                where now() < mission_start
-                and (mission_start - now()) <= @buf
-                and coalesce(finalized, false) = false;", conn);
-            cmd.Parameters.AddWithValue("buf", NpgsqlDbType.Interval, buffer);
-            await using var rdr = await cmd.ExecuteReaderAsync(token);
-            while (await rdr.ReadAsync(token)) result.Add(rdr.GetString(0));
-            return result;
-        }
-
-        private async Task<List<string>>                GetActiveMissionsAsync              (CancellationToken token) {
-            var result = new List<string>();
-            await using var conn = new NpgsqlConnection(_pg);
-            await conn.OpenAsync(token);
-            await using var cmd = new NpgsqlCommand(@"
-                select mission_address
-                from missions
-                where now() >= mission_start
-                and now() <  mission_end
-                and coalesce(finalized, false) = false;", conn);
-            await using var rdr = await cmd.ExecuteReaderAsync(token);
-            while (await rdr.ReadAsync(token)) result.Add(rdr.GetString(0));
-            return result;
-        }
-
-        private async Task<List<string>>                GetFinalizingMissionsAsync          (CancellationToken token) {
-            var result = new List<string>();
-            await using var conn = new NpgsqlConnection(_pg);
-            await conn.OpenAsync(token);
-            await using var cmd = new NpgsqlCommand(@"
-                select mission_address
-                from missions
-                where now() >= mission_end
-                and coalesce(finalized, false) = false;", conn);
-            await using var rdr = await cmd.ExecuteReaderAsync(token);
-            while (await rdr.ReadAsync(token)) result.Add(rdr.GetString(0));
-            return result;
         }
 
         private async Task                              EnsureMissionRowAsync               (string mission, CancellationToken ct) {

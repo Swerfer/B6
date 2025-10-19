@@ -568,7 +568,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Adds an address to the list of authorized addresses.
      * @param account The address to authorize.
      */
-    function addAuthorizedAddress(address account)                          external onlyOwnerOrAuthorized {
+    function addAuthorizedAddress(address account)                                  external onlyOwnerOrAuthorized {
         require(account != address(0),  "Invalid address");                         // Ensure the account is valid
         require(!authorized[account],   "Already authorized");                      // Ensure the account is not already authorized
         authorized[account] = true;                                                 // Add authorization for the account  
@@ -579,7 +579,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Removes authorization for an address.
      * @param account The address to remove authorization from.
      */
-    function removeAuthorizedAddress(address account)                       external onlyOwnerOrAuthorized {
+    function removeAuthorizedAddress(address account)                               external onlyOwnerOrAuthorized {
         require(account != address(0),  "Invalid address");                         // Ensure the account is valid
         require(authorized[account],    "Not authorized");                          // Ensure the account is currently authorized
         authorized[account] = false;                                                // Remove authorization for the account
@@ -591,7 +591,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param newOwner The address of the new owner.
      * If the owner is not available anymore or lost access, this function allows an authorized address to propose a new owner.
      */
-    function proposeOwnershipTransfer(address newOwner)                     external onlyOwnerOrAuthorized {
+    function proposeOwnershipTransfer(address newOwner)                             external onlyOwnerOrAuthorized {
         uint256 nowTs = block.timestamp;                                // Get the current timestamp
         require(newOwner != address(0), "Invalid new owner");           // Ensure the new owner is a valid address
         proposedNewOwner = newOwner;
@@ -604,7 +604,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Confirms the ownership transfer to a new address.
      * This function allows a 2nd authorized address to confirm the ownership transfer.
      */
-    function confirmOwnershipTransfer()                                     external onlyOwnerOrAuthorized {
+    function confirmOwnershipTransfer()                                             external onlyOwnerOrAuthorized {
         uint256 nowTs = block.timestamp;                                                                // Get the current timestamp
         require(proposalProposer != msg.sender, "Cannot confirm your own proposal");                    // Ensure the confirmer is not the proposer
         require(block.timestamp <= proposalTimestamp + OWNERSHIP_PROPOSAL_WINDOW, "Proposal expired");  // Ensure the proposal is still valid within the proposal window
@@ -752,7 +752,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Sets the status of a mission.
      * @param newStatus The new status to set for the mission.
      */
-    function setMissionStatus(Status newStatus) external onlyMission {
+    function setMissionStatus(Status newStatus)                                     external onlyMission {
         Status fromStatus = missionStatus[msg.sender];
         missionStatus[msg.sender] = newStatus;
 
@@ -798,7 +798,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @dev Registers mission funds for a specific mission type.
      * @param missionType The type of the mission.
      */
-    function registerMissionFunds(MissionType missionType)                  external payable onlyMission nonReentrant {
+    function registerMissionFunds(MissionType missionType)                          external payable onlyMission nonReentrant {
         require(msg.value > 0, "Amount must be greater than zero");                                                         // Ensure a positive amount is registered
         bool isEndedMission = missionStatus[msg.sender] == Status.Success || missionStatus[msg.sender] == Status.Failed;    // Accept only missions that have ended (Success or Failed)
         require(isEndedMission, "Caller not a mission");                                                                    // Ensure the caller is a valid mission that has ended 
@@ -813,7 +813,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This function returns an array containing the reserved funds for each mission type.
      * @return breakdown An array containing the reserved funds for each mission type.
      */
-    function reservedFundsBreakdown()                                       external view returns (uint256[9] memory) {
+    function reservedFundsBreakdown()                                               external view returns (uint256[9] memory) {
         uint256[9] memory breakdown;                        // Array to hold the breakdown of reserved funds for each mission type
         for (uint256 i = 0; i < 9; i++) {
             breakdown[i] = reservedFunds[MissionType(i)];   // Fill the array with the reserved funds for each mission type
@@ -826,14 +826,14 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This function is called when the contract receives CRO without any data.
      * It allows the contract to accept CRO transfers.
      */
-    receive()                                                               external payable {}
+    receive()                                                                       external payable {}
 
     /**
      * @dev Fallback function to receive CRO.
      * This function is called when the contract receives CRO without any data.
      * It allows the contract to accept CRO transfers.
      */
-    fallback()                                                              external payable {}
+    fallback()                                                                      external payable {}
 
     /**
      * @dev Withdraws funds from the MissionFactory contract.
@@ -842,7 +842,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * It transfers the specified amount of funds to the owner of the MissionFactory contract.
      * @param amount The amount of funds to withdraw. If 0, withdraws all available funds.
      */
-    function withdrawFunds(uint256 amount)                                  external onlyOwner nonReentrant {
+    function withdrawFunds(uint256 amount)                                          external onlyOwner nonReentrant {
         address mgrOwner = owner();                                         // Get the owner of the MissionFactory contract
         require(mgrOwner != address(0), "Invalid manager owner");           // Ensure the manager owner is valid
         if (amount == 0) {
@@ -868,7 +868,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return joined An array of addresses of the missions the player is enrolled in.
      * @return statuses An array of statuses corresponding to each mission.
      */
-    function getPlayerParticipation(address player)                         public view returns (address[] memory, Status[] memory, string[] memory) {
+    function getPlayerParticipation(address player)                                 public view returns (address[] memory, Status[] memory, string[] memory) {
         uint256 len = missions.length;                                      // Get the total number of missions
         uint256 count;                                                      // Variable to count how many missions the player is in
 
@@ -913,7 +913,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return failures The total number of failed missions.
      * @return fundsPerTypeArray An array containing the reserved funds for each mission type (1–6).
      */
-    function getFactorySummary()                                            public view
+    function getFactorySummary()                                                    public view
         returns (
             address ownerAddress,
             address factoryAddress,
@@ -952,7 +952,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param missionAddress The address of the mission to check.
      * @return mission data of the mission.
      */
-    function getMissionData(address missionAddress)                         external view returns (Mission.MissionData memory) {
+    function getMissionData(address missionAddress)                                 external view returns (Mission.MissionData memory) {
         require(missionAddress != address(0), "Invalid mission address");          // Ensure mission address is valid
         return Mission(payable(missionAddress)).getMissionData();                           // Return the mission data from the Mission contract
     }
@@ -962,7 +962,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This function returns the length of the missions array, which contains all mission addresses.
      * @return The total number of missions.
      */
-    function getTotalMissions()                                             external view returns (uint256) {
+    function getTotalMissions()                                                     external view returns (uint256) {
         return missions.length;             // Return the total number of missions
     }
 
@@ -971,7 +971,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This function retrieves all missions and their statuses, filtering out old missions.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getAllMissions()                                               external view returns (address[] memory, Status[] memory, string[] memory) {
+    function getAllMissions()                                                       external view returns (address[] memory, Status[] memory, string[] memory) {
         uint256 nowTs = block.timestamp;                                            // Get the current timestamp
         uint256 len = missions.length;
         if (len == 0) {                                                             // If there are no missions, return empty arrays
@@ -1037,7 +1037,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param s The status to filter missions by.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsByStatus(Status s)                                  external view returns (address[] memory, uint8[] memory, string[] memory) {
+    function getMissionsByStatus(Status s)                                          external view returns (address[] memory, uint8[] memory, string[] memory) {
         uint256 len = missions.length;                              // Get the total number of missions
         uint256 count;
 
@@ -1071,7 +1071,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
     
-    function getMissionsNotEnded()                                          external view returns (address[] memory, uint8[] memory, string[] memory) {
+    function getMissionsNotEnded()                                                  external view returns (address[] memory, uint8[] memory, string[] memory) {
         uint256 len = missions.length;                          // Get the total number of missions 
         uint256 count;                                          // Variable to count how many missions are not ended    
 
@@ -1107,7 +1107,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * This function filters out missions that are in the Ended or Failed status.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getMissionsEnded()                                             external view returns (address[] memory, uint8[] memory, string[] memory) {
+    function getMissionsEnded()                                                     external view returns (address[] memory, uint8[] memory, string[] memory) {
         uint256 len = missions.length;                          // Get the total number of missions
         uint256 count;                                          // Variable to count how many missions have ended
 
@@ -1147,7 +1147,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return statuses An array of statuses corresponding to each mission.
      * @return names An array of mission names corresponding to each mission.
      */
-    function getMissionsEndedPaged(uint256 offset, uint256 limit)           external view returns (address[] memory addrs, uint8[] memory statuses, string[] memory names) {
+    function getMissionsEndedPaged(uint256 offset, uint256 limit)                   external view returns (address[] memory addrs, uint8[] memory statuses, string[] memory names) {
         uint256 len = missions.length;
         if (offset >= len) {
             // IMPORTANT: construct arrays with [] length, not bare types
@@ -1196,7 +1196,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param n The number of latest missions to return.
      * @return An array of mission addresses and an array of their corresponding statuses.
      */
-    function getLatestMissions(uint256 n)                                   external view returns (address[] memory, uint8[] memory, string[] memory) {
+    function getLatestMissions(uint256 n)                                           external view returns (address[] memory, uint8[] memory, string[] memory) {
         uint256 total = missions.length;                    // Get the total number of missions
         if (n > total) n = total;                           // If n is greater than the total number of missions, adjust n to total
 
@@ -1219,7 +1219,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param _type The type of the mission to check.
      * @return The amount of reserved funds for the specified mission type.
      */
-    function getFundsByType(MissionType _type)                              external view returns (uint256) {
+    function getFundsByType(MissionType _type)                                      external view returns (uint256) {
         return reservedFunds[_type];                                                // Return the reserved funds for the specified mission type
     }
 
@@ -1230,7 +1230,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return timestamp the time of the proposal
      * @return timeLeft the time left
      */   
-    function getOwnershipProposal()                                         external view returns (address newOwner, address proposer, uint256 timestamp, uint256 timeLeft) {
+    function getOwnershipProposal()                                                 external view returns (address newOwner, address proposer, uint256 timestamp, uint256 timeLeft) {
         if (proposalTimestamp == 0) {
             return (address(0), address(0), 0, 0);                              // No active proposal
         }
@@ -1254,7 +1254,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @notice Returns missions changed after `lastSeq`.
      * @dev Pass 0 initially; indexer stores and supplies the last seen sequence.
      */
-    function getChangesAfter(uint64 lastSeq)                                external view returns (address[] memory m, uint40[] memory timestamps, uint64[] memory seqs, uint8[] memory statuses) {
+    function getChangesAfter(uint64 lastSeq)                                        external view returns (address[] memory m, uint40[] memory timestamps, uint64[] memory seqs, uint8[] memory statuses) {
         uint256 n = _changedKeys.length;
 
         // count
@@ -1472,7 +1472,7 @@ contract Mission        is Ownable, ReentrancyGuard {
         string calldata _name,
         bytes32         _pinHash,
         address         _creator
-    )                                       external payable nonReentrant {
+    )                                                           external payable nonReentrant {
         require(!_initialized, "Already initialized");
 
         _initialized = true;
@@ -1774,7 +1774,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     /**
      * @dev Returns the current number of players enrolled in the mission.
      */
-    function getPlayerCount()               public view returns (uint256) {
+    function getPlayerCount()                                   public view returns (uint256) {
         return _missionData.enrollmentCount;
     }
 
@@ -1783,7 +1783,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @param addr The address to check.
      * @return A boolean indicating if the address is a player.
      */
-    function isPlayer(address addr)         public view returns (bool) {
+    function isPlayer(address addr)                             public view returns (bool) {
         require(addr != address(0), "Invalid address");
         return _pIndexPlus1[addr] != 0;
     }
@@ -1795,7 +1795,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @return joined A boolean indicating if the player is enrolled in the mission.
      * @return won A boolean indicating if the player has won in any round.
      */
-    function playerState(address player)    external view returns (bool joined, bool won) {
+    function playerState(address player)                        external view returns (bool joined, bool won) {
         uint8 p1 = _pIndexPlus1[player];
         if (p1 == 0) return (false, false);
         Players storage p = _players[p1 - 1];
@@ -1807,7 +1807,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function checks the current real-time status of the mission and calculates the time until the next round.
      * @return The number of seconds until the next round starts, or 0 if the mission is not paused.
      */
-    function secondsUntilNextRound()        external view returns (uint256) {
+    function secondsUntilNextRound()                            external view returns (uint256) {
         if (_getRealtimeStatus() != Status.Paused) return 0;                        // If the mission is not paused, return 0
         uint256 cd = (_missionData.roundCount + 1 == _missionData.missionRounds)    // Cooldown duration
             ? _missionData.lastRoundPauseDuration                                   
@@ -1821,7 +1821,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function calculates the progress based on the elapsed time since the mission started.
      * @return The current progress percentage of the mission.
      */
-    function currentProgressPct()           external view returns (uint256){
+    function currentProgressPct()                               external view returns (uint256){
         uint256 nowTs = block.timestamp;                                                                            // Get the current timestamp
         if (nowTs < _missionData.missionStart) {
             return 0;                                                                                               // If the mission has not started, return 0% progress
@@ -1838,7 +1838,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @param player The address of the player to check for pending payout.
      * @return The pending payout amount for the player, or 0 if not applicable.
      */
-    function pendingPayout(address player)  external view returns (uint256) {
+    function pendingPayout(address player)                      external view returns (uint256) {
         uint256 nowTs = block.timestamp;
         Status s = _getRealtimeStatus();
         if (s != Status.Active && s != Status.Paused) return 0;
@@ -1866,7 +1866,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function checks the current real-time status of the mission and returns the number of rounds left.
      * @return The number of remaining rounds in the mission, or 0 if the mission is not in Active or Paused status.
      */
-    function remainingRounds()              external view returns (uint8) {
+    function remainingRounds()                                  external view returns (uint8) {
         Status s = _getRealtimeStatus();                                        // Get the current real-time status of the mission
         if (s == Status.Active || s == Status.Paused) {
             return _missionData.missionRounds - _missionData.roundCount;        // If the mission is Active or Paused, return remaining rounds
@@ -1877,7 +1877,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     /**
      * @dev Returns the MissionData structure.
      */
-    function getMissionData()               external view returns (MissionData memory) {
+    function getMissionData()                                   external view returns (MissionData memory) {
             MissionData memory m = _missionData;    // Copy full struct from storage to memory (cheap and compact)
 
             m.status = _getRealtimeStatus();        // Patch in real-time status on the memory copy (no storage write)
@@ -1890,7 +1890,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function checks the current time and mission data to determine the status.
      * @return The current status of the mission.
      */
-    function getRealtimeStatus()            external view returns (Status) {
+    function getRealtimeStatus()                                external view returns (Status) {
         return _getRealtimeStatus();
     }
 
@@ -1899,7 +1899,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function checks if the current time is between the enrollment end and mission start times.
      * @return A boolean indicating if the mission is in the arming phase.
      */
-    function isArming()                     public view returns (bool) {
+    function isArming()                                         public view returns (bool) {
         uint256 nowTs = block.timestamp;
         return (nowTs > _missionData.enrollmentEnd && nowTs < _missionData.missionStart);
     }
@@ -1910,7 +1910,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function checks if the mission is in Success or Failed status.
      * @return A boolean indicating if the mission is finalized.
      */ 
-    function isFinalized()                  public view returns (bool) {
+    function isFinalized()                                      public view returns (bool) {
         Status s = _getRealtimeStatus();
         return (s == Status.Success || s == Status.Failed);
     }
@@ -1920,7 +1920,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function iterates through all players and collects those with failed refund amounts.
      * @return An array of player addresses who have failed refunds.
      */
-    function getFailedRefundPlayers()       external view returns (address[] memory) {
+    function getFailedRefundPlayers()                           external view returns (address[] memory) {
         require(_getRealtimeStatus() == Status.Failed, "Mission is not in Failed status");
         uint256 count;
         for (uint256 i = 0; i < _missionData.players.length; i++) {
@@ -1942,7 +1942,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @param addr The address of the player to check for refund status.
      * @return A boolean indicating if the player has been refunded.
      */ 
-    function wasRefunded(address addr)      public view returns (bool) {
+    function wasRefunded(address addr)                          public view returns (bool) {
         require(_getRealtimeStatus() == Status.Failed, "Mission is not in Failed status");
         require(addr != address(0), "Invalid address");
         uint8 p1 = _pIndexPlus1[addr];
@@ -1954,7 +1954,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     * @dev Returns the unified player records for winners (those who have wonTS > 0 or amountWon > 0).
     *      Uses the on-chain unified Players[] model.
     */
-    function getWinners()                   external view returns (Players[] memory) {
+    function getWinners()                                       external view returns (Players[] memory) {
         require(
             _getRealtimeStatus() == Status.Success || _getRealtimeStatus() == Status.PartlySuccess,
             "Mission is not in Success or PartlySuccess status"
@@ -1983,7 +1983,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     }
 
     /// @notice Lightweight roll-up for indexer reconciliation (rarely used)
-    function getIndexerSnapshot()           external view returns (uint8 status, uint8 roundCount, uint256 croCurrent, uint32 playersCount, uint32 winnersCount, uint32 refundedCount) {
+    function getIndexerSnapshot()                               external view returns (uint8 status, uint8 roundCount, uint256 croCurrent, uint32 playersCount, uint32 winnersCount, uint32 refundedCount) {
         Status s = _getRealtimeStatus();
 
         uint32 winners;
@@ -2048,7 +2048,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * This function checks various conditions to determine the real-time status of the mission.
      * @return status The current status of the mission.
      */ 
-    function _getRealtimeStatus()           internal view returns (Status status) {
+    function _getRealtimeStatus()                               internal view returns (Status status) {
 
         // 1. Absolute states never change
         if (_previousStatus == Status.Success || _previousStatus == Status.Failed) {
@@ -2112,7 +2112,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * @dev Sets the status of the mission.
      * @param newStatus The new status to set for the mission.
      */
-    function _setStatus(Status newStatus)   internal {
+    function _setStatus(Status newStatus)                       internal {
         uint256 nowTs = block.timestamp;                                // Get the current timestamp
         if (newStatus == Status.Enrolling       ||                      // If the new status is one of these, update the mission status in the MissionFactory
             newStatus == Status.Arming          || 
@@ -2140,7 +2140,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     * @dev If `force = true`, distributes full balance. If `force = false`, keeps aside
     *      the amount needed to cover players whose refunds failed.
     */
-    function _withdrawFunds(bool force)     internal {
+    function _withdrawFunds(bool force)                         internal {
         require(_getRealtimeStatus() == Status.Success || _getRealtimeStatus() == Status.Failed);   // Ensure mission is ended
         uint256 balance = address(this).balance;
         require(balance > 0,                                "No funds to withdraw");                // Ensure there are funds to withdraw
@@ -2224,7 +2224,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * It ensures that the mission has ended and that the enrollment period has passed.
      * It refunds all enrolled players their enrollment amount.
      */
-    function _refundPlayers()               internal {
+    function _refundPlayers()                                   internal {
         require(_getRealtimeStatus() == Status.Failed, "Mission not in Failed status");
         require(_missionData.enrollmentCount > 0,      "No players to refund");
 
