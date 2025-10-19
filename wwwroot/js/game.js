@@ -2,6 +2,8 @@
  game.js – home page bootstrap, re-uses core.js & walletConnect.js
 **********************************************************************/
 
+// V4
+
 // #region Imports
 import { 
   connectWallet, 
@@ -24,18 +26,37 @@ import {
   missionTypeName,
   weiToCro, 
   FACTORY_ABI, 
-  READ_ONLY_RPC, 
   FACTORY_ADDRESS,
   MISSION_ABI,
-  setBtnLoading, 
+  setBtnLoading,
   decodeError,
-  getReadProvider,
   shorten,
 } from "./core.js";
 
 import { 
   enableGamePush 
 } from "./push.js";
+
+import { 
+  startHub as startGameHub, 
+  setHandlers, 
+  joinMissionGroup, 
+  leaveMissionGroup,
+  getConnection as getHubConnection,
+} from "./hub.js";
+
+import {
+  getMission,              
+  getMissionDebounced,
+  getMissionsNotEnded,      
+  getMissionsJoinable,   
+  getPlayerMissions,      
+  postKickEnrolled,
+  postKickBanked,
+  getPlayerEligibility,
+} from "./api.js";
+
+
 // #endregion
 
 
@@ -61,9 +82,6 @@ const MISSION_ERROR_ABI   = [
   "error ContractsNotAllowed()",
 ];
 const __missionErrIface   = new ethers.utils.Interface(MISSION_ERROR_ABI);
-const __mcIface           = new ethers.utils.Interface([
-  "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint8 roundPauseDuration,uint8 lastRoundPauseDuration,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds)"
-]);
 const connectBtn          = document.getElementById("connectWalletBtn");
 const sectionBoxes        = document.querySelectorAll(".section-box");
 // #endregion
@@ -94,8 +112,6 @@ let   stageReturnTo         = null;   // "stage" when we navigated from stage �
 let   stageRefreshTimer     = null;
 let   stageRefreshBusy      = false;
 let   stageRefreshPending   = false;
-let   roundPauseDuration    = 60;		// READ FROM BLOCKCHAIN INSTEAD
-let   lastRoundPauseDuration= 60;		// READ FROM BLOCKCHAIN INSTEAD
 const __endPopupShown       = new Set();
 const __endPopupDeferred    = new Set(); // missions whose end popup is queued after video
 let   __bankingInFlight     = null;
@@ -137,8 +153,6 @@ let   ctaBusy               = false;
 
 let __pillsHydrateBusy      = false;
 let __pillsHydrateLast      = 0;
-let __lastChainPlayers      = 0;
-let __lastChainCroWei       = "0";
 let __pauseUntilSec         = 0;
 let __postCooldownUntilSec  = 0; 
 let __lastPauseTs           = 0;
@@ -217,7 +231,6 @@ function        applyAllMissionFiltersAndRender(){
   list = sortAllMissions(list);
   renderAllMissions(list);              // uses the list as-is
   startJoinableTicker();
-  hydrateAllMissionsRealtime(els.allMissionsList);
 }
 
 function        buildAllFiltersUI(){
@@ -319,11 +332,16 @@ function        enrichMissionFromApi(data){
       m.enrollment_amount_wei != null) {
     const initialWei = BigInt(String(m.cro_initial_wei || "0"));
     const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
-    let joined = BigInt(Array.isArray(m.enrollments) ? m.enrollments.length : 0);
-    if (joined === 0n) {
-      joined = BigInt(Math.max(Number(__lastChainPlayers || 0),
-                               Number(optimisticGuard?.players || 0)));
-    }
+
+    const enrolledFromApi = (m.enrolled_players != null)
+      ? Number(m.enrolled_players)
+      : Array.isArray(m.enrollments) ? m.enrollments.length : 0;
+
+    const joined = BigInt(Math.max(
+      enrolledFromApi,
+      Number(optimisticGuard?.players || 0)
+    ));
+
     m.cro_current_wei = (initialWei + feeWei * joined).toString();
   }
   return m;
@@ -457,15 +475,13 @@ async function  cleanupMissionDetail(){
   setVaultOpen(false);
   staleWarningShown = false;
 
-  if (hubConnection && subscribedGroups.size){
-    for (const g of Array.from(subscribedGroups)) {
-      try { await hubConnection.invoke("UnsubscribeMission", g); dbg("Unsubscribed (cleanup):", g); } catch {}
-    }
-    subscribedGroups.clear();
+  if (subscribedAddr) {
+    try { await leaveMissionGroup(subscribedAddr); dbg("Unsubscribed (cleanup):", subscribedAddr); } catch {}
   }
+  subscribedGroups.clear();
   subscribedAddr = null;
   currentMissionAddr = null;
-  resetMissionLocalState();
+  // ...
 }
 
 // Status→slug:
@@ -605,9 +621,13 @@ function        applyCounterColor(el, mission, accruedWei){
 function        cooldownInfo(mission, now = Math.floor(Date.now()/1000)){
   const st          = Number(mission?.status);
   const isPaused    = (st === 4);
-  const roundsTotal = Number(mission?.mission_rounds_total ?? mission?.mission_rounds ?? 0);
+  const roundsTotal = Number(mission?.mission_rounds_total ?? 0);
   const roundCount  = Number(mission?.round_count ?? 0);
-  const secsTotal   = (roundCount === (roundsTotal - 1)) ? lastRoundPauseDuration : roundPauseDuration;  // last round → 60s, else 300s
+
+  const roundPauseSecs      = Number(mission?.round_pause_secs      ?? 300);
+  const lastRoundPauseSecs  = Number(mission?.last_round_pause_secs ?? 60);
+  const secsTotal           = (roundCount === (roundsTotal - 1)) ? lastRoundPauseSecs : roundPauseSecs;
+
   const pauseTs     = Number(mission?.pause_timestamp || 0);
   const pauseEnd    = pauseTs ? (pauseTs + secsTotal) : 0;
   const secsLeft    = pauseEnd ? Math.max(0, pauseEnd - now) : 0;
@@ -632,60 +652,13 @@ function nonDecreasingRound(m) {
 
 // Chain timestamp:
 
-async function  getMissionCreationTs(mission){ // Used for circle timer if mission creation is used for start time timer.
-  const inline = Number(mission.mission_created ?? 0);
-  if (inline > 0) return inline;           // skip log scan when API provides it
-  const addr = mission.mission_address;
-  const keyLower = String(addr).toLowerCase();
-  if (__missionCreatedCache.has(keyLower)) return __missionCreatedCache.get(keyLower);
+async function getMissionCreationTs(mission) {
+  // Snapshot-driven only: prefer mission.mission_created, fall back to updated_at.
+  const inline = Number(mission?.mission_created ?? 0);
+  if (inline > 0) return inline;
 
-  try{
-    const provider = getReadProvider();
-
-    // Event topic and indexed address topic
-    const topic0        = __mcIface.getEventTopic("MissionCreated");
-    const missionAddr   = ethers.utils.getAddress(addr);             // checksum
-    const topicMission  = ethers.utils.hexZeroPad(missionAddr, 32);  // 0x00..addr
-
-    const latest = await provider.getBlockNumber();
-    const STEP   = 1800; // keep under 2000 range cap
-
-    async function search(addressFilter){
-      let to = latest;
-      while (to >= 0){
-        const from = Math.max(0, to - STEP + 1);
-        const logs = await provider.getLogs({
-          address: addressFilter,                 // FACTORY_ADDRESS or undefined
-          topics:  [topic0, topicMission],        // MissionCreated + mission address
-          fromBlock: from,
-          toBlock:   to
-        });
-
-        if (logs && logs.length){
-          // pick the earliest log we saw
-          let first = logs[0];
-          for (const L of logs) if (L.blockNumber < first.blockNumber) first = L;
-          const blk = await provider.getBlock(first.blockNumber);
-          return Number(blk?.timestamp || 0);
-        }
-        to = from - 1;
-      }
-      return 0;
-    }
-
-    // 1) Fast path: only the configured factory
-    let ts = await search(FACTORY_ADDRESS);
-
-    // 2) Fallback: global search (covers other factory instances)
-    if (!ts) ts = await search(undefined);
-
-    __missionCreatedCache.set(keyLower, ts || 0);
-    return ts || 0;
-
-  }catch(err){
-    console.log("getMissionCreationTs failed:", err);
-    return 0;
-  }
+  const ts = Number(mission?.updated_at ?? 0);
+  return ts > 0 ? ts : 0;
 }
 
 // Winners/Failure:
@@ -723,12 +696,13 @@ function        topWinners(enrollments = [], rounds = [], n = 5){
 
 function        failureReasonFor(mission){
   if (Number(mission?.status) !== 7) return null;
-  const min   = Number(mission?.enrollment_min_players ?? 0);
+  const min    = Number(mission?.enrollment_min_players ?? 0);
   const joined = Math.max(
-    Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0,
-    Number(__lastChainPlayers || 0)
+    (mission?.enrolled_players != null) ? Number(mission.enrolled_players)
+                                        : (Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0),
+    Number(optimisticGuard?.players || 0)
   );
-  const rounds= Number(mission?.round_count            ?? 0);
+  const rounds = Number(mission?.round_count ?? 0);
 
   // Your two failure modes:
   // A) Not enough players enrolled (never started)
@@ -971,7 +945,7 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
             setStageStatusImage(statusSlug(next));   // ← update the stage title/status image immediately
             if (next === 3) {
               // Arming → Active: hydrate before painting
-              await rehydratePillsFromChain(m2, "deadlineFlip-arming→active", true);
+              await rehydratePillsFromServer(m2, "deadlineFlip-arming→active", true);
               buildStageLowerHudForStatus({ ...m2, status: 3 });
             } else if (next === 2) {
               // Enrolling → Arming:
@@ -992,13 +966,13 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
 
               // Paint immediately with corrected Pool (start), then hydrate to confirm
 
-              await rehydratePillsFromChain(m2, "deadlineFlip-enrolling→arming", true);
+              await rehydratePillsFromServer(m2, "deadlineFlip-enrolling→arming", true);
               buildStageLowerHudForStatus(m2);
             } else {
               // keep existing behavior for other statuses
               buildStageLowerHudForStatus(m2);
               if (next === 1) {
-                rehydratePillsFromChain(m2, "deadlineFlip", true).catch(()=>{});
+                rehydratePillsFromServer(m2, "deadlineFlip", true).catch(()=>{});
               }
             }
 
@@ -1225,10 +1199,11 @@ function        statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute
   const me = Number(m.mission_end      || 0);
 
   const cur = Math.max(
-    Array.isArray(m.enrollments) ? m.enrollments.length : 0,
-    Number(__lastChainPlayers || 0),
+    (m?.enrolled_players != null) ? Number(m.enrolled_players)
+                                  : (Array.isArray(m.enrollments) ? m.enrollments.length : 0),
     Number(optimisticGuard?.players || 0)
   );
+
   const min = Number(m.enrollment_min_players ?? 0);
 
   if (now < es)                           return 0;                               // Pending
@@ -1400,29 +1375,92 @@ function        stateName(s){
 
 window.stateName = stateName; // Temp for debugging
 
-async function  startHub() { // SignalR HUB
-  if (!window.signalR) { showAlert("SignalR client script not found.", "error"); return; }
+async function  startHub() { // SignalR HUB via shared hub.js
+  try {
+    await startGameHub();
+    // Keep backward-compat debug helpers that read window.hubConnection
+    window.hubConnection = getHubConnection?.();
+  } catch (err) {
+    console.error("Hub start failed:", err);
+    showAlert("Real-time channel failed to connect.", "error");
+    throw err;
+  }
 
-  if (!hubConnection) {
-    hubConnection = new signalR.HubConnectionBuilder()
-      .withUrl("/api/hub/game")
-      .withAutomaticReconnect()
-      .build();
-
-    window.hubConnection = hubConnection;
-
-    hubConnection.on("ServerPing", (msg) => {
-      console.log(msg);
+  // Wire the three server → client events to our existing UI logic.
+  setHandlers({
+    onMissionUpdated: async (addr) => {
       __lastPushTs = Date.now();
       touchUpdatedAtStampFromPush();
-    });
+      dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
 
-    hubConnection.on("RoundResult", async (addr, round, winner, amountWei) => {
+      if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
+        try {
+          const m = enrichMissionFromApi(await getMissionDebounced(currentMissionAddr));
+
+          const apiStatus = Number(m.status);
+          const curStatus = Number(stageCurrentStatus ?? -1);
+
+          if (apiStatus < curStatus) {
+            console.debug("[MissionUpdated] stale status from API; ignoring", apiStatus, "<", curStatus);
+            refreshOpenStageFromServer(1);
+            return;
+          }
+
+          if (curStatus === 4 && apiStatus === 3) {
+            const el  = document.querySelector('#stageCtaGroup [data-cooldown-end]');
+            const end = el ? Number(el.getAttribute('data-cooldown-end') || 0) : 0;
+            if (end && (Date.now()/1000) < end) {
+              dbg("Ignoring 4→3 while local cooldown still visible.");
+              refreshOpenStageFromServer(2);
+              return;
+            }
+          }
+
+          const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
+          if (onStage) {
+            stageCurrentStatus = Number(m.status);
+            renderStage(m);
+            refreshOpenStageFromServer(2);
+          } else {
+            if (m) renderMissionDetail({ mission: m });
+          }
+        } catch (err) {
+          console.log("startHub MissionUpdated error: " + err)
+        }
+      }
+    },
+
+    onStatusChanged: async (addr, newStatus) => {
+      __lastPushTs = Date.now();
+      touchUpdatedAtStampFromPush();
+      dbg("StatusChanged PUSH", { addr, newStatus, currentMissionAddr, groups: Array.from(subscribedGroups) });
+
+      if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
+        return;
+      }
+
+      const gameMain = document.getElementById('gameMain');
+
+      try {
+        const m = enrichMissionFromApi(await getMissionDebounced(currentMissionAddr));
+        stageCurrentStatus = Number(m.status);
+
+        if (gameMain?.classList.contains('stage-mode')) {
+          renderStage(m);
+          refreshOpenStageFromServer(3);
+        } else {
+          renderMissionDetail({ mission: m });
+        }
+      } catch {
+        // ignore; UI will catch up on next push
+      }
+    },
+
+    onRoundResult: async (addr, round, winner, amountWei) => {
       __lastPushTs = Date.now();
       touchUpdatedAtStampFromPush();
       dbg("RoundResult PUSH", { addr, round, winner, amountWei, currentMissionAddr, groups: Array.from(subscribedGroups) });
 
-      // mark that a result landed for the active banking session (any winner)
       try {
         const aLc = String(addr || "").toLowerCase();
         if (__bankingInFlight && __bankingInFlight.mission === aLc) {
@@ -1435,346 +1473,48 @@ async function  startHub() { // SignalR HUB
       const cro = weiToCro(String(amountWei), 2);
 
       if (win === me) {
-        // If we already showed the local winner popup, skip duplicates
         if (window.__winPopupSuppressUntil && Date.now() < window.__winPopupSuppressUntil) {
-          // still keep the video → finalize path
           if (__vaultVideoFlowActive) {
-            __vaultVideoPendingWin = { cro, round: Number(round) };
-            if (__vaultVideoEndedAwaitingResult) finalizeVaultOpenVideoWin();
+            try { await finalizeVaultVideoFlow(addr, round, winner, amountWei); } catch {}
           }
-          // no extra popup here
-        } else if (__vaultVideoFlowActive) {
-          const aLc = String(addr || "").toLowerCase();
-          __viewerWins.add(aLc);
-          __viewerWonOnce.add(aLc);
-          __vaultVideoPendingWin = { cro, round: Number(round) };
-          if (__vaultVideoEndedAwaitingResult) finalizeVaultOpenVideoWin();
         } else {
-          showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
+          window.__winPopupSuppressUntil = Date.now() + 5000;
+          showAlert(`You won <b>${cro} CRO</b> in round ${round}!`, "success", 5000);
+          try { await finalizeVaultVideoFlow(addr, round, winner, amountWei); } catch {}
         }
       } else {
-        showAlert(`Round ${round} banked by ${shorten(winner)}<br/>The winner banked: ${cro} CRO!`, "success");
-        // If we were playing the video but didn't win, stop/hide it and restore the HUD.
-        if (__vaultVideoFlowActive) {
-          const layer = document.getElementById("vaultVideoLayer");
-          if (layer) layer.style.display = "none";
-          setVaultOpen(false, /*force*/ true); // close art so HUD can reappear
-          setRingAndTimerVisible(true);
-          __vaultVideoFlowActive = false;
-          __vaultVideoEndedAwaitingResult = false;
-          __vaultVideoPendingWin = null;
-        }
+        showStripe(`${copyableAddr(winner)} won <b>${cro} CRO</b> in round ${round}`, "info", 5000);
       }
-
-      if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
-        return;
-      }
-
-      // refresh the detail view (used for the auto-dismiss timer, etc.)
-      try {
-        // Only refresh the detail panel if the user is not on the stage
-        const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
-        if (!onStage) { 
-          const data = await apiMission(currentMissionAddr, true);
-          renderMissionDetail(data);
-
-          const mission = data?.mission || data;
-          const { pauseEnd } = cooldownInfo(mission);
-          if (pauseEnd) {
-            const now = Math.floor(Date.now()/1000);
-            const ms  = Math.max(0, (pauseEnd - 10) - now) * 1000;
-            setTimeout(() => {
-              const g = document.getElementById("stageNoticeGroup");
-              if (g) g.innerHTML = "";
-            }, ms);
-          }
-        } 
-      } catch (err) {console.log("startHub RoundResult error: " + err)}
-
-      const gameMain = document.getElementById('gameMain');
-      if (gameMain && gameMain.classList.contains('stage-mode')) {
-
-        // 0) Ultra-fast optimistic paint: bump round pill and subtract payout from pool now
-        let m0 = null;
-        try {
-          const data = await apiMission(currentMissionAddr, false);
-          m0   = enrichMissionFromApi(data);
-          const played = Math.max(Number(m0.round_count || 0), Number(round || 0));
-          let croAfter = m0.cro_current_wei;
-          try {
-            const prev = BigInt(String(m0.cro_current_wei ?? m0.cro_start_wei ?? "0"));
-            croAfter   = (prev - BigInt(String(amountWei || "0"))).toString();
-          } catch {}
-          const addrLc = String(currentMissionAddr || "").toLowerCase();
-          __maxRoundSeen[addrLc] = Math.max(Number(__maxRoundSeen[addrLc] || 0), played);
-
-          const mFast = { ...m0, round_count: played, cro_current_wei: croAfter };
-          buildStageLowerHudForStatus(mFast);   // pills: instant subtract
-        } catch {}
-
-        // NEW: immediately flip spectators to Paused with a fresh pause_timestamp
-        // so the accruing counter resets now (not after a later push).
-        try {
-          if (m0) {
-            await flipStageToPausedOptimistic(m0);
-          }
-        } catch {}
-
-        // 1) Fast: grab chain-truth so “Pool (current)” is instant for spectators
-        try { await rehydratePillsFromChain(null, "roundResult"); } catch {}
-
-        // 2) Keep the regular reconcile (API snapshot, etc.)
-        await refreshOpenStageFromServer(2);
-      }
-
-    });
-
-    hubConnection.on("StatusChanged", async (addr, newStatus) => {
-      __lastPushTs = Date.now();
-      touchUpdatedAtStampFromPush();
-      dbg("StatusChanged PUSH", { addr, newStatus, currentMissionAddr, groups: Array.from(subscribedGroups) });
-
-      if (!currentMissionAddr || addr?.toLowerCase() !== currentMissionAddr) {
-        return;
-      }
-
-      const gameMain = document.getElementById('gameMain');
-
-      // try to fetch a fresh snapshot (for times/pills), but don't block the flip
-      let mApi = null;
-      try {
-        const data = await apiMission(currentMissionAddr, true);
-        mApi = enrichMissionFromApi(data);
-      } catch (err) {console.log("startHub Statuschanged error: " + err)}
-
-      if (gameMain && gameMain.classList.contains('stage-mode')) {
-        const target = Number(newStatus);
-        const mLocal = { ...(mApi || {}), status: target };
-
-        // Sticky cooldown: ignore 4→3 pushes while timer still running
-        if (Number(stageCurrentStatus) === 4 && target === 3) {
-          const now = Math.floor(Date.now()/1000);
-          if (__pauseUntilSec && now < __pauseUntilSec) {
-            console.debug("[StatusChanged] 4→3 ignored during cooldown");
-            return;
-          }
-        }
-
-        // Post-cooldown: ignore 3→4 unless this is a NEW pause (pause_timestamp increased)
-        if (Number(stageCurrentStatus) === 3 && target === 4) {
-          const now     = Math.floor(Date.now()/1000);
-          const pauseTs = Number((mApi || {}).pause_timestamp || 0);
-          const looksStale = !pauseTs || pauseTs <= __lastPauseTs;
-          if (__postCooldownUntilSec && now < __postCooldownUntilSec && looksStale) {
-            console.debug("[StatusChanged] 3→4 ignored post-cooldown (stale pause)");
-            return;
-          }
-        }
-
-        setStageStatusImage(statusSlug(target));
-        await bindRingToMission(mLocal);
-        await bindCenterTimerToMission(mLocal);
-        renderStageCtaForStatus(mLocal);
-        await renderStageEndedPanelIfNeeded(mLocal);
-        stageCurrentStatus = target;
-
-        // refresh sticky window
-        if (target === 4) {
-          const info = cooldownInfo(mLocal);
-          __pauseUntilSec = info.pauseEnd || 0;
-          __lastPauseTs   = Number(mLocal.pause_timestamp || 0);
-        } else if (target === 3) {
-          __pauseUntilSec = 0;
-          // keep __postCooldownUntilSec until it expires
-        }
-
-        await maybeShowMissionEndPopup(mLocal);
-
-        if (target === 3) {
-          await rehydratePillsFromChain(mLocal, "statusChanged-→active", true);
-          buildStageLowerHudForStatus(mLocal);
-        } else {
-          if (target === 2) {
-            // Prevent pool regression flash:
-            // Freeze Pool (start) from cro_initial_wei + fee * joined (or current if already enriched).
-            try {
-              const feeWei  = BigInt(String(mLocal.enrollment_amount_wei || "0"));
-              const joined  = BigInt(Array.isArray(mLocal.enrollments) ? mLocal.enrollments.length : 0);
-              const initial = BigInt(String(mLocal.cro_initial_wei || "0"));
-              const curOpt  = (mLocal?.cro_current_wei != null) ? BigInt(String(mLocal.cro_current_wei)) : null;
-              const finalStart = (curOpt != null) ? curOpt : (initial + feeWei * joined);
-              mLocal.cro_start_wei = finalStart.toString();
-            } catch {}
-          }
-          if (target >= 5) {
-            mLocal.cro_current_wei = "0";
-          }
-          buildStageLowerHudForStatus(mLocal);
-          if (target === 1 || target === 2) {
-            rehydratePillsFromChain(mLocal, "statusChanged", true).catch(()=>{});
-          }
-        }
-        updateVaultImageFor(mLocal);
-        // setTimeout(() => refreshOpenStageFromServer(2), 800);
-        refreshOpenStageFromServer(2);
-      } else {
-        if (mApi) renderMissionDetail({ mission: mApi });
-      }
-    });
-
-    hubConnection.on("MissionUpdated", async (addr) => {
-      __lastPushTs = Date.now();
-      touchUpdatedAtStampFromPush();
-      dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
 
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
         try {
-          const data = await apiMission(currentMissionAddr, true);
-          const m = enrichMissionFromApi(data);
-
-          const apiStatus = Number(m.status);
-          const curStatus = Number(stageCurrentStatus ?? -1);
-
-          // If API is behind our locally flipped stage, ignore now but retry soon.
-          if (apiStatus < curStatus) {
-            console.debug("[MissionUpdated] stale status from API; ignoring", apiStatus, "<", curStatus);
-            // setTimeout(() => refreshOpenStageFromServer(1), 1200); // gentle retry
-            refreshOpenStageFromServer(1);
-            return;
-          }
-
-          // EARLY-RETURN GUARD: ignore 4→3 flips while the local cooldown is still running.
-          if (curStatus === 4 && apiStatus === 3) {
-            const el  = document.querySelector('#stageCtaGroup [data-cooldown-end]');
-            const end = el ? Number(el.getAttribute('data-cooldown-end') || 0) : 0;
-            const now = Math.floor(Date.now() / 1000);
-            // also honor the sticky window (__pauseUntilSec) if present
-            if (end > now || (__pauseUntilSec && now < __pauseUntilSec)) {
-              console.debug("[MissionUpdated] 4→3 ignored (cooldown ticking)", { now, end, __pauseUntilSec });
-              refreshOpenStageFromServer(1);   // no ad-hoc setTimeout
-              return;
-            }
-          }
-
-          // MIRROR GUARD: after cooldown, ignore 3→4 unless API shows a NEW pause_timestamp
-          if (curStatus === 3 && apiStatus === 4) {
-            const now     = Math.floor(Date.now() / 1000);
-            const pauseTs = Number(m.pause_timestamp || 0);
-            const looksStale = !pauseTs || pauseTs <= __lastPauseTs;
-            if (__postCooldownUntilSec && now < __postCooldownUntilSec && looksStale) {
-              console.debug("[MissionUpdated] 3→4 ignored post-cooldown (stale pause)", { now, pauseTs, __lastPauseTs });
-              setTimeout(() => refreshOpenStageFromServer(1), 1200);
-              return;
-            }
-          }
-
-          // If API moved forward, do a full rebuild now.
-          if (apiStatus !== curStatus) {
-            setStageStatusImage(statusSlug(apiStatus));
-            await bindRingToMission(m);
-            await bindCenterTimerToMission(m);
-            renderStageCtaForStatus(m);
-            await renderStageEndedPanelIfNeeded(m);
-            stageCurrentStatus = apiStatus;
-
-            if (apiStatus === 1 || apiStatus === 2) {
-              await rehydratePillsFromChain(m, "missionUpdated-forward");
-            } else {
-              buildStageLowerHudForStatus(m);
-            }
-            updateVaultImageFor(m);
-            // setTimeout(() => refreshOpenStageFromServer(2), 1600);
-            refreshOpenStageFromServer(2);
-            return;
-          }
-
-          if (apiStatus === 1 || apiStatus === 2) {
-            await rehydratePillsFromChain(m, "missionUpdated-same");
+          const m = enrichMissionFromApi(await getMissionDebounced(currentMissionAddr));
+          const gameMain = document.getElementById('gameMain');
+          if (gameMain?.classList.contains('stage-mode')) {
+            renderStage(m);
+            refreshOpenStageFromServer(4);
           } else {
-            buildStageLowerHudForStatus(m);
+            renderMissionDetail({ mission: m });
           }
-
-          // setTimeout(() => refreshOpenStageFromServer(2), 1600);
-          refreshOpenStageFromServer(2);
-        } catch (err) { console.log("startHub MissionUpdated error: " + err) }
+        } catch {}
       }
-    });
-
-    hubConnection.onreconnected(async () => {
-      const H = signalR.HubConnectionState;
-      if (hubConnection?.state !== H.Connected) return;
-
-      // Re-subscribe to the groups we track
-      if (subscribedGroups.size) {
-        for (const g of Array.from(subscribedGroups)) {
-          try { await hubConnection.invoke("SubscribeMission", g); dbg("Resubscribed:", g); }
-          catch(e){ console.error("Resubscribe failed:", g, e); }
-        }
-      } else if (currentMissionAddr) {
-        await subscribeToMission(currentMissionAddr);
-      }
-
-      // Mark "fresh push" time and reconcile once (lightweight)
-      __lastPushTs = Date.now();
-      touchUpdatedAtStampFromPush();
-      smartReconcile("reconnected");
-    });
-
-  }
-
-  const H = signalR.HubConnectionState;
-  const st = hubConnection.state;
-
-  // Already connected → just (re)subscribe
-  if (st === H.Connected) {
-    await safeSubscribe();
-    return;
-  }
-
-  // If connecting or reconnecting, don't call start(); just wait and exit.
-  if (st === H.Connecting || st === H.Reconnecting) {
-    // optional: you can rely on onreconnected() to resubscribe
-    console.debug("Hub is", stateName(st), "— not starting again.");
-    return;
-  }
-
-  // Only start when Disconnected
-  if (st === H.Disconnected) {
-    if (!hubStartPromise) {
-      hubStartPromise = hubConnection.start()
-        .catch(err => { console.error("Hub start failed:", err); showAlert("Real-time channel failed to connect.", "error"); throw err; })
-        .finally(() => { hubStartPromise = null; });
     }
-    await hubStartPromise;
-    await safeSubscribe();
-  }
+  });
+
+  // Ensure we are joined to the currently open mission (if any)
+  await safeSubscribe();
 }
 
 async function  safeSubscribe(){
-  const H = signalR.HubConnectionState;
-  if (hubConnection?.state !== H.Connected) return;
-
-  // Need an address to follow
   const lc = String(currentMissionAddr || "").toLowerCase();
   if (!lc) return;
 
-  // Also compute checksum; both may be used server-side for group names
-  let ck = null;
-  try { ck = ethers.utils.getAddress(lc); } catch { /* ignore */ }
+  await joinMissionGroup(lc);
 
-  // Subscribe to any missing groups (no unsubscribe here)
-  for (const g of [lc, ck]) {
-    if (!g || subscribedGroups.has(g)) continue;
-    try {
-      await hubConnection.invoke("SubscribeMission", g);
-      subscribedGroups.add(g);
-      dbg("Subscribed group:", g);
-    } catch (err) {
-      console.error("SubscribeMission failed:", g, err);
-    }
-  }
-
-  subscribedAddr = lc;
+  // Track for UI/debug parity
+  let ck = null; try { ck = ethers.utils.getAddress(lc); } catch {}
+  subscribedAddr   = lc;
+  subscribedGroups = new Set([lc, ck].filter(Boolean));
 }
 
 window.hubState = () => {
@@ -1802,34 +1542,10 @@ function        clearDetailRefresh(){
   }
 }
 
-function        scheduleDetailRefresh(reset=false){ 
-  const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
-  if (onStage || els.missionDetail.style.display === "none" || !currentMissionAddr) {
-    return;
-  }
-
-  if (reset) { detailBackoffMs = 15000; detailFailures = 0; }
+function scheduleDetailRefresh(reset = false) {
+  // Push-driven model: no periodic polling on the detail page.
   clearDetailRefresh();
-  detailRefreshTimer = setTimeout(async () => {
-    const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
-    if (onStage || els.missionDetail.style.display === "none" || !currentMissionAddr) {
-        return;
-    }
-    try {
-      const data = await apiMission(currentMissionAddr, false);
-      renderMissionDetail(data);
-      detailFailures = 0;
-      detailBackoffMs = 15000; // reset on success
-    } catch (e) {
-      detailFailures++;
-      detailBackoffMs = Math.min(detailBackoffMs * 2, 60000); // cap @ 1 min
-      if (detailFailures === 1) {
-        showAlert("Auto-refresh failed; will retry with backoff. Check your connection.", "warning");
-      }
-    } finally {
-      scheduleDetailRefresh(); // chain next attempt
-    }
-  }, detailBackoffMs);
+  // no timer; on any hub push we already refetch via getMissionDebounced()
 }
 
 // #endregion
@@ -1840,53 +1556,34 @@ function        scheduleDetailRefresh(reset=false){
 
 // #region API wrappers
 
-async function fetchAndRenderAllMissions() {
+async function  fetchAndRenderAllMissions() {
   const now = Date.now();
-
-  // If a load is already running, return the same promise (coalesce callers)
   if (__allListInflight) return __allListInflight;
-
-  // Within cool-down? Just repaint from cache and skip network
-  if ((now - __allListLastDone) < ALL_LIST_COOLDOWN_MS) {
-    return;
-  }
+  if ((now - __allListLastDone) < ALL_LIST_COOLDOWN_MS) { return; }
 
   const p = (async () => {
     try {
-      // Snapshot-driven backend: single API call, no on-chain factory scan.
-      // Endpoint returns uniform mission objects (same shape as detail).
-      const r = await fetch("/api/missions/not-ended", { credentials: "include" });
-      if (!r.ok) throw new Error("/api/missions/not-ended failed");
-      const list = await r.json(); // array of missions (some may include `enrolled_players`)
+      const list = await getMissionsNotEnded();
 
-      // Normalize to the light model your renderer already uses.
       const missions = (Array.isArray(list) ? list : []).map(m => {
         const currentPlayers =
           (m.enrolled_players != null ? Number(m.enrolled_players) : null) ??
-          (Array.isArray(m.enrollments) ? m.enrollments.length : null) ??
-          0;
+          (Array.isArray(m.enrollments) ? m.enrollments.length : null) ?? 0;
 
         const mission_duration =
-          (m.mission_start && m.mission_end)
-            ? (Number(m.mission_end) - Number(m.mission_start))
-            : 0;
+          (m.mission_start && m.mission_end) ? (Number(m.mission_end) - Number(m.mission_start)) : 0;
 
         return {
-          // minimal fields used by All Missions cards:
           mission_address: m.mission_address,
           status:          Number(m.status),
           name:            m.name,
-
-          // fields your card helpers expect:
           current_players:  currentPlayers,
           min_players:      m.enrollment_min_players,
           max_players:      m.enrollment_max_players,
           rounds:           m.round_count,
           max_rounds:       m.mission_rounds_total,
-          mission_duration: mission_duration,
+          mission_duration,
           mission_fee:      m.enrollment_amount_wei,
-
-          // keep originals in case downstream helpers read them:
           enrollment_amount_wei: m.enrollment_amount_wei,
           mission_start:         m.mission_start,
           mission_end:           m.mission_end,
@@ -1898,8 +1595,8 @@ async function fetchAndRenderAllMissions() {
       __allMissionsCache = missions;
       applyAllMissionFiltersAndRender();
 
+      // Snapshot + SignalR only
       startJoinableTicker();
-      hydrateAllMissionsRealtime(els.allMissionsList);
     } catch (e) {
       console.error(e);
       showAlert("Failed to load All Missions.", "error");
@@ -1916,15 +1613,12 @@ async function fetchAndRenderAllMissions() {
 }
 
 async function  apiJoinable(){
-  const r = await fetch("/api/missions/joinable"); // allow HTTP caching / 304
-  if (!r.ok) throw new Error("/api/missions/joinable failed");
-  return r.json();
+  return getMissionsJoinable();
 }
 
 async function  apiPlayerMissions(addr){
-  const r = await fetch(`/api/missions/player/${addr}`); // allow HTTP caching / 304
-  if (!r.ok) throw new Error("/api/missions/player failed");
-  return r.json();
+  const a = String(addr || "").toLowerCase();
+  return getPlayerMissions(a);
 }
 
 /**
@@ -1933,7 +1627,7 @@ async function  apiPlayerMissions(addr){
  * - When not in game stage: no caching is stored (always fresh fetch).
  * - Force calls refresh the cache and reset the 15s window.
  */
-async function apiMission(addr, force = false) {
+async function  apiMission(addr, force = false) {
   const lcAddr  = String(addr || "").toLowerCase();
   const now     = Date.now();
   const onStage = !!(document.getElementById('gameMain')?.classList.contains('stage-mode'));
@@ -1959,9 +1653,7 @@ async function apiMission(addr, force = false) {
   }
 
   const p = (async () => {
-    const r = await fetch(`/api/missions/mission/${addr}`);
-    if (!r.ok) throw new Error("/api/missions/mission failed");
-    const data = await r.json(); // ← await the JSON
+    const data = await getMission(lcAddr);
     __missionMicroCache.set(lcAddr, { ts: Date.now(), payload: data });
     if (onStage) {
       __missionSnapCache = { addr: lcAddr, ts: Date.now(), data };
@@ -2049,12 +1741,7 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
       return;
     }
 
-    // Now (safely) rebuild pills for the accepted status
-    if (newStatus === 1 || newStatus === 2) {
-      await rehydratePillsFromChain(m, "serverRefresh");
-    } else {
-      buildStageLowerHudForStatus(m);
-    }
+    buildStageLowerHudForStatus(m);
 
     //dbg("refreshOpenStageFromServer", { newStatus, stageCurrentStatus, retries });
 
@@ -2096,24 +1783,15 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
 
 }
 
-function        smartReconcile(reason = "smart") { // Lightweight reconcile when we suspect a missed push or transport hiccup
+function        smartReconcile(reason = "smart") {
   try {
     const gameMain = document.getElementById('gameMain');
     if (!gameMain || !gameMain.classList.contains('stage-mode')) return;
     if (!currentMissionAddr) return;
-
-    // Don’t spam: if a hub push landed in the last 2–3s, skip
     if (Date.now() - (__lastPushTs || 0) < 2000) return;
     if (stageRefreshBusy) return;
 
-    const st = Number(stageCurrentStatus ?? -1);
-
-    // During Enrolling/Arming, pills are chain-truth; do a quick chain hydrate
-    if (st === 1 || st === 2) {
-      rehydratePillsFromChain(null, `smart:${reason}`).catch(() => {});
-    }
-
-    // Always follow with one light API reconcile to catch denorms
+    // Snapshot-only reconcile
     refreshOpenStageFromServer(1).catch(() => {});
   } catch {}
 }
@@ -2306,7 +1984,7 @@ async function  showGameStage(missionRaw){
 
   // Build lower HUD pills using chain for Enrolling/Arming
   if (Number(mission?.status) === 1 || Number(mission?.status) === 2) {
-    await rehydratePillsFromChain(mission, "openStage", true);
+    await rehydratePillsFromServer(mission, "openStage", true);
   } else {
     buildStageLowerHudForStatus(mission);
   }
@@ -2409,11 +2087,15 @@ const HUD = {
 // Helper used by pill library (single source)
 function        playersAllStatsParts(m){
   const min    = Number(m?.enrollment_min_players ?? 0);
+  const fromApi= (m?.enrolled_players != null)
+    ? Number(m.enrolled_players)
+    : Array.isArray(m?.enrollments) ? m.enrollments.length : 0;
+
   const joined = Math.max(
-    Array.isArray(m?.enrollments) ? m.enrollments.length : 0,
-    Number(__lastChainPlayers || 0),
+    fromApi,
     Number(optimisticGuard?.players || 0)
   );
+
   const max    = (m?.enrollment_max_players == null) ? "—" : String(m.enrollment_max_players);
   const color  = joined >= min ? "var(--success)" : "var(--error)";
   return { min, joined, max, color };
@@ -2438,28 +2120,27 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
       if (st === 1 && m?.cro_initial_wei != null && m?.enrollment_amount_wei != null) {
         const initialWei = BigInt(String(m.cro_initial_wei || "0"));
         const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
-        // Use the same sources as the Players pill so both move together
-        const joined = BigInt(Math.max(
-          Array.isArray(m?.enrollments) ? m.enrollments.length : 0,
-          Number(__lastChainPlayers || 0),
-          Number(optimisticGuard?.players || 0)
-        ));
+
+        const fromApi = (m?.enrolled_players != null)
+          ? Number(m.enrolled_players)
+          : Array.isArray(m?.enrollments) ? m.enrollments.length : 0;
+
+        const joined  = BigInt(Math.max(fromApi, Number(optimisticGuard?.players || 0)));
         const derived = initialWei + feeWei * joined;
         const current = BigInt(String(m?.cro_current_wei || "0"));
         return `${weiToCro((current > derived ? current : derived).toString(), 2)} CRO`;
       }
-      if (m?.cro_current_wei != null) {
-        return `${weiToCro(m.cro_current_wei, 2)} CRO`;
-      }
+      if (m?.cro_current_wei != null) return `${weiToCro(m.cro_current_wei, 2)} CRO`;
       return "—";
     }
   },
   playersCap:     { label: "Players cap",      value: m => (m?.enrollment_max_players ?? "—") },
-  players: { label: "Players",                 value: m => Math.max(
-    Array.isArray(m?.enrollments) ? m.enrollments.length : 0,
-    Number(__lastChainPlayers || 0),
-    Number(optimisticGuard?.players || 0)
-  )},
+  players: { label: "Players", value: m => {
+    const fromApi = (m?.enrolled_players != null)
+      ? Number(m.enrolled_players)
+      : (Array.isArray(m?.enrollments) ? m.enrollments.length : 0);
+    return Math.max(fromApi, Number(optimisticGuard?.players || 0));
+  }},
   rounds:         { label: "Rounds",           value: m => Number(m?.mission_rounds_total ?? 0) },
   roundsOff: { 
     label: "Round", 
@@ -2516,93 +2197,17 @@ const PILL_SETS = { // Which pills to show per status (0..7) — only using fiel
 
 // Pills refresher:
 
-async function  rehydratePillsFromChain(missionOverride = null, why = "", force = false) {
+async function  rehydratePillsFromServer(missionOverride = null) {
   try {
     if (!currentMissionAddr) return;
 
-    // throttle to ~1 call per 2.5s
-    const now = Date.now();
-    if (!force && (__pillsHydrateBusy || (now - __pillsHydrateLast) < 2500)) return;
-    __pillsHydrateBusy = true;
-
-    // 1) Read players from chain (source of truth)
-    const ro = getReadProvider();
-    const mc = new ethers.Contract(currentMissionAddr, MISSION_ABI, ro);
-    const md = await mc.getMissionData();
-    const tuple = md?.[0] || md;
-    if (tuple && typeof tuple.roundPauseDuration !== "undefined") {
-      roundPauseDuration = Number(tuple.roundPauseDuration);
-    }
-    if (tuple && typeof tuple.lastRoundPauseDuration !== "undefined") {
-      lastRoundPauseDuration = Number(tuple.lastRoundPauseDuration);
-    }
-    const playersArr = Array.isArray(tuple?.players) ? tuple.players : [];
-    const playersCnt = playersArr.length;
-
-    // 2) Get immutable amounts from the API snapshot (or use the passed mission)
     let mSnap = missionOverride;
     if (!mSnap) {
       const data = await apiMission(currentMissionAddr, true);
       mSnap = enrichMissionFromApi(data);
     }
 
-    // 3) Pool: prefer chain truth; avoid enrollment fallback in Active/Paused
-    const chainNow = tuple?.croCurrent != null ? String(tuple.croCurrent) : "";
-    const feeWei     = BigInt(String(mSnap.enrollment_amount_wei || "0"));
-    const initialWei = BigInt(String(mSnap.cro_initial_wei       || "0"));
-    const derived    = (initialWei + feeWei * BigInt(playersCnt)).toString();
-
-    // Enrolling should always be computed from initial + fee * playersCnt
-    let croNow;
-    const stNum = Number(mSnap?.status);
-    if (stNum === 1) {
-      croNow = derived;               // <- ignore chainNow while Enrolling
-    } else if (chainNow) {
-      croNow = chainNow;
-    } else {
-      croNow = (mSnap.cro_current_wei != null && mSnap.cro_current_wei !== "")
-              ? String(mSnap.cro_current_wei)
-              : String(__lastChainCroWei || "");
-    }
-
-    // NEW: keep a cache of the last chain-truth so UI never regresses
-    try {
-      if (playersCnt > __lastChainPlayers) __lastChainPlayers = playersCnt;
-      if (BigInt(croNow) > BigInt(__lastChainCroWei || "0")) __lastChainCroWei = croNow;
-    } catch { /* ignore BigInt issues */ }
-
-    // NEW: shrink-safe rule — while Active or Paused, do not bounce the pool up.
-    try {
-      if (stNum === 3 || stNum === 4) {
-        if (missionOverride && missionOverride.cro_current_wei != null) {
-          const ov = BigInt(String(missionOverride.cro_current_wei));
-          const cv = BigInt(String(croNow || "0"));
-          if (ov < cv) croNow = ov.toString();
-        }
-        if (Date.now() < (optimisticGuard?.untilMs || 0)) {
-          const ov = BigInt(String(optimisticGuard?.croNow || "0"));
-          const cv = BigInt(String(croNow || "0"));
-          if (ov && ov < cv) croNow = ov.toString();
-        }
-      } else if (stNum === 1 || stNum === 2) {
-        // growing phases keep the existing “prefer higher” behavior
-      }
-    } catch {}
-
-    // 4) Paint
-    const snapStatus = Number(mSnap?.status ?? -1);
-    const curStatus  = Number(stageCurrentStatus ?? -1);
-    const toggle34   = (snapStatus === 3 && curStatus === 4) || (snapStatus === 4 && curStatus === 3);
-
-    // Use the higher of (API snapshot, current stage), except allow 3↔4 either way.
-    const effectiveStatus = (curStatus >= 0 && snapStatus < curStatus && !toggle34) ? curStatus : snapStatus;
-
-    buildStageLowerHudForStatus({
-      ...mSnap,
-      status:           effectiveStatus,
-      cro_current_wei:  croNow
-    });
-
+    buildStageLowerHudForStatus(mSnap);
   } catch (e) {
     console.warn("[pills/rehydrate] failed:", e?.message || e);
   } finally {
@@ -2613,26 +2218,20 @@ async function  rehydratePillsFromChain(missionOverride = null, why = "", force 
 
 // Chain/No-regress merge:
 
-function        applyChainNoRegress(m){
+function        applyNoRegress(m){
   try {
     const st = Number(m?.status);
     if (st === 1 || st === 2) {
       const merged   = { ...m };
       const apiCro   = BigInt(String(m?.cro_current_wei ?? m?.cro_start_wei ?? "0"));
-      const chainCro = BigInt(String(__lastChainCroWei || "0"));
 
-      // 1) Never regress vs last chain truth
-      if (chainCro > apiCro) merged.cro_current_wei = chainCro.toString();
-
-      // 2) During the optimism window, never regress vs optimistic croNow
+      // During the optimism window, never regress vs optimistic croNow
       if (Date.now() < (optimisticGuard?.untilMs || 0)) {
         try {
           const optCro = BigInt(String(optimisticGuard?.croNow || "0"));
-          const curCro = BigInt(String(merged?.cro_current_wei ?? merged?.cro_start_wei ?? "0"));
-          if (optCro > curCro) merged.cro_current_wei = optCro.toString();
+          if (optCro > apiCro) merged.cro_current_wei = optCro.toString();
         } catch {}
       }
-
       return merged;
     }
   } catch {}
@@ -2646,7 +2245,7 @@ function        buildStageLowerHudForStatus(mission){ // Build (and fill) the pi
   if (!host) return;
   while (host.firstChild) host.removeChild(host.firstChild);
 
-  const safe = applyChainNoRegress(mission);
+  const safe = applyNoRegress(mission);
   const keys = PILL_SETS[hudStatusFor(safe)] ?? PILL_SETS.default;
 
   // layout helpers
@@ -2816,6 +2415,13 @@ async function  handleEnrollClick       (mission){
     const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
     const val = mission.enrollment_amount_wei ?? "0";
     const tx  = await c.enrollPlayer({ value: val });
+
+    // Kick the indexer as soon as we have the tx hash (UI also de-dupes ~2s)
+    try {
+      const me = (await signer.getAddress()).toLowerCase();
+      postKickEnrolled({ mission: mission.mission_address, player: me, txHash: tx.hash }).catch(()=>{});
+    } catch {}
+
     await tx.wait();
 
     // remember locally + instant disable for this wallet
@@ -2854,7 +2460,7 @@ async function  handleEnrollClick       (mission){
       renderStageCtaForStatus(m2);
 
       // also kick a chain rehydrate to set __lastChainPlayers quickly
-      rehydratePillsFromChain(mission, "joined:post-tx").catch(()=>{});
+      rehydratePillsFromServer(mission, "joined:post-tx").catch(()=>{});
     } catch (e) {
       console.warn("[CTA/JOIN] optimistic paint failed:", e?.message || e);
     }
@@ -2914,6 +2520,13 @@ async function  handleBankItClick       (mission){
   try {
     const c  = new ethers.Contract(mission.mission_address, MISSION_ABI, signer);
     const tx = await c.callRound();
+
+    // Kick the indexer as soon as we have the tx hash (UI also de-dupes ~2s)
+    try {
+      const me = (await signer.getAddress()).toLowerCase();
+      postKickBanked({ mission: mission.mission_address, player: me, txHash: tx.hash }).catch(()=>{});
+    } catch {}
+
     await tx.wait();
 
     // ▶ Hide any “waiting for result” modal and play the vault animation once
@@ -2967,34 +2580,16 @@ async function  handleBankItClick       (mission){
     await flipStageToPausedOptimistic(mission);
 
     // Quick chain hydrate to lock in truth (still fine if slow)
-    try { rehydratePillsFromChain(mission, "bank:post-tx").catch(()=>{}); } catch {}
-
-    // 2) (keep) nudge backend to notify spectators
-    try {
-      fetch("/api/events/banked", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mission: mission.mission_address, txHash: tx.hash })
-      }).catch(()=>{});
-    } catch {}
+    try { rehydratePillsFromServer(mission, "bank:post-tx").catch(()=>{}); } catch {}
 
     // 3) (optional but okay) quick chain rehydrate; the optimistic Paused UI stays visible
-    rehydratePillsFromChain(mission, "post-callRound", true).catch(()=>{});
+    rehydratePillsFromServer(mission, "post-callRound", true).catch(()=>{});
 
     // 4) (keep) quick reconcile so DB fields catch up
     await refreshOpenStageFromServer(2);
 
-    // NEW: tell backend to push spectators immediately (lightly verified + throttled)
-    try {
-      fetch("/api/events/banked", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mission: mission.mission_address, txHash: tx.hash })
-      }).catch(()=>{});
-    } catch { /* non-fatal */ }
-
     // Pull pool from chain immediately in case push is slow
-    rehydratePillsFromChain(mission, "post-callRound", true).catch(()=>{});
+    rehydratePillsFromServer(mission, "post-callRound", true).catch(()=>{});
 
   } catch (err) {
     // clear the local “banking in flight” marker on failure/cancel
@@ -3198,7 +2793,9 @@ async function  renderCtaEnrolling      (host, mission)   {
   const inWin = now < Number(mission.enrollment_end || 0);
 
   const me = (walletAddress || "").toLowerCase();
-  let hasSpots = true, canEnrollSoft = true;
+  let hasSpots = true
+  let canEnrollSoft = true;
+  let eligibilityReason = "";
 
   // (A) local cache → instant after join & survives reload
   const alreadyByCache = joinedCacheHas(mission.mission_address, me);
@@ -3213,24 +2810,26 @@ async function  renderCtaEnrolling      (host, mission)   {
   let already = alreadyByCache || alreadyByApi;
 
   try {
-    const ro = getReadProvider();
-    const mc = new ethers.Contract(mission.mission_address, MISSION_ABI, ro);
+    // Pure snapshot gating (no on-chain reads)
+    const maxP    = Number(mission.enrollment_max_players ?? 0);
+    const joinedN = Array.isArray(mission.enrollments) ? mission.enrollments.length
+                  : (typeof mission.enrolled_players === "number" ? mission.enrolled_players : 0);
+    hasSpots      = maxP ? (joinedN < maxP) : true;
 
-    // Cap chain calls so the CTA never “hangs” invisibly.
-    const md = await withTimeout(mc.getMissionData(), 2500).catch(() => null);
-    const tuple   = md?.[0] || md || {};
-    const players = (tuple.players || []).map(a => String(a).toLowerCase());
-
-    const alreadyByChain = !!(me && players.includes(me));
-    already = already || alreadyByChain;
-
-    const maxP = Number(mission.enrollment_max_players ?? 0);
-    hasSpots  = maxP ? (players.length < maxP) : true;
-
-    if (me && FACTORY_ADDRESS) {
-      const fac = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, ro);
-      const ok = await withTimeout(fac.canEnroll(me), 2500).catch(() => true);
-      canEnrollSoft = (ok == null) ? true : ok;
+    // Server-side preflight to avoid revert gas
+    // Disabled if no wallet address yet
+    if (me) {
+      try {
+        const eg = await getPlayerEligibility(me);
+        if (eg && eg.can_enroll === false) {
+          canEnrollSoft = false;
+          // Prefer backend reason if present, fallback to a generic note below
+          // We’ll wire this into the final CTA message using `eligibilityReason`
+          eligibilityReason = eg.reason || "";
+        }
+      } catch {
+        // best-effort; on failure we keep canEnrollSoft=true and let tx revert (rare)
+      }
     }
   } catch (err) {
     console.warn("[CTA/JOIN] chain probe failed:", err?.message || err);
@@ -3244,8 +2843,9 @@ async function  renderCtaEnrolling      (host, mission)   {
   else if (!inWin)                  { disabled = true; note = "Enrollment closed"; }
   else if (already || justJoined)   { disabled = true; note = "You already joined this mission"; }
   else if (!hasSpots)               { disabled = true; note = "No spots left for this mission"; }
-  else if (!canEnrollSoft)          { disabled = true; note = "Weekly/monthly limit reached"; }
+  else if (!canEnrollSoft)          { disabled = true; note = eligibilityReason || "You’re not eligible to join right now"; }
   if (ctaBusy)                      { disabled = true; note = "Joining…"; }
+
 
   console.debug("[CTA/JOIN] gating", {
     me, inWin, alreadyByCache, alreadyByApi, already, hasSpots, canEnrollSoft
@@ -3370,24 +2970,24 @@ function        renderCtaActive         (host, mission)   {
       })
     );
 
-  // If still unsure, kick a fast chain probe and re-render CTA on success.
-  if (!joined && me && addrLc) {
-    (async () => {
-      try {
-        const ro = getReadProvider();
-        const mc = new ethers.Contract(addrLc, MISSION_ABI, ro);
-        const md = await withTimeout(mc.getMissionData(), 2500).catch(() => null);
-        const tuple   = md?.[0] || md || {};
-        const players = (tuple?.players || []).map(a => String(a).toLowerCase());
-        if (players.includes(me)) {
-          // Remember and repaint CTA as BANK IT (no reload needed)
-          mission._joinedByMe = true;
-          try { joinedCacheAdd(addrLc, me); } catch {}
-          renderStageCtaForStatus(mission);
-        }
-      } catch {}
-    })();
-  }
+    // If still unsure, do a one-off snapshot check and repaint on success (no chain calls).
+    if (!joined && me && addrLc) {
+      (async () => {
+        try {
+          // Uses GET /missions/player/{address} via apiPlayerMissions()
+          const mine = await apiPlayerMissions(me);
+          const involved = Array.isArray(mine) && mine.some(m =>
+            String(m?.mission_address || m?.address || "").toLowerCase() === addrLc
+          );
+
+          if (involved) {
+            mission._joinedByMe = true;
+            try { joinedCacheAdd(addrLc, me); } catch {}
+            renderStageCtaForStatus(mission);
+          }
+        } catch {/* ignore – UI will catch up on next push */}
+      })();
+    }
 
   // already won any round?
   const alreadyWon = !!(me && (
@@ -4324,7 +3924,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
   const statusCls = statusColorClass(mission.status);
 
   // No-regress: prefer chain-truth for Enrolling/Arming
-  const safe = applyChainNoRegress(mission);
+  const safe = applyNoRegress(mission);
   const listJoined = Array.isArray(enrollments) ? enrollments.length : 0;
   const joinedPlayers = Math.max(
     listJoined,
@@ -4664,60 +4264,6 @@ function        stopJoinableTicker(){
   if (joinableTimer) { clearInterval(joinableTimer); joinableTimer = null; }
 }
 
-// Realtime status hydrator for cards:
-
-async function  hydrateAllMissionsRealtime(listEl){
-  if (!listEl) return;
-
-  // NEW: don’t churn when the tab or section is hidden
-  if (document.hidden) return;
-  const cs = getComputedStyle(listEl);
-  if (cs.display === "none" || cs.visibility === "hidden") return;
-
-  const cards = [...listEl.querySelectorAll("li.mission-card")];
-  if (!cards.length) return;
-
-  // Use batch provider so parallel calls coalesce; also slow down a bit
-  const provider    = new ethers.providers.JsonRpcBatchProvider(READ_ONLY_RPC);
-  const N           = 1;    // was 4 — keep low to avoid 403 bursts
-  const SPACING_MS  = 150;  // small gap per request
-  const sleep       = ms => new Promise(r => setTimeout(r, ms));
-  let i = 0;
-
-  async function worker(){
-    while (i < cards.length){
-      const idx  = i++;
-      const li   = cards[idx];
-      const addr = li.dataset.addr;
-      if (!addr) continue;
-
-      try {
-        const c  = new ethers.Contract(addr, MISSION_ABI, provider);
-        const rt   = Number(await c.getRealtimeStatus());
-        const pill = li.querySelector(".status-pill");
-        if (pill) {
-          // read the current players count shown on the card to build a tiny md shim
-          const curPlayers = Number(li.querySelector('.players-count .current')?.dataset.current || 0);
-          const mdShim     = { players: Array.from({ length: curPlayers }) };
-          const pretty     = prettyStatusForList(rt, mdShim, 0);   // no per-mission refund count here
-
-          pill.textContent = pretty ? pretty.label : statusText(rt);
-          pill.className   = `status-pill ${pretty ? pretty.css : statusColorClass(rt)}`;
-          if (pretty?.title) pill.title = pretty.title; else pill.removeAttribute('title');
-        }
-      } catch (err) {
-        console.warn("realtime status failed:", addr, err?.message || err);
-      }
-
-      // jitter to avoid synchronized bursts (helps with WAF/rate limit)
-      await sleep(SPACING_MS + Math.floor(Math.random() * 100));
-    }
-  }
-
-  await Promise.all([...Array(Math.min(N, cards.length))].map(() => worker()));
-
-}
-
 // #endregion
 
 
@@ -4778,51 +4324,22 @@ async function  closeMission(){
 }
 
 async function  subscribeToMission(addr){
-  if (!hubConnection) return;
-
-  const H = signalR.HubConnectionState;
   const targetLc = String(addr||"").toLowerCase();
-  let targetCk = null;
-  try { targetCk = ethers.utils.getAddress(targetLc); } catch { /* keep null */ }
+  if (!targetLc) return;
 
-  // If the hub isn't connected yet, remember what we want to subscribe to
-  if (hubConnection.state !== H.Connected) {
-    subscribedAddr = targetLc;
-    subscribedGroups = new Set([targetLc, targetCk].filter(Boolean));
-    dbg("hub not connected; will subscribe later:", Array.from(subscribedGroups));
-    return;
+  // Leave previous (if any)
+  if (subscribedAddr && subscribedAddr !== targetLc) {
+    try { await leaveMissionGroup(subscribedAddr); dbg("Unsubscribed group:", subscribedAddr); } catch {}
+    subscribedGroups.clear();
   }
 
-  // IDEMPOTENCE: already on the right groups? do nothing.
-  const targetSet = new Set([targetLc, targetCk].filter(Boolean));
-  const same = (subscribedGroups.size === targetSet.size) &&
-               [...targetSet].every(g => subscribedGroups.has(g));
-  if (same) {
-    dbg("Already subscribed to target groups:", Array.from(subscribedGroups));
-    subscribedAddr = targetLc;
-    return;
-  }
+  // Join new
+  await joinMissionGroup(targetLc);
 
-  // Unsubscribe all previous groups
-  for (const g of Array.from(subscribedGroups)) {
-    try { await hubConnection.invoke("UnsubscribeMission", g); dbg("Unsubscribed group:", g); }
-    catch (e) { dbg("Unsubscribe failed:", g, e?.message||e); }
-  }
-  subscribedGroups.clear();
-
-  // Subscribe to both forms that may be used server-side
-  for (const g of [targetLc, targetCk]) {
-    if (!g) continue;
-    try {
-      await hubConnection.invoke("SubscribeMission", g);
-      subscribedGroups.add(g);
-      dbg("Subscribed group:", g);
-    } catch (e) {
-      console.error("SubscribeMission failed:", g, e);
-    }
-  }
-
-  subscribedAddr = targetLc;
+  // Track for UI/debug parity
+  let targetCk = null; try { targetCk = ethers.utils.getAddress(targetLc); } catch {}
+  subscribedAddr   = targetLc;
+  subscribedGroups = new Set([targetLc, targetCk].filter(Boolean));
 }
 
 // #endregion

@@ -233,7 +233,24 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     mapping(address => uint256[])           private _enrollmentHistory;                         // Store timestamps
     mapping(address => string)              public missionNames;                                // Store mission names
     mapping(MissionType => uint256)         public missionTypeCounts;                           // Store per mission type the mission type count
-    mapping(address => uint256)             public lastUserMissionCreatedAt;                     // creator => last creation timestamp
+    mapping(address => uint256)             public lastUserMissionCreatedAt;                    // creator => last creation timestamp
+
+    // --- Change Tracking (predictable polling; no events) -------------------
+    struct ChangeEntry {
+        address mission;                                                                        // mission address
+        uint40  ts;                                                                             // last touch timestamp (seconds)
+        uint64  seq;                                                                            // monotonic change sequence
+        uint8   status;                                                                         // factory-known status
+    }
+
+    uint64                                  private _changeSeq;                                 // global increasing sequence
+    address[]                               private _changedKeys;                               // each mission appears at most once
+    mapping(address => uint32)              private _changedIndexPlus1;                         // 0 = absent, else index + 1
+    mapping(address => ChangeEntry)         private _changed;                                   // last change per mission
+    uint32                                  private _purgeCursor;                               // rotating cursor for amortized purge
+    uint32                                  private constant _PURGE_BATCH_SIZE = 8;             // purge batch size per ended transition
+    // -----------------------------------------------------------------------
+
     // #endregion
 
 
@@ -259,7 +276,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     /**
      * @dev Function to convert mission types to human readable names 
      */  
-    function _toHumanReadableName(MissionType t) internal pure returns (string memory) {
+    function _toHumanReadableName(MissionType t)                                    internal pure returns (string memory) {
         if (t == MissionType.Hourly)         return "Hourly";
         if (t == MissionType.QuarterDaily)   return "QuarterDaily";
         if (t == MissionType.BiDaily)        return "BiDaily";
@@ -276,7 +293,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param user The address of the user to check.
      * @return The number of seconds until the next weekly slot.
      */
-    function secondsTillWeeklySlot(address user)                            external view returns (uint256) {
+    function secondsTillWeeklySlot(address user)                                    external view returns (uint256) {
         uint256 nowTs = block.timestamp;                                // Get the current timestamp
         uint256[] storage h = _enrollmentHistory[user];                 // Get the user's enrollment history
         uint256 earliest;                                               // Variable to store the earliest enrollment time within the next week
@@ -294,7 +311,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param user The address of the user to check.
      * @return The number of seconds until the next monthly slot.
      */
-    function secondsTillMonthlySlot(address user)                           external view returns (uint256) {
+    function secondsTillMonthlySlot(address user)                                   external view returns (uint256) {
         uint256 nowTs = block.timestamp;                                // Get the current timestamp
         uint256[] storage h = _enrollmentHistory[user];                 // Get the user's enrollment history
         uint256 earliest;                                               // Variable to store the earliest enrollment time within the next month 
@@ -310,7 +327,82 @@ contract MissionFactory is Ownable, ReentrancyGuard {
 
 
 
-    
+
+    // #region Int. Change Tracking
+    function _touchChanged(address mission_, uint8 status_)                         internal {
+        unchecked { _changeSeq++; }
+        uint32 idxPlus1 = _changedIndexPlus1[mission_];
+
+        ChangeEntry memory ce = ChangeEntry({
+            mission: mission_,
+            ts: uint40(block.timestamp),
+            seq: _changeSeq,
+            status: status_
+        });
+        _changed[mission_] = ce;
+
+        if (idxPlus1 == 0) {
+            _changedKeys.push(mission_);
+            _changedIndexPlus1[mission_] = uint32(_changedKeys.length);
+        }
+    }
+
+    function _touchChangedKeepStatus(address mission_)                              internal {
+        _touchChanged(mission_, uint8(missionStatus[mission_]));
+    }
+
+    function _isEnded(Status s)                                                     internal pure returns (bool) {
+        return (s == Status.Success || s == Status.Failed); // ended = 6,7
+    }
+
+    /// @dev amortized cleanup; scans up to `maxToScan` entries starting at `_purgeCursor`.
+    function _purgeEndedBatch(uint32 maxToScan)                                     internal {
+        uint256 len = _changedKeys.length;
+        if (len == 0) { _purgeCursor = 0; return; }
+
+        uint32 scanned = 0;
+        uint40 cutoff = uint40(block.timestamp - 7 days);
+
+        while (scanned < maxToScan && _changedKeys.length > 0) {
+            if (_purgeCursor >= _changedKeys.length) {
+                _purgeCursor = 0;
+            }
+            address m = _changedKeys[_purgeCursor];
+            ChangeEntry memory ce = _changed[m];
+
+            bool ended = _isEnded(Status(uint8(ce.status)));
+            if (ended && ce.ts <= cutoff) {
+                uint256 last = _changedKeys.length - 1;
+                if (_purgeCursor != last) {
+                    address moved = _changedKeys[last];
+                    _changedKeys[_purgeCursor] = moved;
+                    _changedIndexPlus1[moved] = uint32(_purgeCursor + 1);
+                }
+                _changedKeys.pop();
+                _changedIndexPlus1[m] = 0;
+                delete _changed[m];
+                // note: keep _purgeCursor at same index to inspect the swapped-in element next
+            } else {
+                _purgeCursor++;
+                scanned++;
+            }
+        }
+    }
+
+    /**
+     * @notice Mission notifies the factory that on-chain state changed (no status change required).
+     * @dev Keeps polling predictable without events. Callable only by registered missions.
+     */
+    function notifyTouched()                                                        external onlyMission {
+        _touchChangedKeepStatus(msg.sender);
+    }
+
+    // #endregion
+
+
+
+
+
     // #region Anti-addiction Func.
     /**
      * @dev Sets the weekly and monthly enrollment limits.
@@ -318,7 +410,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param _weekly The new weekly limit for mission enrollments.
      * @param _monthly The new monthly limit for mission enrollments.
      */
-    function setEnrollmentLimits(uint8 _weekly, uint8 _monthly)             external onlyOwnerOrAuthorized {
+    function setEnrollmentLimits(uint8 _weekly, uint8 _monthly)                     external onlyOwnerOrAuthorized {
         weeklyLimit = _weekly;
         monthlyLimit = _monthly;
         emit EnrollmentLimitUpdated(_weekly, _monthly);
@@ -331,7 +423,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return ok A boolean indicating if the user can enroll.
      * @return breach A Limit enum indicating which limit is breached, if any.
      */
-    function canEnroll(address user)                                        public view returns (bool ok, Limit breach) {
+    function canEnroll(address user)                                                public view returns (bool ok, Limit breach) {
         uint256 nowTs = block.timestamp;                                    // Get the current timestamp
         uint256 weeklyCount;                                                // Count of enrollments in the last 7 days  
         uint256 monthlyCount;                                               // Count of enrollments in the last 30 days
@@ -371,7 +463,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * It updates the user's enrollment history and emits an event.
      * @param user The address of the user enrolling in the mission.
      */
-    function recordEnrollment(address user)                                 external onlyMission() {
+    function recordEnrollment(address user)                                         external onlyMission() {
         uint256 nowTs = block.timestamp;                                            // Get the current timestamp
         require(missionStatus[msg.sender] == Status.Enrolling, "Invalid caller");   // Ensure the caller is in the Enrolling status
 
@@ -391,6 +483,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         }
 
         history.push(nowTs);                                                        // Add the current timestamp to the enrollment history  
+        // touch changed set (status stays the same)
+        _touchChangedKeepStatus(msg.sender);
         emit EnrollmentRecorded(user, nowTs);                                       // Emit an event for the enrollment record
     }
 
@@ -406,7 +500,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @return secToWeek The number of seconds until the next weekly slot.
      * @return secToMonth The number of seconds until the next monthly slot.
      */
-    function getPlayerLimits(address player)                                external view returns 
+    function getPlayerLimits(address player)                                        external view returns 
         (uint8 weekUsed, uint8 weekMax, uint8 monthUsed, uint8 monthMax, uint256 secToWeek, uint256 secToMonth) {
         uint256 nowTs = block.timestamp;                                        // Get the current timestamp
         uint256[] storage h = _enrollmentHistory[player];                       // Get the player's enrollment history
@@ -442,7 +536,7 @@ contract MissionFactory is Ownable, ReentrancyGuard {
      * @param startTs The start timestamp of the enrollment window.
      * @param endTs The end timestamp of the enrollment window.
      */
-    function undoEnrollmentInWindow(address user, uint256 startTs, uint256 endTs) external onlyMission {
+    function undoEnrollmentInWindow(address user, uint256 startTs, uint256 endTs)   external onlyMission {
         require(user != address(0), "Invalid user");
         uint256[] storage h = _enrollmentHistory[user];
         uint256 len = h.length;
@@ -649,6 +743,8 @@ contract MissionFactory is Ownable, ReentrancyGuard {
         if (_missionType == MissionType.UserMission) {
             lastUserMissionCreatedAt[_creator] = block.timestamp;        // Update last creation timestamp for user-created missions
         }
+        // initial touch for predictable polling
+        _touchChangedKeepStatus(clone);
         return (clone, _finalName);						                // Return the address of the newly created mission
     }
 
@@ -659,6 +755,9 @@ contract MissionFactory is Ownable, ReentrancyGuard {
     function setMissionStatus(Status newStatus) external onlyMission {
         Status fromStatus = missionStatus[msg.sender];
         missionStatus[msg.sender] = newStatus;
+
+        // touch changed set for predictable polling
+        _touchChanged(msg.sender, uint8(newStatus));
 
         if (newStatus == Status.Success) {
             totalMissionSuccesses++;
@@ -679,9 +778,15 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             newStatus == Status.Success ||
             newStatus == Status.Failed
         ) {
+            // bounded on-the-fly purge only for true ended (6 or 7)
+            if (newStatus == Status.Success || newStatus == Status.Failed) {
+                _purgeEndedBatch(_PURGE_BATCH_SIZE);
+            }
+
             emit MissionFinalized(msg.sender, uint8(newStatus), block.timestamp);
         }
     }
+
     // #endregion
 
 
@@ -1144,6 +1249,40 @@ contract MissionFactory is Ownable, ReentrancyGuard {
             expiry - nowTs                                                      // Seconds remaining until expiry
         );
     }
+
+    /**
+     * @notice Returns missions changed after `lastSeq`.
+     * @dev Pass 0 initially; indexer stores and supplies the last seen sequence.
+     */
+    function getChangesAfter(uint64 lastSeq)                                external view returns (address[] memory m, uint40[] memory timestamps, uint64[] memory seqs, uint8[] memory statuses) {
+        uint256 n = _changedKeys.length;
+
+        // count
+        uint256 count = 0;
+        for (uint256 i = 0; i < n; i++) {
+            ChangeEntry memory ce = _changed[_changedKeys[i]];
+            if (ce.seq > lastSeq) { count++; }
+        }
+
+        m          = new address[](count);
+        timestamps = new  uint40[](count);
+        seqs       = new  uint64[](count);
+        statuses   = new   uint8[](count);
+
+        // fill
+        uint256 w = 0;
+        for (uint256 i = 0; i < n; i++) {
+            ChangeEntry memory ce = _changed[_changedKeys[i]];
+            if (ce.seq > lastSeq) {
+                m[w]          = ce.mission;
+                timestamps[w] = ce.ts;
+                seqs[w]       = ce.seq;
+                statuses[w]   = ce.status;
+                w++;
+            }
+        }
+    }
+
     // #endregion 
 
     // #endregion
@@ -1387,7 +1526,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     * @notice Allows a player to enroll by paying the enrollment fee.
     * @dev For normal missions. InviteOnly missions must call enrollPlayerWithSecret().
     */
-    function enrollPlayer() external payable nonReentrant {
+    function enrollPlayer()                                     external payable nonReentrant {
         require(_missionData.missionType != MissionType.InviteOnly, "InviteOnly: use enrollPlayerWithSecret");
 
         uint256 nowTs = block.timestamp;
@@ -1424,7 +1563,7 @@ contract Mission        is Ownable, ReentrancyGuard {
     /**
     * @dev Shared internal enrollment logic used by both enrollPlayer() and enrollPlayerWithSecret().
     */
-    function _enroll(address player, uint256 nowTs) private {
+    function _enroll(address player, uint256 nowTs)             private {
         if (_missionData.enrollmentCount >= _missionData.enrollmentMaxPlayers) {
             revert MaxPlayers(_missionData.enrollmentMaxPlayers);
         }
@@ -1478,7 +1617,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      * calling refundPlayers() is the last chance to refund players.
      * @dev If conditions are not met, sets status to Failed and refunds players.
      */
-    function checkMissionStartCondition()   external nonReentrant onlyOwnerOrAuthorized { 
+    function checkMissionStartCondition()                       external nonReentrant onlyOwnerOrAuthorized { 
         uint256 nowTs = block.timestamp;                                                    // Get the current timestamp
         require(nowTs > _missionData.enrollmentEnd && nowTs < _missionData.missionStart, 
                  "Mission not in arming window. Call refundPlayers instead");               // Ensure mission is in the correct time window to check start conditions
@@ -1512,7 +1651,7 @@ contract Mission        is Ownable, ReentrancyGuard {
      *      - Payout to the player fails
      * @dev If it is the last round, sets status to Success and withdraws funds
      */
-    function callRound()                    external nonReentrant {
+    function callRound()                                        external nonReentrant {
         Status s = _getRealtimeStatus();
         uint256 nowTs = block.timestamp;
 
@@ -1578,7 +1717,7 @@ contract Mission        is Ownable, ReentrancyGuard {
 	/**
      * @dev Add funds to prize pool.
      */
-	function increasePot()                  external payable {
+	function increasePot()                                      external payable {
 		require(msg.value > 0, "No funds sent");                                            // Ensure some funds are sent
         require(
             msg.sender == address(missionFactory) || missionFactory.authorized(msg.sender) || msg.sender == owner(),
@@ -1589,13 +1728,15 @@ contract Mission        is Ownable, ReentrancyGuard {
 		_missionData.croStart 	    += msg.value;                                           // Increase the start   CRO amount by the value sent
 		_missionData.croCurrent 	+= msg.value;                                           // Increase the current CRO amount by the value sent
 		emit PotIncreased(msg.value, _missionData.croCurrent);                              // Emit event for pot increase
+        // notify factory for predictable polling
+        missionFactory.notifyTouched();
 	}
 
     /**
      * @dev Refunds players if the mission fails.
      * This function can be called by the owner or an authorized address.
      */
-    function refundPlayers()                external nonReentrant onlyOwnerOrAuthorized {
+    function refundPlayers()                                    external nonReentrant onlyOwnerOrAuthorized {
         _refundPlayers();                                                                                           // Call internal refund function
     }
 
@@ -1606,15 +1747,17 @@ contract Mission        is Ownable, ReentrancyGuard {
      *      - 75% to MissionFactory (for future missions)
      * @dev If `force = true`, also withdraws failed refund amounts.
      */
-    function withdrawFunds()                external nonReentrant onlyOwnerOrAuthorized {
-        _withdrawFunds(true);                                                                                       // Call internal withdraw function
+    function withdrawFunds()                                    external nonReentrant onlyOwnerOrAuthorized {
+        _withdrawFunds(true);                                                                                     // Call internal withdraw function
+        // notify factory for predictable polling
+        missionFactory.notifyTouched();
     }
 
     /**
      * @notice Allows owner or authorized to finalize a mission after time expiry.
      * @dev Ends mission and withdraws remaining pot.
      */   
-    function forceFinalizeMission()         external onlyOwnerOrAuthorized nonReentrant {
+    function forceFinalizeMission()                             external onlyOwnerOrAuthorized nonReentrant {
         require(_getRealtimeStatus() == Status.PartlySuccess);  // Ensure mission is in PartlySuccess status
 
         _setStatus(Status.Success);                             

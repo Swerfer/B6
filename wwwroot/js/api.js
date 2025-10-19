@@ -5,6 +5,8 @@
   - Light client-side de-duplication for /events/* kicks (~2s).
 **********************************************************************/
 
+// V4
+
 const API_ROOT = "/api";
 const j = (resp) => {
   if (!resp.ok) throw new Error(`${resp.url} failed (${resp.status})`);
@@ -117,3 +119,21 @@ export async function   getMissionDebounced(addressLc) {
   __detailInflight.set(addr, { ts: now, p });
   return p;
 }
+
+/** GET /players/{address}/eligibility — memorized ~10s per address */
+const __eligCache = new Map();  // addrLc -> { ts, p }
+const ELIG_TTL_MS = 10_000;
+
+export async function getPlayerEligibility(addressLc) {
+  const addr = toLc(addressLc);
+  if (!addr) return { error: true, message: "No address" };
+
+  const now = Date.now();
+  const hit = __eligCache.get(addr);
+  if (hit && (now - hit.ts) < ELIG_TTL_MS) return hit.p;
+
+  const p = apiFetch(`/players/${addr}/eligibility`).then(j).catch(e => ({ error: true, message: e?.message || String(e) }));
+  __eligCache.set(addr, { ts: now, p });
+  return p;
+}
+

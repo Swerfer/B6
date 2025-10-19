@@ -14,12 +14,15 @@ using Npgsql;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using WebPush;               // Web Push VAPID support (new)
 
 // The base uri is https://b6missions.com/api It is set to 'api' in ISS server.
+
+// V4
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -74,6 +77,43 @@ builder.Services.AddHostedService<NotificationScheduler>();
 var app = builder.Build();
 
 app.UseCors("AllowFrontend");
+
+// ===== Eligibility function DTOs (MissionFactory) =====
+[Function("canEnroll", "bool")]
+public class CanEnrollFunction : FunctionMessage{
+    [Parameter("address", "player", 1)]
+    public string Player { get; set; } = "";
+}
+
+[Function("secondsTillWeeklySlot", "uint256")]
+public class SecondsTillWeeklySlotFunction : FunctionMessage{
+    [Parameter("address", "player", 1)]
+    public string Player { get; set; } = "";
+}
+
+[Function("secondsTillMonthlySlot", "uint256")]
+public class SecondsTillMonthlySlotFunction : FunctionMessage{
+    [Parameter("address", "player", 1)]
+    public string Player { get; set; } = "";
+}
+
+[Function("getPlayerLimits", typeof(PlayerLimitsOutput))]
+public class GetPlayerLimitsFunction : FunctionMessage{
+    [Parameter("address", "player", 1)]
+    public string Player { get; set; } = "";
+}
+
+[FunctionOutput]
+public class PlayerLimitsOutput : IFunctionOutputDTO{
+    // Matches core.js ABI: getPlayerLimits(address) returns(uint8,uint8,uint8,uint8,uint256,uint256)
+    // (weeklyCount, monthlyCount, weeklyLimit, monthlyLimit, weeklyResetAt, monthlyResetAt)
+    [Parameter("uint8",   "weeklyCount",    1)] public byte     WeeklyCount     { get; set; }
+    [Parameter("uint8",   "monthlyCount",   2)] public byte     MonthlyCount    { get; set; }
+    [Parameter("uint8",   "weeklyLimit",    3)] public byte     WeeklyLimit     { get; set; }
+    [Parameter("uint8",   "monthlyLimit",   4)] public byte     MonthlyLimit    { get; set; }
+    [Parameter("uint256", "weeklyResetAt",  5)] public BigInteger WeeklyResetAt { get; set; }
+    [Parameter("uint256", "monthlyResetAt", 6)] public BigInteger MonthlyResetAt{ get; set; }
+}
 
 /* --------------------- Helpers ---------------------*/
 static long         ToUnixSeconds(DateTime dtUtc){
@@ -138,10 +178,10 @@ app.MapPost("/rpc",                     async (HttpRequest req, IHttpClientFacto
     using var reader = new StreamReader(req.Body);
     var body = await reader.ReadToEndAsync();
 
-    var upstream = cfg["Cronos:Rpc"] ?? "https://evm.cronos.org/";
+    var rpc     = GetRequired(cfg, "Cronos:Rpc");
 
     var client = f.CreateClient();
-    using var msg = new HttpRequestMessage(HttpMethod.Post, upstream);
+    using var msg = new HttpRequestMessage(HttpMethod.Post, rpc);
     msg.Content = new StringContent(body, Encoding.UTF8, "application/json");
     msg.Headers.UserAgent.ParseAdd("B6MissionsProxy/1.0");
 
@@ -421,7 +461,16 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
         m.creator_address,                           
         m.all_refunded,                          
         coalesce(c.enrolled,0) as enrolled_players,
-        case ... end as failure_reason,
+        case 
+          when m.status >= 5 then
+            case
+              when m.all_refunded is true then 'all_refunded'
+              when coalesce(c.enrolled,0) < m.enrollment_min_players then 'not_enough_players'
+              when m.round_count = 0 then 'no_rounds_played'
+              else 'ended'
+            end
+          else null
+        end as failure_reason,
         e.enrolled_at,
         e.refunded,
         e.refund_tx_hash
@@ -602,6 +651,79 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
     return Results.Ok(new { mission, enrollments, rounds });
 });
 
+/***********************
+ *  PLAYERS – READ API
+ *  GET /players/{addr}/eligibility
+ *  -> delegates to MissionFactory.canEnroll(address) and related views
+ ***********************/
+app.MapGet("/players/{addr}/eligibility", async (string addr, IConfiguration cfg) =>{
+    if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("Missing address");
+    addr = addr.ToLowerInvariant();
+    if (!addr.StartsWith("0x") || addr.Length != 42) return Results.BadRequest("Invalid address");
+
+    var rpc     = GetRequired(cfg, "Cronos:Rpc");
+    var factory = GetRequired(cfg, "Contracts:Factory");
+    if (string.IsNullOrWhiteSpace(factory)) return Results.Problem("Factory address not configured");
+    factory = factory.ToLowerInvariant();
+
+    var web3 = new Web3(rpc);
+
+    // Query canEnroll + cooldowns + current counters/limits
+    var canQ   = web3.Eth.GetContractQueryHandler<CanEnrollFunction>();
+    var wsecQ  = web3.Eth.GetContractQueryHandler<SecondsTillWeeklySlotFunction>();
+    var msecQ  = web3.Eth.GetContractQueryHandler<SecondsTillMonthlySlotFunction>();
+    var limQ   = web3.Eth.GetContractQueryHandler<GetPlayerLimitsFunction>();
+
+    bool        canEnroll;
+    BigInteger  weeklyLeft, monthlyLeft;
+    PlayerLimitsOutput? limits;
+
+    try
+    {
+        canEnroll   = await canQ.QueryAsync<bool>(factory, new CanEnrollFunction { Player = addr });
+        weeklyLeft  = await wsecQ.QueryAsync<BigInteger>(factory, new SecondsTillWeeklySlotFunction { Player = addr });
+        monthlyLeft = await msecQ.QueryAsync<BigInteger>(factory, new SecondsTillMonthlySlotFunction { Player = addr });
+        limits      = await limQ.QueryDeserializingToObjectAsync<PlayerLimitsOutput>(
+                        new GetPlayerLimitsFunction { Player = addr }, factory, null);
+    }
+    catch (Exception ex)
+    {
+        // Surface as 200 with error so frontend can still render a generic join CTA.
+        return Results.Ok(new {
+            address = addr,
+            error   = true,
+            message = ex.Message
+        });
+    }
+
+    // Build a human-friendly reason if NOT eligible
+    string? reason = null;
+    var wLeft = (long)weeklyLeft;
+    var mLeft = (long)monthlyLeft;
+
+    if (!canEnroll)
+    {
+        if (wLeft > 0)      reason = $"Weekly limit reached. Next slot in {wLeft} seconds";
+        else if (mLeft > 0) reason = $"Monthly limit reached. Next slot in {mLeft} seconds";
+        else                reason = $"Not eligible to enroll right now (contract rules)";
+    }
+
+    // Normalize output
+    return Results.Ok(new {
+        address             = addr,
+        can_enroll          = canEnroll,
+        weekly_seconds_left = wLeft,
+        monthly_seconds_left= mLeft,
+        weekly_count        = (int)(limits?.WeeklyCount  ?? 0),
+        monthly_count       = (int)(limits?.MonthlyCount ?? 0),
+        weekly_limit        = (int)(limits?.WeeklyLimit  ?? 0),
+        monthly_limit       = (int)(limits?.MonthlyLimit ?? 0),
+        weekly_reset_at     = limits?.WeeklyResetAt  is null ? (long?)null : (long)limits.WeeklyResetAt,
+        monthly_reset_at    = limits?.MonthlyResetAt is null ? (long?)null : (long)limits.MonthlyResetAt,
+        reason
+    });
+});
+
 /* ---------- HEALTH ---------- */
 app.MapGet("/health",                         () => 
     Results.Ok("OK")
@@ -657,7 +779,7 @@ app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg) 
     if (string.IsNullOrWhiteSpace(addr) || !addr.StartsWith("0x") || addr.Length != 42)
         return Results.Json(new { error = true, message = "Invalid address format" });
 
-    var rpc = cfg["Cronos:Rpc"] ?? "https://evm.cronos.org";
+    var rpc     = GetRequired(cfg, "Cronos:Rpc");
     var web3 = new Web3(rpc);
 
     try
@@ -815,7 +937,7 @@ app.MapPost("/events/created",          async (HttpRequest req, IConfiguration c
     // Optional: verify tx (skip if txHash not provided)
     if (!string.IsNullOrWhiteSpace(txHash))
     {
-        var rpc  = cfg["Cronos:Rpc"] ?? "https://evm.cronos.org";
+        var rpc     = GetRequired(cfg, "Cronos:Rpc");
         var web3 = new Nethereum.Web3.Web3(rpc);
 
         var tx = await web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(txHash);
@@ -893,7 +1015,7 @@ app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration c
         return Results.Ok(new { pushed = false, reason = "throttled" });
     bankPingThrottle[mission] = now;
 
-    var rpc = cfg["Cronos:Rpc"] ?? "https://evm.cronos.org";
+    var rpc     = GetRequired(cfg, "Cronos:Rpc");
     var web3 = new Nethereum.Web3.Web3(rpc);
 
     // Verify the tx exists, is to this mission, and succeeded
