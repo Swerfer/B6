@@ -276,7 +276,12 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
 
     // status < 5  → Pending/Enrolling/Arming/Active/Paused (not ended)
     var sql = @"
-      select
+    with counts as (
+        select mission_address, count(*)::int as enrolled
+        from mission_enrollments
+        group by mission_address
+    )
+    select
         m.mission_address,
         m.name,
         m.mission_type,
@@ -301,10 +306,10 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
         m.creator_address,
         m.all_refunded,
         coalesce(c.enrolled,0)       as enrolled_players
-      from missions m
-      left join counts c using (mission_address)
-      where status < 5
-      order by enrollment_end asc nulls last, mission_end asc nulls last;";
+    from missions m
+    left join counts c using (mission_address)
+    where m.status < 5
+    order by m.enrollment_end asc nulls last, m.mission_end asc nulls last;";
 
     await using var cmd = new NpgsqlCommand(sql, conn);
     await using var rd  = await cmd.ExecuteReaderAsync();
@@ -477,7 +482,7 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
     from mission_enrollments e
     join missions m using (mission_address)
     left join counts c using (mission_address)
-    where e.player_address = @p
+    where lower(e.player_address) = @p
     order by m.status asc, m.mission_end asc nulls last;
     ";
 
@@ -566,7 +571,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         coalesce(c.enrolled,0)       as enrolled_players
       from missions m
       left join counts c using (mission_address)
-      where mission_address = @a;";
+      where lower(mission_address) = @a;";
 
     await using var core = new NpgsqlCommand(coreSql, conn);
     core.Parameters.AddWithValue("a", addr);
@@ -605,7 +610,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
     var enSql = @"
       select player_address, refunded, coalesce(refund_tx_hash,'') as refund_tx_hash, enrolled_at
       from mission_enrollments
-      where mission_address = @a
+      where lower(mission_address) = @a
       order by enrolled_at asc nulls last;";
     await using var enCmd = new NpgsqlCommand(enSql, conn);
     enCmd.Parameters.AddWithValue("a", addr);
@@ -629,7 +634,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
     var rSql = @"
       select round_number, winner_address, payout_wei::text as payout_wei, block_number, tx_hash, created_at
       from mission_rounds
-      where mission_address = @a
+      where lower(mission_address) = @a
       order by round_number asc;";
     await using var rCmd = new NpgsqlCommand(rSql, conn);
     rCmd.Parameters.AddWithValue("a", addr);

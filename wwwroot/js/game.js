@@ -1349,8 +1349,6 @@ function        unlockScroll(){
 
 function        resetMissionLocalState() {
   // Clear cross-mission, “no-regress” caches so pills won’t bleed
-  __lastChainPlayers = 0;
-  __lastChainCroWei  = "0";
   optimisticGuard    = { untilMs: 0, players: 0, croNow: "0" };
   __pillsHydrateBusy = false;
   __pillsHydrateLast = 0;
@@ -2438,11 +2436,10 @@ async function  handleEnrollClick       (mission){
     try {
       const feeWei = String(mission.enrollment_amount_wei || "0");
 
-      // base before-join count (array if present, or last chain truth)
-      const beforeJoined = Math.max(
-        Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0,
-        Number(__lastChainPlayers || 0)
-      );
+      // base before-join count from snapshot fields only
+      const beforeJoined = (mission?.enrolled_players != null)
+        ? Number(mission.enrolled_players)
+        : (Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0);
 
       // remember optimistic values (longer window so DB/indexer can catch up)
       optimisticGuard = {
@@ -2581,9 +2578,6 @@ async function  handleBankItClick       (mission){
 
     // Quick chain hydrate to lock in truth (still fine if slow)
     try { rehydratePillsFromServer(mission, "bank:post-tx").catch(()=>{}); } catch {}
-
-    // 3) (optional but okay) quick chain rehydrate; the optimistic Paused UI stays visible
-    rehydratePillsFromServer(mission, "post-callRound", true).catch(()=>{});
 
     // 4) (keep) quick reconcile so DB fields catch up
     await refreshOpenStageFromServer(2);
