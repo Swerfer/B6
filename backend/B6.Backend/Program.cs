@@ -232,6 +232,164 @@ app.MapPost("/push/subscribe",          async (PushSubscribeDto dto, PushFanout 
 /***********************
  *  MISSIONS – READ API
  ***********************/
+
+// GET /missions/all  → full snapshot for the All Missions page (DB, no RPC)
+app.MapGet("/missions/all",             async (IConfiguration cfg) => {
+    var cs = cfg.GetConnectionString("Db");
+    await using var conn = new NpgsqlConnection(cs);
+    await conn.OpenAsync();
+
+    var sql = @"
+    with counts as (
+      select mission_address, count(*)::int as enrolled
+      from mission_enrollments
+      group by mission_address
+    )
+    select
+      m.mission_address,
+      m.name,
+      m.mission_type,
+      m.status,
+      m.enrollment_start,
+      m.enrollment_end,
+      m.enrollment_amount_wei::text  as enrollment_amount_wei,
+      m.enrollment_min_players,
+      m.enrollment_max_players,
+      m.mission_start,
+      m.mission_end,
+      m.mission_rounds_total,
+      m.round_count,
+      m.cro_initial_wei::text        as cro_initial_wei,
+      m.cro_start_wei::text          as cro_start_wei,
+      m.cro_current_wei::text        as cro_current_wei,
+      m.pause_timestamp,
+      m.updated_at,
+      m.mission_created,
+      m.round_pause_secs,
+      m.last_round_pause_secs,
+      m.creator_address,
+      m.all_refunded,
+      coalesce(c.enrolled,0)         as enrolled_players
+    from missions m
+    left join counts c using (mission_address)
+    order by m.mission_created desc, m.mission_address desc;";
+
+    await using var cmd = new NpgsqlCommand(sql, conn);
+    await using var rd  = await cmd.ExecuteReaderAsync();
+
+    var list = new List<object>();
+    while (await rd.ReadAsync())
+    {
+        list.Add(new {
+            mission_address        = rd["mission_address"] as string,
+            name                   = rd["name"] as string,
+            mission_type           = Convert.ToInt16(rd["mission_type"]),
+            status                 = Convert.ToInt16(rd["status"]),
+            enrollment_start       = Convert.ToInt64(rd["enrollment_start"]),
+            enrollment_end         = Convert.ToInt64(rd["enrollment_end"]),
+            enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
+            enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
+            enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
+            mission_start          = Convert.ToInt64(rd["mission_start"]),
+            mission_end            = Convert.ToInt64(rd["mission_end"]),
+            mission_rounds_total   = Convert.ToInt16(rd["mission_rounds_total"]),
+            round_count            = Convert.ToInt16(rd["round_count"]),
+            cro_start_wei          = rd["cro_start_wei"]?.ToString(),
+            cro_current_wei        = rd["cro_current_wei"]?.ToString(),
+            cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),
+            pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
+            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
+            mission_created        = Convert.ToInt64(rd["mission_created"]),
+            round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
+            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
+            creator_address        = rd["creator_address"] as string,
+            all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
+        });
+    }
+
+    return Results.Ok(list);
+});
+
+app.MapGet("/missions/all/{n}",         async (int n, IConfiguration cfg) => {
+    var cs = cfg.GetConnectionString("Db");
+    await using var conn = new NpgsqlConnection(cs);
+    await conn.OpenAsync();
+
+    var sql = @"
+    with counts as (
+      select mission_address, count(*)::int as enrolled
+      from mission_enrollments
+      group by mission_address
+    )
+    select
+      m.mission_address,
+      m.name,
+      m.mission_type,
+      m.status,
+      m.enrollment_start,
+      m.enrollment_end,
+      m.enrollment_amount_wei::text  as enrollment_amount_wei,
+      m.enrollment_min_players,
+      m.enrollment_max_players,
+      m.mission_start,
+      m.mission_end,
+      m.mission_rounds_total,
+      m.round_count,
+      m.cro_initial_wei::text        as cro_initial_wei,
+      m.cro_start_wei::text          as cro_start_wei,
+      m.cro_current_wei::text        as cro_current_wei,
+      m.pause_timestamp,
+      m.updated_at,
+      m.mission_created,
+      m.round_pause_secs,
+      m.last_round_pause_secs,
+      m.creator_address,
+      m.all_refunded,
+      coalesce(c.enrolled,0)         as enrolled_players
+    from missions m
+    left join counts c using (mission_address)
+    order by m.mission_created desc, m.mission_address desc 
+    limit @n;";
+
+    await using var cmd = new NpgsqlCommand(sql, conn);
+    cmd.Parameters.AddWithValue("n", n);
+    await using var rd  = await cmd.ExecuteReaderAsync();
+
+    var list = new List<object>();
+    while (await rd.ReadAsync())
+    {
+        list.Add(new {
+            mission_address        = rd["mission_address"] as string,
+            name                   = rd["name"] as string,
+            mission_type           = Convert.ToInt16(rd["mission_type"]),
+            status                 = Convert.ToInt16(rd["status"]),
+            enrollment_start       = Convert.ToInt64(rd["enrollment_start"]),
+            enrollment_end         = Convert.ToInt64(rd["enrollment_end"]),
+            enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
+            enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
+            enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
+            mission_start          = Convert.ToInt64(rd["mission_start"]),
+            mission_end            = Convert.ToInt64(rd["mission_end"]),
+            mission_rounds_total   = Convert.ToInt16(rd["mission_rounds_total"]),
+            round_count            = Convert.ToInt16(rd["round_count"]),
+            cro_start_wei          = rd["cro_start_wei"]?.ToString(),
+            cro_current_wei        = rd["cro_current_wei"]?.ToString(),
+            cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),
+            pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
+            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
+            mission_created        = Convert.ToInt64(rd["mission_created"]),
+            round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
+            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
+            creator_address        = rd["creator_address"] as string,
+            all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
+        });
+    }
+
+    return Results.Ok(list);
+});
+
 app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new NpgsqlConnection(cs);
@@ -283,28 +441,28 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => {
         list.Add(new {
             mission_address        = rd["mission_address"] as string,
             name                   = rd["name"] as string,
-            mission_type           = (short) rd["mission_type"],
-            status                 = (short) rd["status"],
-            enrollment_start       = (long)  rd["enrollment_start"],
-            enrollment_end         = (long)  rd["enrollment_end"],
-            enrollment_amount_wei  = (string)rd["enrollment_amount_wei"],
-            enrollment_min_players = (short) rd["enrollment_min_players"],
-            enrollment_max_players = (short) rd["enrollment_max_players"],
-            mission_start          = (long)  rd["mission_start"],
-            mission_end            = (long)  rd["mission_end"],
-            mission_rounds_total   = (short) rd["mission_rounds_total"],
-            round_count            = (short) rd["round_count"],
-            cro_start_wei          = (string)rd["cro_start_wei"],
-            cro_current_wei        = (string)rd["cro_current_wei"],
-            cro_initial_wei        = (string)rd["cro_initial_wei"],
-            pause_timestamp        = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
+            mission_type           = Convert.ToInt16(rd["mission_type"]),
+            status                 = Convert.ToInt16(rd["status"]),
+            enrollment_start       = Convert.ToInt64(rd["enrollment_start"]),
+            enrollment_end         = Convert.ToInt64(rd["enrollment_end"]),
+            enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
+            enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
+            enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
+            mission_start          = Convert.ToInt64(rd["mission_start"]),
+            mission_end            = Convert.ToInt64(rd["mission_end"]),
+            mission_rounds_total   = Convert.ToInt16(rd["mission_rounds_total"]),
+            round_count            = Convert.ToInt16(rd["round_count"]),
+            cro_start_wei          = rd["cro_start_wei"]?.ToString(),
+            cro_current_wei        = rd["cro_current_wei"]?.ToString(),
+            cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),
+            pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
             updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
-            mission_created        = (long)  rd["mission_created"],
-            round_pause_secs       = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
-            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],
+            mission_created        = Convert.ToInt64(rd["mission_created"]),
+            round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
+            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
             creator_address        = rd["creator_address"] as string,
             all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
-            enrolled_players       = (int)   rd["enrolled_players"]
+            enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
         });
     }
 
@@ -362,28 +520,28 @@ app.MapGet("/missions/joinable",        async (IConfiguration cfg) => {
         list.Add(new {
             mission_address        = rd["mission_address"] as string,
             name                   = rd["name"] as string,
-            mission_type           = (short) rd["mission_type"],
-            status                 = (short) rd["status"],
-            enrollment_start       = (long)  rd["enrollment_start"],
-            enrollment_end         = (long)  rd["enrollment_end"],
-            enrollment_amount_wei  = (string)rd["enrollment_amount_wei"],
-            enrollment_min_players = (short) rd["enrollment_min_players"],
-            enrollment_max_players = (short) rd["enrollment_max_players"],
-            mission_start          = (long)  rd["mission_start"],
-            mission_end            = (long)  rd["mission_end"],
-            mission_rounds_total   = (short) rd["mission_rounds_total"],
-            round_count            = (short) rd["round_count"],            
-            cro_start_wei          = (string)rd["cro_start_wei"],          
-            cro_current_wei        = (string)rd["cro_current_wei"],          
-            cro_initial_wei        = (string)rd["cro_initial_wei"],          
-            pause_timestamp        = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
-            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),        
-            mission_created        = (long)  rd["mission_created"],
-            round_pause_secs       = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
-            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],       
-            creator_address        = rd["creator_address"] as string,      
+            mission_type           = Convert.ToInt16(rd["mission_type"]),
+            status                 = Convert.ToInt16(rd["status"]),
+            enrollment_start       = Convert.ToInt64(rd["enrollment_start"]),
+            enrollment_end         = Convert.ToInt64(rd["enrollment_end"]),
+            enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
+            enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
+            enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
+            mission_start          = Convert.ToInt64(rd["mission_start"]),
+            mission_end            = Convert.ToInt64(rd["mission_end"]),
+            mission_rounds_total   = Convert.ToInt16(rd["mission_rounds_total"]),
+            round_count            = Convert.ToInt16(rd["round_count"]),
+            cro_start_wei          = rd["cro_start_wei"]?.ToString(),
+            cro_current_wei        = rd["cro_current_wei"]?.ToString(),
+            cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),
+            pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
+            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
+            mission_created        = Convert.ToInt64(rd["mission_created"]),
+            round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
+            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
+            creator_address        = rd["creator_address"] as string,
             all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
-            enrolled_players       = (int)   rd["enrolled_players"]
+            enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
         });
     }
 
@@ -399,55 +557,45 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
     await conn.OpenAsync();
 
     var sql = @"
-    with counts as (
-        select mission_address, count(*)::int as enrolled
-        from mission_enrollments
-        group by mission_address
-    )
-    select
-        m.mission_address,
-        m.name,
-        m.mission_type,
-        m.status,
-        m.enrollment_start,
-        m.enrollment_end,
-        m.enrollment_amount_wei::text  as enrollment_amount_wei,
-        m.enrollment_min_players,
-        m.enrollment_max_players,
-        m.mission_start,
-        m.mission_end,
-        m.mission_rounds_total,
-        m.round_count,                               
-        m.cro_initial_wei::text      as cro_initial_wei, 
-        m.cro_start_wei::text        as cro_start_wei,  
-        m.cro_current_wei::text      as cro_current_wei, 
-        m.pause_timestamp,                            
-        m.updated_at,                               
-        m.mission_created,  
-        m.round_pause_secs,
-        m.last_round_pause_secs,                          
-        m.creator_address,                           
-        m.all_refunded,                          
-        coalesce(c.enrolled,0) as enrolled_players,
-        case 
-          when m.status >= 5 then
-            case
-              when m.all_refunded is true then 'all_refunded'
-              when coalesce(c.enrolled,0) < m.enrollment_min_players then 'not_enough_players'
-              when m.round_count = 0 then 'no_rounds_played'
-              else 'ended'
-            end
-          else null
-        end as failure_reason,
-        e.enrolled_at,
-        e.refunded,
-        e.refund_tx_hash
-    from mission_enrollments e
-    join missions m using (mission_address)
-    left join counts c using (mission_address)
-    where lower(e.player_address) = @p
-    order by m.status asc, m.mission_end asc nulls last;
-    ";
+        WITH counts AS (
+            SELECT mission_address, COUNT(*)::int AS enrolled
+            FROM mission_enrollments
+            GROUP BY mission_address
+        ),
+        player_missions AS (
+            SELECT DISTINCT mission_address
+            FROM mission_enrollments
+            WHERE lower(player_address) = lower(trim(@p))
+        )
+        SELECT
+            m.mission_address,
+            m.name,
+            m.mission_type,
+            m.status,
+            m.enrollment_start,
+            m.enrollment_end,
+            m.enrollment_amount_wei::text  AS enrollment_amount_wei,
+            m.enrollment_min_players,
+            m.enrollment_max_players,
+            m.mission_start,
+            m.mission_end,
+            m.mission_rounds_total,
+            m.round_count,
+            m.cro_start_wei::text          AS cro_start_wei,
+            m.cro_current_wei::text        AS cro_current_wei,
+            m.cro_initial_wei::text        AS cro_initial_wei,
+            m.pause_timestamp,
+            m.updated_at,
+            m.mission_created,
+            m.round_pause_secs,
+            m.last_round_pause_secs,
+            m.creator_address,
+            m.all_refunded,
+            COALESCE(c.enrolled,0)         AS enrolled_players
+        FROM missions m
+        JOIN player_missions pm USING (mission_address)
+        LEFT JOIN counts c USING (mission_address)
+        ORDER BY m.updated_at DESC;";
 
     await using var cmd = new NpgsqlCommand(sql, conn);
     cmd.Parameters.AddWithValue("p", addr);
@@ -457,35 +605,30 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
     while (await rd.ReadAsync())
     {
         list.Add(new {
-            mission_address       = rd["mission_address"] as string,
-            name                  = rd["name"] as string,
-            mission_type          = (short) rd["mission_type"],
-            status                = (short) rd["status"],
-            enrollment_start      = (long)  rd["enrollment_start"],
-            enrollment_end        = (long)  rd["enrollment_end"],
-            enrollment_amount_wei = (string)rd["enrollment_amount_wei"],
-            enrollment_max_players= (short) rd["enrollment_max_players"],
-            mission_start         = (long)  rd["mission_start"],
-            mission_end           = (long)  rd["mission_end"],
-            mission_rounds_total  = (short) rd["mission_rounds_total"],
-            round_count           = (short) rd["round_count"],
-            cro_start_wei         = (string)rd["cro_start_wei"],
-            cro_current_wei       = (string)rd["cro_current_wei"],
-            cro_initial_wei       = (string)rd["cro_initial_wei"],
-            pause_timestamp       = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
-            updated_at            = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
-            mission_created       = (long)  rd["mission_created"],
-            round_pause_secs      = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
-            last_round_pause_secs = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],
-            creator_address       = rd["creator_address"] as string,
-            all_refunded          = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
-            enrolled_players      = (int)   rd["enrolled_players"],      
-            failure_reason        = rd["failure_reason"] as string,     
-            enrolled_at           = rd["enrolled_at"] is DBNull
-                ? (long?)null
-                : ToUnixSeconds(((DateTime) rd["enrolled_at"]).ToUniversalTime()),
-            refunded              = (bool)  rd["refunded"],
-            refund_tx_hash        = rd["refund_tx_hash"] as string
+            mission_address        = rd["mission_address"] as string,
+            name                   = rd["name"] as string,
+            mission_type           = Convert.ToInt16(rd["mission_type"]),
+            status                 = Convert.ToInt16(rd["status"]),
+            enrollment_start       = Convert.ToInt64(rd["enrollment_start"]),
+            enrollment_end         = Convert.ToInt64(rd["enrollment_end"]),
+            enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
+            enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
+            enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
+            mission_start          = Convert.ToInt64(rd["mission_start"]),
+            mission_end            = Convert.ToInt64(rd["mission_end"]),
+            mission_rounds_total   = Convert.ToInt16(rd["mission_rounds_total"]),
+            round_count            = Convert.ToInt16(rd["round_count"]),
+            cro_start_wei          = rd["cro_start_wei"]?.ToString(),
+            cro_current_wei        = rd["cro_current_wei"]?.ToString(),
+            cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),
+            pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
+            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
+            mission_created        = Convert.ToInt64(rd["mission_created"]),
+            round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
+            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
+            creator_address        = rd["creator_address"] as string,
+            all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
         });
     }
 
@@ -534,7 +677,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
         coalesce(c.enrolled,0)       as enrolled_players
       from missions m
       left join counts c using (mission_address)
-      where lower(mission_address) = @a;";
+      where lower(m.mission_address) = lower(trim(@a));";
 
     await using var core = new NpgsqlCommand(coreSql, conn);
     core.Parameters.AddWithValue("a", addr);
@@ -542,30 +685,30 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
     if (!await rd.ReadAsync()) return Results.NotFound("Mission not found");
 
     var mission = new {
-        mission_address        = rd["mission_address"] as string,
-        name                   = rd["name"] as string,
-        mission_type           = (short) rd["mission_type"],
-        status                 = (short) rd["status"],
-        enrollment_start       = (long)  rd["enrollment_start"],
-        enrollment_end         = (long)  rd["enrollment_end"],
-        enrollment_amount_wei  = (string)rd["enrollment_amount_wei"],
-        enrollment_min_players = (short) rd["enrollment_min_players"],
-        enrollment_max_players = (short) rd["enrollment_max_players"],
-        mission_start          = (long)  rd["mission_start"],
-        mission_end            = (long)  rd["mission_end"],
-        mission_rounds_total   = (short) rd["mission_rounds_total"],
-        round_count            = (short) rd["round_count"],
-        cro_start_wei          = (string)rd["cro_start_wei"],
-        cro_current_wei        = (string)rd["cro_current_wei"],
-        cro_initial_wei        = (string)rd["cro_initial_wei"],
-        pause_timestamp        = rd["pause_timestamp"] is DBNull ? null : (long?) rd["pause_timestamp"],
-        updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
-        mission_created        = (long)  rd["mission_created"],
-        round_pause_secs       = rd["round_pause_secs"] is DBNull ? null : (int?) rd["round_pause_secs"],
-        last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? null : (int?) rd["last_round_pause_secs"],
-        creator_address        = rd["creator_address"] as string,
-        all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
-        enrolled_players       = (int)   rd["enrolled_players"]
+            mission_address        = rd["mission_address"] as string,
+            name                   = rd["name"] as string,
+            mission_type           = Convert.ToInt16(rd["mission_type"]),
+            status                 = Convert.ToInt16(rd["status"]),
+            enrollment_start       = Convert.ToInt64(rd["enrollment_start"]),
+            enrollment_end         = Convert.ToInt64(rd["enrollment_end"]),
+            enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
+            enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
+            enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
+            mission_start          = Convert.ToInt64(rd["mission_start"]),
+            mission_end            = Convert.ToInt64(rd["mission_end"]),
+            mission_rounds_total   = Convert.ToInt16(rd["mission_rounds_total"]),
+            round_count            = Convert.ToInt16(rd["round_count"]),
+            cro_start_wei          = rd["cro_start_wei"]?.ToString(),
+            cro_current_wei        = rd["cro_current_wei"]?.ToString(),
+            cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),
+            pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
+            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
+            mission_created        = Convert.ToInt64(rd["mission_created"]),
+            round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
+            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
+            creator_address        = rd["creator_address"] as string,
+            all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
     };
     await rd.CloseAsync();
 
@@ -607,12 +750,12 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
     while (await rRd.ReadAsync())
     {
         rounds.Add(new {
-            round_number  = (short) rRd["round_number"],
-            winner_address= rRd["winner_address"] as string,
-            payout_wei    = (string) rRd["payout_wei"],
-            block_number  = rRd["block_number"] is DBNull ? null : (long?) rRd["block_number"],
-            tx_hash       = rRd["tx_hash"] as string,
-            created_at    = ToUnixSeconds(((DateTime) rRd["created_at"]).ToUniversalTime())
+            round_number   = Convert.ToInt16(rRd["round_number"]),
+            winner_address = rRd["winner_address"] as string,
+            payout_wei     = rRd["payout_wei"]?.ToString(),
+            block_number   = rRd["block_number"] is DBNull ? (long?)null : Convert.ToInt64(rRd["block_number"]),
+            tx_hash        = rRd["tx_hash"] as string,
+            created_at     = ToUnixSeconds(((DateTime) rRd["created_at"]).ToUniversalTime())
         });
     }
 

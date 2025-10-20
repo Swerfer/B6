@@ -21,6 +21,14 @@ const toLc = (s) => (s ? String(s).toLowerCase() : "");
 
 // ------------------------ GET: snapshots ----------------------------
 
+/** GET /missions/all/{n} — latest N missions (DB) */
+export async function getMissionsAll(limit = 100) {
+  // hard-cap to 100 on the client as requested
+  const n = Math.min(Math.max(Number(limit) || 0, 1), 100);
+  const r = await apiFetch(`/missions/all/${n}`);
+  return j(r);
+}
+
 /** GET /missions/not-ended — list of active/upcoming missions */
 export async function   getMissionsNotEnded() {
   const r = await apiFetch("/missions/not-ended");

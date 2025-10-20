@@ -228,6 +228,40 @@ body.scroll-lock{
   justify-content: flex-end;
 }
 
+/* All Missions filter popover */
+#myFilters { 
+  position: relative; 
+}
+
+#myFilters .filter-pop {
+  position: absolute;
+  top: 1rem;
+  right: 0;
+  z-index: 20;
+  background: rgba(8,14,20,.96);
+  border: 1px solid rgba(62,211,245,.35);
+  border-radius: .5rem;
+  padding: .6rem .75rem;
+  min-width: 220px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.35);
+}
+
+#myFilters .filter-pop h6{
+  font-size: .9rem;
+  margin: 0 0 .35rem 0;
+}
+
+#myFilters .filter-pop .form-check{
+  margin: .2rem 0;
+}
+
+#myFilters .filter-actions{
+  margin-top: .5rem;
+  display: flex;
+  gap: .5rem;
+  justify-content: flex-end;
+}
+
 /* When the game stage is visible, let the stage viewport fill the window
    so the vault image can show under the fixed header and footer. */
 #gameMain.stage-mode #stageViewport{

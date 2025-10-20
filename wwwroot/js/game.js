@@ -48,6 +48,7 @@ import {
 import {
   getMission,              
   getMissionDebounced,
+  getMissionsAll,
   getMissionsNotEnded,      
   getMissionsJoinable,   
   getPlayerMissions,      
@@ -124,6 +125,9 @@ let   __allMissionsCache    = [];     // last fetched list (raw objects)
 let   __allFilterOpen       = false;
 let   __allSelected         = null;   // null  → all statuses; otherwise Set<number> of allowed statuses
 let __allMissionsRenderVersion = 0;
+// My missions cache & filters:
+let   __myMissionsCache     = [];     // last fetched list (raw objects)
+let   __mySelected          = null;   // null → all; otherwise Set<number> of statuses
 // Realtime:
 let   __lastPushTs          = 0;      // updated on any hub push we care about
 // Optimistic:
@@ -282,6 +286,64 @@ function        buildAllFiltersUI(){
     __allFilterOpen = false;
     pop.style.display = "none";
     applyAllMissionFiltersAndRender();
+  });
+}
+
+function        applyMyMissionFiltersAndRender(){
+  let list = __myMissionsCache || [];
+  if (__mySelected instanceof Set){
+    list = list.filter(m => __mySelected.has(Number(m.status)));
+  }
+  list = sortAllMissions(list);     // reuse same sorter
+  renderMyMissions(list);           // existing renderer
+  startJoinableTicker();            // keep countdowns ticking
+}
+
+function        buildMyFiltersUI(){
+  const host = document.getElementById("myFilters");     // <div id="myFilters">…</div>
+  const btn  = document.getElementById("filterMyBtn");   // <button id="filterMyBtn">…</button>
+  if (!host || !btn) return;
+
+  const pop = host.querySelector(".filter-pop");
+
+  // Toggle popover
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    host.__open = !host.__open;
+    pop.style.display = host.__open ? "block" : "none";
+  });
+
+  // Close when clicking outside button+popover
+  const close = () => { host.__open = false; pop.style.display = "none"; };
+  document.addEventListener("click", (e) => {
+    if (!host.__open) return;
+    const t = e.target;
+    if (t === btn || host.contains(t)) return;
+    close();
+  });
+  pop.addEventListener("click", (e) => e.stopPropagation());
+
+  // Reset
+  host.querySelector("#fltMyReset")?.addEventListener("click", () => {
+    __mySelected = null;
+    pop.querySelectorAll("input[type=checkbox]").forEach(i => i.checked = false);
+    close();
+    applyMyMissionFiltersAndRender();
+  });
+
+  // Apply
+  host.querySelector("#fltMyApply")?.addEventListener("click", () => {
+    const picked = new Set();
+    pop.querySelectorAll("input[type=checkbox]:checked").forEach(i => {
+      String(i.dataset.status || "")
+        .split(",")
+        .map(s => Number(s.trim()))
+        .filter(n => !isNaN(n))
+        .forEach(v => picked.add(v));
+    });
+    __mySelected = picked.size ? picked : null;
+    close();
+    applyMyMissionFiltersAndRender();
   });
 }
 
@@ -462,7 +524,10 @@ function        showOnlySection(sectionId) {
     disableTemporarily(els.refreshAllBtn, REFRESH_THROTTLE_MS);
   } else if (sectionId === "joinableSection") {
     disableTemporarily(els.refreshJoinableBtn, REFRESH_THROTTLE_MS);
+  } else if (sectionId === "myMissionsSection") {
+    disableTemporarily(els.refreshMyBtn, REFRESH_THROTTLE_MS);
   }
+
 }
 
 // Cleanup:
@@ -713,13 +778,13 @@ function        failureReasonFor(mission){
   return null;
 }
 
-function        prettyStatusForList(status, md, failedRefundCount = 0) { // status: number (0..7), md: Mission.MissionData, failedRefundCount?: number
+function        prettyStatusForList(status, md, allRefunded) { // status: number (0..7), md: Mission.MissionData, failedRefundCount?: number
   // Enum: 0 Pending, 1 Enrolling, 2 Arming, 3 Active, 4 Paused, 5 PartlySuccess, 6 Success, 7 Failed
   if (status === 7) { // Failed
     if (!md || (Array.isArray(md.players) && md.players.length === 0)) {
       return { label: "Cancelled", css: "badge-cancelled", title: "No enrollments; game didn’t run." };
     }
-    if (failedRefundCount > 0) {
+    if (!allRefunded) {
       return { label: "Refunds pending", css: "badge-refund-pending", title: "Some refunds are still being retried." };
     }
     return { label: "Refunded", css: "badge-refunded", title: "All enrollments have been refunded." };
@@ -1554,46 +1619,56 @@ function scheduleDetailRefresh(reset = false) {
 
 // #region API wrappers
 
-async function  fetchAndRenderAllMissions() {
+async function  fetchAndRenderAllMissions () {
   const now = Date.now();
   if (__allListInflight) return __allListInflight;
   if ((now - __allListLastDone) < ALL_LIST_COOLDOWN_MS) { return; }
 
   const p = (async () => {
     try {
-      const list = await getMissionsNotEnded();
+      // DB-read: latest 100 missions
+      const list = await getMissionsAll(100);
 
+      // Keep the same normalized shape the UI already uses
       const missions = (Array.isArray(list) ? list : []).map(m => {
-        const currentPlayers =
-          (m.enrolled_players != null ? Number(m.enrolled_players) : null) ??
-          (Array.isArray(m.enrollments) ? m.enrollments.length : null) ?? 0;
 
         const mission_duration =
           (m.mission_start && m.mission_end) ? (Number(m.mission_end) - Number(m.mission_start)) : 0;
 
         return {
-          mission_address: m.mission_address,
-          status:          Number(m.status),
-          name:            m.name,
-          current_players:  currentPlayers,
-          min_players:      m.enrollment_min_players,
-          max_players:      m.enrollment_max_players,
-          rounds:           m.round_count,
-          max_rounds:       m.mission_rounds_total,
-          mission_duration,
-          mission_fee:      m.enrollment_amount_wei,
-          enrollment_amount_wei: m.enrollment_amount_wei,
-          mission_start:         m.mission_start,
-          mission_end:           m.mission_end,
-          mission_rounds_total:  m.mission_rounds_total,
-          round_count:           m.round_count
+          mission_address:        m.mission_address,
+          name:                   m.name,
+          type:                   m.mission_type,
+          status:                 Number(m.status),
+          enrollment_start:       m.enrollment_start,
+          enrollment_end:         m.enrollment_end,
+          enrollment_amount_wei:  m.enrollment_amount_wei,
+          enrollment_min_players: m.enrollment_min_players,
+          enrollment_max_players: m.enrollment_max_players,
+          mission_start:          m.mission_start, 
+          mission_end:            m.mission_end,
+          mission_rounds_total:   m.mission_rounds_total,
+          round_count:            m.round_count,
+          cro_initial_wei:        m.cro_initial_wei,
+          cro_start_wei:          m.cro_start_wei,
+          cro_current_wei:        m.cro_current_wei,
+          pause_timestamp:        m.pause_timestamp,
+          updated_at:             m.updated_at,
+          mission_created:        m.mission_created,
+          round_pause_secs:       m.round_pause_secs,
+          last_round_pause_secs:  m.last_round_pause_secs,
+          creator_address:        m.creator_address,
+          all_refunded:           m.all_refunded,
+          enrolled_players:       m.enrolled_players,
+          mission_duration:       mission_duration,
         };
       });
 
       __allMissionsCache = missions;
-      applyAllMissionFiltersAndRender();
+      console.log("Fetched All Missions:", missions);
+      applyAllMissionFiltersAndRender();   // existing filters continue to apply
 
-      // Snapshot + SignalR only
+      // Snapshot + SignalR only (unchanged)
       startJoinableTicker();
     } catch (e) {
       console.error(e);
@@ -1610,11 +1685,55 @@ async function  fetchAndRenderAllMissions() {
   finally { __allListInflight = null; }
 }
 
-async function  apiJoinable(){
+async function  fetchAndRenderMyMissions  () {
+  try {
+    const me = (walletAddress || "").toLowerCase();
+    if (!me) { showAlert("Connect your wallet to load your missions.", "warning"); return; }
+
+    const list = await apiPlayerMissions(me);           // already in file
+    // Keep the same normalized shape the list renderer expects
+    const missions = (Array.isArray(list) ? list : []).map(m => ({
+      mission_address:        m.mission_address,
+      name:                   m.name,
+      status:                 Number(m.status),
+      enrollment_start:       m.enrollment_start,
+      enrollment_end:         m.enrollment_end,
+      enrollment_amount_wei:  m.enrollment_amount_wei,
+      enrollment_min_players: m.enrollment_min_players,
+      enrollment_max_players: m.enrollment_max_players,
+      mission_start:          m.mission_start,
+      mission_end:            m.mission_end,
+      mission_rounds_total:   m.mission_rounds_total ?? m.missionRounds ?? 0,
+      round_count:            m.round_count,
+      cro_initial_wei:        m.cro_initial_wei,
+      cro_start_wei:          m.cro_start_wei,
+      cro_current_wei:        m.cro_current_wei,
+      pause_timestamp:        m.pause_timestamp,
+      updated_at:             m.updated_at,
+      mission_created:        m.mission_created,
+      round_pause_secs:       m.round_pause_secs,
+      last_round_pause_secs:  m.last_round_pause_secs,
+      creator_address:        m.creator_address,
+      all_refunded:           m.all_refunded,
+      enrolled_players:       (m.enrolled_players != null)
+                                ? m.enrolled_players
+                                : (Array.isArray(m.enrollments) ? m.enrollments.length : 0),
+    }));
+
+    __myMissionsCache = missions;
+    applyMyMissionFiltersAndRender();
+  } catch (e) {
+    console.error(e);
+    showAlert("Failed to load My Missions.", "error");
+    renderMyMissions([]);
+  }
+}
+
+async function  apiJoinable               (){
   return getMissionsJoinable();
 }
 
-async function  apiPlayerMissions(addr){
+async function  apiPlayerMissions         (addr){
   const a = String(addr || "").toLowerCase();
   return getPlayerMissions(a);
 }
@@ -1625,7 +1744,7 @@ async function  apiPlayerMissions(addr){
  * - When not in game stage: no caching is stored (always fresh fetch).
  * - Force calls refresh the cache and reset the 15s window.
  */
-async function  apiMission(addr, force = false) {
+async function  apiMission                (addr, force = false) {
   const lcAddr  = String(addr || "").toLowerCase();
   const now     = Date.now();
   const onStage = !!(document.getElementById('gameMain')?.classList.contains('stage-mode'));
@@ -1809,6 +1928,7 @@ const els = {
 
   myMissionsList:           document.getElementById("myMissionsList"),
   myMissionsEmpty:          document.getElementById("myMissionsEmpty"),
+  refreshMyBtn:             document.getElementById("refreshMyBtn"),
 
   missionDetail:            document.getElementById("missionDetailSection"),
   missionTitle:             document.getElementById("missionTitle"),
@@ -3493,44 +3613,27 @@ async function  renderStageEndedPanelIfNeeded(mission){
 
 // #region Lists & detail screens
 
-function        renderAllMissions       (missions = []) {
-  const ul = document.getElementById("allMissionsList");
-  const empty = document.getElementById("allMissionsEmpty");
-  if (!ul || !empty) return;
-  ul.classList.add("card-grid");
-  ul.innerHTML = "";
-  if (!missions.length) {
-    empty.style.display = "";
-    return;
-  }
-  empty.style.display = "none";
+function        buildMissionListCard    (m){
+  const li = document.createElement("li");
+  li.className = "mission-card";
 
-  // newest first (factory returns oldest→newest; we also reversed at fetch time, but
-  // keep this guard so we never regress)
-  const list = missions;
+  // live status (same approach used in All Missions)
+  const stNum   = Number(m.status ?? 0);
+  const mdShim  = { players: Array.from({ length: Number(m.enrolled_players || 0) }) };
+  const pretty  = prettyStatusForList(stNum, mdShim, m.all_refunded);
 
-  for (const m of list) {
-    const li = document.createElement("li");
-    li.className = "mission-card";
+  const stText  = pretty ? pretty.label : statusText(stNum);
+  const stClass = pretty ? pretty.css   : statusColorClass(stNum);
+  const stTitle = pretty ? pretty.title : "";
 
-    // live status (same concurrent approach you used already)
-    const stNum   = Number(m.status ?? 0);
-    const mdShim  = { players: Array.from({ length: Number(m.current_players || 0) }) };
-    const pretty  = prettyStatusForList(stNum, mdShim, Number(m.failed_refund_count || 0));
-
-    const stText  = pretty ? pretty.label : statusText(stNum);
-    const stClass = pretty ? pretty.css   : statusColorClass(stNum);
-    const stTitle = pretty ? pretty.title : "";
-
-    // compute “next timebox” values for the mini rows
-    const enrollStart = Number(m.enrollment_start || 0);
-    const enrollEnd   = Number(m.enrollment_end   || 0);
-    const missionStart= Number(m.mission_start    || 0);
-    const missionEnd  = Number(m.mission_end      || 0);
-
-    let timeKey1 = "", timeValAttr1 = "", timeVal1 = "—";
-    let timeKey2 = "", timeValAttr2 = "", timeVal2 = "—";
-    let timeKey3 = "", timeValAttr3 = "", timeVal3 = "—";
+  // compute “next timebox” values for the mini rows
+  const enrollStart = Number(m.enrollment_start || 0);
+  const enrollEnd   = Number(m.enrollment_end   || 0);
+  const missionStart= Number(m.mission_start    || 0);
+  const missionEnd  = Number(m.mission_end      || 0);
+  let timeKey1 = "", timeValAttr1 = "", timeVal1 = "—";
+  let timeKey2 = "", timeValAttr2 = "", timeVal2 = "—";
+  let timeKey3 = "", timeValAttr3 = "", timeVal3 = "—";
     if (stNum === 0) { // Pending
       timeKey1 = "Join from:";
       timeValAttr1 = ""; // no ticker on a fixed datetime
@@ -3567,292 +3670,219 @@ function        renderAllMissions       (missions = []) {
       timeValAttr3 = ""; // no ticker on a fixed datetime
       timeVal3 = enrollStart ? formatLocalDateTime(missionStart) : "—";
     }
+  const duration  = (m.mission_start && m.mission_end) ? (Number(m.mission_end) - Number(m.mission_start)) : 0;
+  const rounds    = Number(m.round_count || 0);
+  const maxRounds = Number(m.mission_rounds_total || 0);
+  const feeWei    = m.enrollment_amount_wei;
+  const feeCro    = weiToCro(feeWei, 2);
+  const curPlayers= Number(m.enrolled_players || 0);
+  const minPlayers= Number(m.enrollment_min_players || 0);
+  const maxPlayers= Number(m.enrollment_max_players || 0);
+  const showDuration = duration > 0;
+  const showRounds   = (rounds > 0) || (maxRounds > 0);
+  const showFee      = Number(feeWei) > 0;
+  const showPlayers  = (maxPlayers > 0) || (curPlayers > 0) || (minPlayers > 0);
+  const playersPct   = maxPlayers > 0 ? Math.min(100, Math.round((curPlayers / maxPlayers) * 100)) : 0;
 
-    // Fallbacks keep it resilient if you ever reuse this with raw mission objects
-    const maxPlayers = Number(m.max_players ?? m.enrollment_max_players ?? 0);
-    const minPlayers = Number(m.min_players ?? m.enrollment_min_players ?? 0);
-    const curPlayers = Number(m.current_players ?? 0);
-    const rounds     = Number(m.rounds ?? m.round_count ?? 0);
-    const maxRounds  = Number(m.max_rounds ?? m.mission_rounds_total ?? rounds ?? 0);
+  const statusBadges = (() => {
+    const main = `<span class="status-pill ${stClass}" title="${stTitle}">${stText}</span>`;
+    const extras = (pretty && Array.isArray(pretty.extra) && pretty.extra.length)
+      ? pretty.extra.map(e => `<span class="status-pill ${e.css}" title="${e.title||""}">${e.label}</span>`).join("")
+      : "";
+    return main + extras;
+  })();
 
-    const duration   = Number(m.mission_duration ?? ((m.mission_start && m.mission_end) ? (m.mission_end - m.mission_start) : 0));
-    const feeWei     = (m.mission_fee ?? m.enrollment_amount_wei ?? 0);
-    const feeCro     = weiToCro(String(feeWei), 2);
-
-    const playersPct = maxPlayers > 0 ? Math.min(100, Math.round((curPlayers / maxPlayers) * 100)) : 0;
-
-    // hide rules
-    const showDuration = duration > 0;
-    const showRounds   = (rounds > 0) || (maxRounds > 0);
-    const showFee      = Number(feeWei) > 0;
-    const showPlayers  = (maxPlayers > 0) || (curPlayers > 0) || (minPlayers > 0);
-
-    // build status badges (main + optional extras)
-    const statusBadges = (() => {
-      const main = `<span class="status-pill ${stClass}" title="${stTitle}">${stText}</span>`;
-      const extras = (pretty && Array.isArray(pretty.extra) && pretty.extra.length)
-        ? pretty.extra.map(e => `<span class="status-pill ${e.css}" title="${e.title||""}">${e.label}</span>`).join("")
-        : "";
-      return main + extras;
-    })();
-
-    li.className = "mission-card";
-    li.dataset.addr = (m.mission_address || "").toLowerCase();
-
-    li.innerHTML = `
-      <div class="mission-head d-flex justify-content-between align-items-center">
-        <div class="mission-title">
-          <span class="title-text">${m.name || m.mission_address}</span>
-        </div>
-        <div class="d-flex gap-2 align-items-center">${statusBadges}</div>
+  li.dataset.addr = (m.mission_address || "").toLowerCase();
+  li.innerHTML = `
+    <div class="mission-head d-flex justify-content-between align-items-center">
+      <div class="mission-title">
+        <span class="title-text">${m.name || m.mission_address}</span>
       </div>
+      <div class="d-flex gap-2 align-items-center">${statusBadges}</div>
+    </div>
 
-      ${ (showDuration || showRounds) ? `
-      <div class="mini-row">
-        ${ showDuration ? `
-          <div class="label">Duration:</div>
-          <div class="value">${formatDurationShort(duration)}</div>
-        ` : `<div class="label"></div><div class="value"></div>`}
-        ${ showRounds ? `<div class="ms-auto fw-bold">Rounds ${rounds}/${maxRounds}</div>` : ``}
-      </div>` : ``}
+    ${ (showDuration || showRounds) ? `
+    <div class="mini-row">
+      ${ showDuration ? `
+        <div class="label">Duration:</div>
+        <div class="value">${formatDurationShort(duration)}</div>
+      ` : `<div class="label"></div><div class="value"></div>`}
+      ${ showRounds ? `<div class="ms-auto fw-bold">Rounds ${rounds}/${maxRounds}</div>` : ``}
+    </div>` : ``}
 
-      ${ showFee ? `
-      <div class="mini-row">
-        <div class="label">Mission Fee:</div>
-        <div class="value">${feeCro} CRO</div>
-      </div>` : ``}
+    ${ showFee ? `
+    <div class="mini-row">
+      <div class="label">Mission Fee:</div>
+      <div class="value">${feeCro} CRO</div>
+    </div>` : ``}
 
-      ${timeKey1 && showPlayers ? `
-      <div class="mini-row">
-        <div class="label">${timeKey1}</div>
-        <div class="value"><span ${timeValAttr1}>${timeVal1}</span></div>
-      </div>` : ""}
+    ${timeKey1 ? `
+    <div class="mini-row">
+      <div class="label">${timeKey1}</div>
+      <div class="value"><span ${timeValAttr1}>${timeVal1}</span></div>
+    </div>` : ""}
 
-      ${timeKey2 && showPlayers ? `
-      <div class="mini-row">
-        <div class="label">${timeKey2}</div>
-        <div class="value"><span ${timeValAttr2}>${timeVal2}</span></div>
-      </div>` : ""}
+    ${timeKey2 ? `
+    <div class="mini-row">
+      <div class="label">${timeKey2}</div>
+      <div class="value"><span ${timeValAttr2}>${timeVal2}</span></div>
+    </div>` : ""}
 
-      ${timeKey3 && showPlayers ? `
-      <div class="mini-row">
-        <div class="label">${timeKey3}</div>
-        <div class="value"><span ${timeValAttr3}>${timeVal3}</span></div>
-      </div>` : ""}
+    ${timeKey3 ? `
+    <div class="mini-row">
+      <div class="label">${timeKey3}</div>
+      <div class="value"><span ${timeValAttr3}>${timeVal3}</span></div>
+    </div>` : ""}
 
-      ${timeKey3 && !showPlayers ? `
-      <div class="mini-row">
-        <div class="label">No details</div>
-      </div>` : ""}
-
-      ${ showPlayers ? `
-      <div class="players-line">
-        <div class="label me-2">Players</div>
-        <div class="players-count">
-          <span class="current" data-current="${curPlayers}" data-min="${minPlayers}">${curPlayers}</span>/<span class="max">${maxPlayers || "—"}</span>
-        </div>
+    ${ showPlayers ? `
+    <div class="players-line">
+      <div class="label me-2">Players</div>
+      <div class="players-count">
+        <span class="current" data-current="${curPlayers}" data-min="${minPlayers}">${curPlayers}</span>/<span class="max">${maxPlayers || "—"}</span>
       </div>
-      ${ maxPlayers > 0 ? `<div class="progress-slim"><i style="--w:${playersPct}%"></i></div>` : ``}
-      ` : ``}
-    `;
+    </div>
+    ${ maxPlayers > 0 ? `<div class="progress-slim"><i style="--w:${playersPct}%"></i></div>` : ``}
+    ` : ``}
+  `;
 
-    li.querySelector('.mission-title .title-text').title = m.name || m.mission_address;
+  li.querySelector('.mission-title .title-text').title = m.name || m.mission_address;
+  li.addEventListener("click", () => openMission(m.mission_address));
+  li.style.visibility = "hidden";
+  return li;
+}
 
-    // clicking opens detail
-    li.addEventListener("click", () => openMission(m.mission_address));
-    li.style.visibility = "hidden";
+function        renderAllMissions       (missions = []) {
+  const ul = document.getElementById("allMissionsList");
+  const empty = document.getElementById("allMissionsEmpty");
+  if (!ul || !empty) return;
+  ul.classList.add("card-grid");
+  ul.innerHTML = "";
+  if (!missions.length) { empty.style.display = ""; return; }
+  empty.style.display = "none";
+
+  const list = missions;
+  for (const m of list) {
+    const li = buildMissionListCard(m);
     ul.appendChild(li);
   }
 
-  // Reveal the cards one-by-one across 1 second total
   const cards = [...ul.querySelectorAll("li.mission-card")];
   if (cards.length) {
-    const ver = ++__allMissionsRenderVersion;           // cancel older runs
-    const stepMs = Math.ceil(500 / cards.length);      // e.g. 10 → 100ms, 5 → 200ms
+    const ver = ++__allMissionsRenderVersion;
+    const stepMs = Math.ceil(500 / cards.length);
     cards.forEach((el, i) => {
-      setTimeout(() => {
-        if (ver !== __allMissionsRenderVersion) return; // aborted by a newer render
-        el.style.visibility = "";                       // show
-      }, i * stepMs);
+      setTimeout(() => { if (ver === __allMissionsRenderVersion) el.style.visibility = ""; }, i * stepMs);
     });
   }
 
-  // re-use the global ticker to keep countdowns + players color live
   startJoinableTicker();
 }
 
 function        renderJoinable          (items){
-  els.joinableList.innerHTML = "";
+  const host = els.joinableList;
+  host.innerHTML = "";
   els.joinableEmpty.style.display = items?.length ? "none" : "";
-  els.joinableList?.classList.add('card-grid');
+  host?.classList.add('card-grid');
 
-  const list = (items || []).slice().reverse(); // newest on top
-  for (const m of list){
-    const title   = m.name || copyableAddr(m.mission_address);
-    const rounds  = m.mission_rounds_total ?? m.missionRounds ?? "";
-    const startTs = m.mission_start ?? 0;
-    const enrollEndTs = m.enrollment_end ?? 0;
+  // newest first
+  const list = (items || []).slice().reverse();
+  for (const raw of list){
+    // normalize a Joinable item to the All-Missions shape the helper expects
+    const m = {
+      mission_address:        raw.mission_address,
+      name:                   raw.name,
+      status:                 Number(raw.status),
+      enrollment_start:       raw.enrollment_start,
+      enrollment_end:         raw.enrollment_end,
+      enrollment_amount_wei:  raw.enrollment_amount_wei,
+      enrollment_min_players: raw.enrollment_min_players,
+      enrollment_max_players: raw.enrollment_max_players,
+      mission_start:          raw.mission_start,
+      mission_end:            raw.mission_end,
+      mission_rounds_total:   (raw.mission_rounds_total ?? raw.missionRounds ?? 0),
+      round_count:            Number(raw.round_count || 0),
+      cro_initial_wei:        raw.cro_initial_wei,
+      cro_start_wei:          raw.cro_start_wei,
+      cro_current_wei:        raw.cro_current_wei,
+      pause_timestamp:        raw.pause_timestamp,
+      updated_at:             raw.updated_at,
+      mission_created:        raw.mission_created,
+      round_pause_secs:       raw.round_pause_secs,
+      last_round_pause_secs:  raw.last_round_pause_secs,
+      creator_address:        raw.creator_address,
+      all_refunded:           raw.all_refunded,
+      // critically: enrolled_players for badge & players-line
+      enrolled_players:       (raw.enrolled_players != null)
+                                ? raw.enrolled_players
+                                : (Array.isArray(raw.enrollments) ? raw.enrollments.length : 0),
+    };
 
-    const feeCro  = weiToCro(m.enrollment_amount_wei, 2);
-    const joined  = Array.isArray(m.enrollments) ? m.enrollments.length : 0;
-    const max     = Number(m.enrollment_max_players ?? 0);
-    const minReq  = Number(m.enrollment_min_players ?? 0);
-    const pct     = max > 0 ? Math.min(100, Math.round((joined / max) * 100)) : 0;
-
-    // duration label placeholder (we’ll refine the mapping later)
-    const durationTxt = (m.mission_start && m.mission_end)
-      ? formatDurationShort(m.mission_end - m.mission_start)
-      : "—";
-
-    const li = document.createElement("li");
-    li.className = "mission-card mb-3";
-    li.setAttribute("role", "button");
-    li.tabIndex = 0;
-
-    li.innerHTML = `
-      <div class="mission-head">
-        <div class="mission-title">
-          <span class="title-text">${title}</span>
-        </div>
-        <div class="mission-rounds">${rounds ? `${rounds} Rounds` : ""}</div>
-      </div>
-
-      <div class="mini-row">
-        <span class="label">Join until:</span>
-        <span class="value">${enrollEndTs ? formatLocalDateTime(enrollEndTs) : "—"}</span>
-      </div>
-
-      <div class="mini-row">
-        <span class="label">Starts in:</span>
-        <span class="value" data-start="${startTs}">${startTs ? formatCountdown(startTs) : "—"}</span>
-      </div>
-
-      <div class="fact-row">
-         <div>
-          <div class="label">Duration:</div>
-          <div class="value">${durationTxt}</div>
-        </div>       
-        <div>
-          <div class="label">Mission Fee:</div>
-          <div class="value">${feeCro} CRO</div>
-        </div>
-
-      </div>
-
-      <div class="players-line">
-        <div class="label">Players</div>
-        <div class="players-count">
-          <span class="current" data-current="${joined}" data-min="${minReq}">${joined}</span>/<span>${max || "—"}</span>
-        </div>
-      </div>
-      <div class="progress-slim"><i style="--w:${pct}%;"></i></div>
-    `;
-
-    li.querySelector('.mission-title .title-text').title = title;
-
-    const open = () => openMission(m.mission_address);
-    li.addEventListener("click", open);
-    li.addEventListener("keypress", e => { if (e.key === "Enter") open(); });
-
-    els.joinableList.appendChild(li);
+    host.appendChild(buildMissionListCard(m));
   }
+
+  const cards = [...host.querySelectorAll("li.mission-card")];
+  if (cards.length) {
+    const ver = ++__allMissionsRenderVersion;
+    const stepMs = Math.ceil(500 / cards.length);
+    cards.forEach((el, i) => {
+      setTimeout(() => { if (ver === __allMissionsRenderVersion) el.style.visibility = ""; }, i * stepMs);
+    });
+  }
+
+  startJoinableTicker();
 }
 
 function        renderMyMissions        (items){
-  els.myMissionsList.innerHTML = "";
+  const host = els.myMissionsList;
+  host.innerHTML = "";
   els.myMissionsEmpty.style.display = items?.length ? "none" : "";
-  els.myMissionsList?.classList.add('card-grid');
+  host?.classList.add('card-grid');
 
-  const list = (items || []).slice().reverse(); // newest on top
-  for (const m of list){
-    const prettyMM = prettyStatusForList(
-      Number(m.status),
-      { players: [{}] },                             // at least one player (me)
-      Number(m.failed_refund_count || 0)
-    );
+  const list = (items || []).slice().reverse(); // newest first
+  for (const raw of list){
+    // normalize to the helper’s shape
+    const m = {
+      mission_address:        raw.mission_address,
+      name:                   raw.name,
+      status:                 Number(raw.status),
+      enrollment_start:       raw.enrollment_start,
+      enrollment_end:         raw.enrollment_end,
+      enrollment_amount_wei:  raw.enrollment_amount_wei,
+      enrollment_min_players: raw.enrollment_min_players,
+      enrollment_max_players: raw.enrollment_max_players,
+      mission_start:          raw.mission_start,
+      mission_end:            raw.mission_end,
+      mission_rounds_total:   Number(raw.mission_rounds_total || raw.missionRounds || 0),
+      round_count:            Number(raw.round_count || 0),
+      cro_initial_wei:        raw.cro_initial_wei,
+      cro_start_wei:          raw.cro_start_wei,
+      cro_current_wei:        raw.cro_current_wei,
+      pause_timestamp:        raw.pause_timestamp,
+      updated_at:             raw.updated_at,
+      mission_created:        raw.mission_created,
+      round_pause_secs:       raw.round_pause_secs,
+      last_round_pause_secs:  raw.last_round_pause_secs,
+      creator_address:        raw.creator_address,
+      all_refunded:           raw.all_refunded,
+      enrolled_players:       (raw.enrolled_players != null)
+                                ? raw.enrolled_players
+                                : (Array.isArray(raw.enrollments) ? raw.enrollments.length : 0),
+    };
 
-    const myStText  = prettyMM ? prettyMM.label : statusText(m.status);
-    const myStClass = prettyMM ? prettyMM.css   : statusColorClass(m.status);
-    const myStTitle = prettyMM ? prettyMM.title : "";
-    const title   = m.name || copyableAddr(m.mission_address);
-    const rounds  = `${m.round_count}/${m.mission_rounds_total}`;
-
-    // decide which live label to show
-    const isUpcoming = (m.status === 0 || m.status === 1 || m.status === 2);   // Pending/Enrolling/Arming
-    const isActive   = (m.status === 3);
-    const liveLabel  = isUpcoming ? "Starts in:" : (isActive ? "Ends in:" : "");
-    const liveAttr   = isUpcoming ? `data-start="${m.mission_start || 0}"` 
-                                  : (isActive ? `data-end="${m.mission_end || 0}"` : "");
-    const liveValue  =
-      isUpcoming ? (m.mission_start ? formatCountdown(m.mission_start) : "—") :
-      isActive   ? (m.mission_end   ? formatCountdown(m.mission_end)   : "—") :
-                   ""; // ended states: no live countdown line
-
-    const li = document.createElement("li");
-    li.className = "mission-card mb-3";
-    li.setAttribute("role", "button");
-    li.tabIndex = 0;
-
-    li.innerHTML = `
-      <div class="mission-head">
-        <div class="mission-title">
-          <span class="title-text">${title}</span>
-        </div>
-        <div class="mission-rounds">${rounds} Rounds</div>
-      </div>
-
-      <div class="mini-row">
-        <span class="label">Status:</span>
-        <span class="value">
-          <span class="status-pill ${myStClass}" title="${myStTitle}">${myStText}</span>
-          ${m.status === 7 && m.failure_reason
-            ? `<span class="small text-muted ms-2">${m.failure_reason}</span>`
-            : ""}
-        </span>
-      </div>
-
-      ${liveLabel ? `
-      <div class="mini-row">
-        <span class="label">${liveLabel}</span>
-        <span class="value" ${liveAttr}>${liveValue}</span>
-      </div>` : ""}
-
-      <div class="mini-row">
-        <span class="label">Start:</span>
-        <span class="value">${m.mission_start ? formatLocalDateTime(m.mission_start) : "—"}</span>
-      </div>
-
-      <div class="mini-row">
-        <span class="label">End:</span>
-        <span class="value">${m.mission_end ? formatLocalDateTime(m.mission_end) : "—"}</span>
-      </div>
-
-      ${m.refunded ? `
-        <div class="mini-row">
-          <span class="label">Refund:</span>
-          <span class="value text-warning">
-            Refunded ${txLinkIcon(m.refund_tx_hash)}
-          </span>
-        </div>` : ""}
-    `;
-
-    li.querySelector('.mission-title .title-text').title = title;
-
-    const open = () => openMission(m.mission_address);
-    li.addEventListener("click", (e) => {
-      // don’t open the card if the click is on a link or a button inside the card
-      if (e.target.closest('a,button')) return;
-      open();
-    });
-
-    li.addEventListener("keypress", (e) => {
-      if (e.key !== "Enter") return;
-      if (e.target.closest('a,button')) return;
-      open();
-    });
-
-    els.myMissionsList.appendChild(li);
+    host.appendChild(buildMissionListCard(m));
   }
+
+  const cards = [...host.querySelectorAll("li.mission-card")];
+  if (cards.length) {
+    const ver = ++__allMissionsRenderVersion;
+    const stepMs = Math.ceil(500 / cards.length);
+    cards.forEach((el, i) => {
+      setTimeout(() => { if (ver === __allMissionsRenderVersion) el.style.visibility = ""; }, i * stepMs);
+    });
+  }
+
+  // optional: we can also start the ticker here if you want live countdowns on this tab
+  startJoinableTicker();
 }
 
 async function  renderMissionDetail     ({ mission, enrollments, rounds }){
@@ -4238,6 +4268,15 @@ function        startJoinableTicker(){
       if (prev > 0 && left === 0) needsRefresh = true;
     });
 
+    // NEW: players color (green when cur >= min, red otherwise)
+    document.querySelectorAll('.players-count .current').forEach(el => {
+      const cur = Number(el.dataset.current || 0);
+      const min = Number(el.dataset.min || 0);
+      const ok  = min > 0 && cur >= min;
+      el.classList.toggle('text-success', ok);
+      el.classList.toggle('text-error',  !ok && min > 0);
+    });
+
     // small, safe cooldown and in-flight guard
     if (needsRefresh && !joinableFetchInFlight && (Date.now() - lastJoinableRefreshAt) > 5000) {
       joinableFetchInFlight = true;
@@ -4361,6 +4400,13 @@ async function init(){
     }
   } catch {}
 
+  try {
+    if (els.refreshMyBtn) {
+      els.refreshMyBtn.disabled = true;
+      setTimeout(() => { try { els.refreshMyBtn.disabled = false; } catch {} }, 5000);
+    }
+  } catch {}
+
   document.addEventListener('click', enableVaultSoundOnce, { once: true });
 
   // 1) wire buttons BEFORE any awaited network work
@@ -4386,6 +4432,21 @@ async function init(){
       showAlert("Loading All Missions timed out. Please try again.", "warning");
     } finally {
       allLoadBusy = false;
+    }
+  });
+
+  let allLoadBusy2 = false;
+  els.refreshMyBtn?.addEventListener("click", async () => {
+    if (allLoadBusy2) return;
+    allLoadBusy2 = true;
+    try {
+      disableTemporarily(els.refreshMyBtn, 5000);
+      await withTimeout(fetchAndRenderMyMissions(), 12000);
+    } catch (e) {
+      console.warn("Refresh My Missions timed out/failed:", e);
+      showAlert("Loading My Missions timed out. Please try again.", "warning");
+    } finally {
+      allLoadBusy2 = false;
     }
   });
 
@@ -4436,6 +4497,7 @@ async function init(){
   });
 
   buildAllFiltersUI();
+  buildMyFiltersUI();
 
   // ───────────────────────────────────────────────────────────────
   // Deep-links:
