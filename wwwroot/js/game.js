@@ -161,6 +161,8 @@ let __pauseUntilSec         = 0;
 let __postCooldownUntilSec  = 0; 
 let __lastPauseTs           = 0;
 let __lastViewerAddr        = "";
+// --- runtime flags / caches ---
+let __lastChainPlayers = 0;  // defensive default; detail view reads this
 
 let __maxRoundSeen          = Object.create(null); // keyed by mission address LC
 // #endregion
@@ -2325,6 +2327,13 @@ async function  rehydratePillsFromServer(missionOverride = null) {
       mSnap = enrichMissionFromApi(data);
     }
 
+    try {
+      __lastChainPlayers = Number(
+        mSnap?.enrolled_players ??
+        (Array.isArray(mSnap?.enrollments) ? mSnap.enrollments.length : 0)
+      ) || 0;
+    } catch {}
+
     buildStageLowerHudForStatus(mSnap);
   } catch (e) {
     console.warn("[pills/rehydrate] failed:", e?.message || e);
@@ -3950,8 +3959,12 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
   // No-regress: prefer chain-truth for Enrolling/Arming
   const safe = applyNoRegress(mission);
   const listJoined = Array.isArray(enrollments) ? enrollments.length : 0;
+  const fromApi    = (mission?.enrolled_players != null)
+    ? Number(mission.enrolled_players)
+    : listJoined;
+
   const joinedPlayers = Math.max(
-    listJoined,
+    fromApi,
     Number(__lastChainPlayers || 0),
     Number(optimisticGuard?.players || 0)
   );
@@ -3963,8 +3976,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
   const prettyDet = prettyStatusForList(
     Number(mission.status),
     mission,                                      // detail has the full object
-    Number(mission.failed_refund_count || 0)
-  );
+    mission.all_refunded);
   const statusLbl  = prettyDet ? prettyDet.label : statusText(mission.status);
   const statusCls2 = prettyDet ? prettyDet.css   : statusColorClass(mission.status);
   const statusTtl  = prettyDet ? prettyDet.title : "";
