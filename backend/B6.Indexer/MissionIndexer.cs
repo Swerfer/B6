@@ -74,12 +74,15 @@ namespace B6.Indexer
 
         private sealed class EndWatch {
             public string      Mission      = "";
-            public DateTime    EndAtUtc;
-            public bool        Finalized    = false;     // set true once finalize succeeds (removed afterwards)
-            public int         Attempts     = 0;         // number of finalize attempts
-            public DateTime    NextTryUtc   = DateTime.MinValue; // backoff scheduler
+            public DateTime    EndAtUtc;       // mission_end
+            public DateTime    EnrollStartUtc; // enrollment_start  (Pending ends)
+            public DateTime    EnrollEndUtc;   // enrollment_end    (Enrolling ends)
+            public DateTime    StartAtUtc;     // mission_start     (Arming ends)
+            public bool        Finalized    = false;
+            public int         Attempts     = 0;
+            public DateTime    NextTryUtc   = DateTime.MinValue; // finalize() backoff
+            public DateTime    NextPollUtc  = DateTime.MinValue; // time-based snapshot poll at es/ee/ms/me
         }
-
         // --------------------------------------------------------------------------------------------------------------
 
         [Function("getChangesAfter", typeof(GetChangesAfterOutput))]
@@ -234,42 +237,68 @@ namespace B6.Indexer
                         _activeTickNextUtc = now.Add(ActivePoll);
                     }
 
-                    // NEW: attempt finalize() for missions that just passed mission_end
-                    // (kept tight and cheap: only missions we specifically track)
+                    // Time-based snapshot polls at enrollment_start / enrollment_end / mission_start / mission_end
+                    if (!_endWatch.IsEmpty)
+                    {
+                        var polls = _endWatch.Values
+                            .Where(w => w.NextPollUtc != DateTime.MinValue && now >= w.NextPollUtc)
+                            .Take(20)
+                            .ToList();
+
+                        foreach (var w in polls)
+                        {
+                            try
+                            {
+                                await RefreshMissionSnapshotAsync(w.Mission, token); // will push if status/pool/round changed
+                            }
+                            catch { /* best effort */ }
+
+                            // Reschedule to the next future boundary among (es, ee, ms, me); else disable
+                            var next = new[] { w.EnrollStartUtc, w.EnrollEndUtc, w.StartAtUtc, w.EndAtUtc }
+                                .Where(t => t > DateTime.UtcNow)
+                                .DefaultIfEmpty(DateTime.MinValue)
+                                .Min();
+                            w.NextPollUtc = next;
+                        }
+                    }
+
+                    // attempt finalize() for missions that just passed mission_end
                     if (!_endWatch.IsEmpty)
                     {
                         var due = _endWatch.Values
                             .Where(w => !w.Finalized && now >= w.EndAtUtc && now >= w.NextTryUtc)
-                            .Take(10) // small batch to cap RPC load
+                            .Take(10)
                             .ToList();
 
                         foreach (var w in due)
                         {
+                            // 0) Heal stale DB rows first so ShouldForceFinalizeAsync sees correct status (>5 → skip)
+                            try { await RefreshMissionSnapshotAsync(w.Mission, token); } catch { /* best effort */ }
+
                             var ok = await AttemptFinalizeAsync(w.Mission, token);
+
+                            // 1) Regardless of success, sync snapshot so DB reflects the contract-derived status
+                            try { await RefreshMissionSnapshotAsync(w.Mission, token); } catch { /* best effort */ }
+
                             if (ok)
                             {
-                                // remove from watch and refresh snapshot to flip DB finalized + push
                                 _endWatch.TryRemove(w.Mission, out _);
-                                try { await RefreshMissionSnapshotAsync(w.Mission, token); } catch { /* best effort */ }
                             }
                             else
                             {
-                                // backoff: 5s, 10s, 30s, 60s, 5m, then every 30m
                                 w.Attempts++;
 
-                                // After the 3rd failed attempt, stop retrying and drop from watch
                                 if (w.Attempts >= 3)
                                 {
                                     _endWatch.TryRemove(w.Mission, out _);
-                                    continue; // do not schedule another try
+                                    continue;
                                 }
 
-                                // Backoff for attempts 1 and 2; attempt 3 would have been removed above
                                 var next = w.Attempts switch
                                 {
                                     1 => TimeSpan.FromSeconds(5),
                                     2 => TimeSpan.FromSeconds(10),
-                                    _ => TimeSpan.FromSeconds(30) // not used because we remove at 3
+                                    _ => TimeSpan.FromSeconds(30)
                                 };
                                 w.NextTryUtc = DateTime.UtcNow + next;
                             }
@@ -524,28 +553,8 @@ namespace B6.Indexer
                     }
                 }
 
-                // Derive newStatus from schedule windows (snapshot is the source of truth)
-                // (0..7 mapping should match your existing usage; finalized when now >= mission_end and payouts settled)
-                var now = DateTime.UtcNow;
-                var es  = FromUnix(md.EnrollmentStart);
-                var ee  = FromUnix(md.EnrollmentEnd);
-                var ms  = FromUnix(md.MissionStart);
-                var me  = FromUnix(md.MissionEnd);
-
-                if (now < es)           newStatus = 0; // Pending
-                else if (now < ee)      newStatus = 1; // Enrollment
-                else if (now < ms)      newStatus = 2; // Arming
-                else if (now < me)      newStatus = 3; // Active
-                else
-                {
-                    // Ended: derive terminal status from progress
-                    var total  = (int)md.MissionRounds;
-                    var played = (int)md.RoundCount;
-
-                    if (played <= 0)                         newStatus = 7; // Failed
-                    else if (total > 0 && played >= total)   newStatus = 6; // Success
-                    else                                     newStatus = 5; // PartlySuccess
-                }
+                // Persist the contract's real-time status as-is
+                newStatus = (short)md.Status;
 
                 oldStatus = curStatus;
                 oldRound  = curRound;
@@ -806,8 +815,8 @@ namespace B6.Indexer
                     changes.HasMeaningfulChange = true;
                 }
 
-                // If ended and snapshot indicates finality, you can set finalized = true here as appropriate.
-                if (now >= me && !curFinal)
+                // Mark finalized ONLY when the contract’s realtime status is a fully-ended state (Success/Failed).
+                if (newStatus.HasValue && newStatus.Value > 5 && !curFinal)
                 {
                     await using var fin = new NpgsqlCommand(@"
                         update missions set finalized = true, updated_at = now()
@@ -818,22 +827,34 @@ namespace B6.Indexer
 
                 try
                 {
-                    // Watch only if not finalized yet; we’ll trigger finalize() when EndAtUtc is reached
+                    // Watch only if not finalized yet; keep all time boundaries in sync
                     if (!curFinal)
                     {
+                        var esAt  = DateTimeOffset.FromUnixTimeSeconds((long)md.EnrollmentStart).UtcDateTime;
+                        var eeAt  = DateTimeOffset.FromUnixTimeSeconds((long)md.EnrollmentEnd).UtcDateTime;
+                        var msAt  = DateTimeOffset.FromUnixTimeSeconds((long)md.MissionStart).UtcDateTime;
                         var endAt = DateTimeOffset.FromUnixTimeSeconds((long)md.MissionEnd).UtcDateTime;
-                        var ended = now >= endAt;
-                        var w = _endWatch.GetOrAdd(mission, _ => new EndWatch { Mission = mission, EndAtUtc = endAt });
-                        w.EndAtUtc  = endAt;                               // update if schedule shifts
-                        w.Finalized = false;                               // until we succeed
-                        if (ended && w.NextTryUtc < DateTime.UtcNow)       // ready to try now
+
+                        var w = _endWatch.GetOrAdd(mission, _ => new EndWatch { Mission = mission });
+                        w.EnrollStartUtc = esAt;
+                        w.EnrollEndUtc   = eeAt;
+                        w.StartAtUtc     = msAt;
+                        w.EndAtUtc       = endAt;
+                        w.Finalized      = false;
+
+                        // finalize attempts begin after mission_end
+                        if (DateTime.UtcNow >= endAt && w.NextTryUtc < DateTime.UtcNow)
                             w.NextTryUtc = DateTime.UtcNow;
-                        else if (!ended)
-                            w.NextTryUtc = endAt;                          // first attempt right after end
+                        else if (DateTime.UtcNow < endAt)
+                            w.NextTryUtc = endAt;
+
+                        // next time-based poll = nearest future of (es, ee, ms, me)
+                        var futurePolls = new[] { esAt, eeAt, msAt, endAt }.Where(t => t > DateTime.UtcNow);
+                        w.NextPollUtc = futurePolls.Any() ? futurePolls.Min() : DateTime.MinValue;
                     }
                     else
                     {
-                        _endWatch.TryRemove(mission, out _);               // no need to watch
+                        _endWatch.TryRemove(mission, out _); // no need to watch
                     }
                 }
                 catch { /* never block */ }
@@ -850,10 +871,10 @@ namespace B6.Indexer
 
                 // Watch all missions that aren’t finalized yet (status < 5 means not terminal in your mapping)
                 await using var cmd = new NpgsqlCommand(@"
-                    select mission_address, mission_end, coalesce(finalized,false)
+                    select mission_address, enrollment_start, enrollment_end, mission_start, mission_end, coalesce(finalized,false)
                     from missions
                     where coalesce(finalized,false) = false
-                    and mission_end is not null;", conn);
+                    and (enrollment_start is not null or enrollment_end is not null or mission_start is not null or mission_end is not null);", conn);
 
                 await using var rdr = await cmd.ExecuteReaderAsync(token);
                 while (await rdr.ReadAsync(token))
@@ -861,14 +882,29 @@ namespace B6.Indexer
                     var addr = (rdr.IsDBNull(0) ? "" : rdr.GetString(0)).ToLowerInvariant();
                     if (string.IsNullOrWhiteSpace(addr)) continue;
 
-                    if (rdr.IsDBNull(1)) continue;
-                    var endSec = rdr.GetInt64(1);
-                    var endAt  = DateTimeOffset.FromUnixTimeSeconds(endSec).UtcDateTime;
+                    var esSec = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
+                    var eeSec = rdr.IsDBNull(2) ? 0L : rdr.GetInt64(2);
+                    var msSec = rdr.IsDBNull(3) ? 0L : rdr.GetInt64(3);
+                    var meSec = rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4);
 
-                    var w = _endWatch.GetOrAdd(addr, _ => new EndWatch { Mission = addr, EndAtUtc = endAt });
-                    w.EndAtUtc  = endAt;
-                    w.Finalized = false;
-                    w.NextTryUtc = (DateTime.UtcNow >= endAt) ? DateTime.UtcNow : endAt; // first try right after end
+                    var esAt  = esSec == 0 ? DateTime.MinValue : DateTimeOffset.FromUnixTimeSeconds(esSec).UtcDateTime;
+                    var eeAt  = eeSec == 0 ? DateTime.MinValue : DateTimeOffset.FromUnixTimeSeconds(eeSec).UtcDateTime;
+                    var msAt  = msSec == 0 ? DateTime.MinValue : DateTimeOffset.FromUnixTimeSeconds(msSec).UtcDateTime;
+                    var endAt = meSec == 0 ? DateTime.MinValue : DateTimeOffset.FromUnixTimeSeconds(meSec).UtcDateTime;
+
+                    var w = _endWatch.GetOrAdd(addr, _ => new EndWatch { Mission = addr });
+                    w.EnrollStartUtc = esAt;
+                    w.EnrollEndUtc   = eeAt;
+                    w.StartAtUtc     = msAt;
+                    w.EndAtUtc       = endAt;
+                    w.Finalized      = false;
+
+                    // finalize attempts begin after mission_end
+                    w.NextTryUtc = (DateTime.UtcNow >= endAt && endAt != DateTime.MinValue) ? DateTime.UtcNow : endAt;
+
+                    // schedule first time-based poll at the nearest future of (es, ee, ms, me)
+                    var futurePolls = new[] { esAt, eeAt, msAt, endAt }.Where(t => t > DateTime.UtcNow);
+                    w.NextPollUtc = futurePolls.Any() ? futurePolls.Min() : DateTime.MinValue;
                 }
                 _log.LogInformation("End-watch seeded with {n} mission(s)", _endWatch.Count);
             }
@@ -893,10 +929,14 @@ namespace B6.Indexer
 
             try
             {
-                // 1) send finalize() tx
+                // 1) pre-flight: estimate gas to catch revert reasons early
                 var txHash = await RunRpc(
-                    w => w.Eth.GetContractTransactionHandler<ForceFinalizeMissionFunction>()
-                            .SendRequestAsync(mission, new ForceFinalizeMissionFunction()),
+                    async w => {
+                        var handler = w.Eth.GetContractTransactionHandler<ForceFinalizeMissionFunction>();
+                        await handler.EstimateGasAsync(mission, new ForceFinalizeMissionFunction());
+                        // 2) send finalize() tx
+                        return await handler.SendRequestAsync(mission, new ForceFinalizeMissionFunction());
+                    },
                     "Tx.forceFinalizeMission");
 
                 // 2) poll for receipt (older Nethereum: no TransactionReceiptService on Web3)
@@ -924,24 +964,48 @@ namespace B6.Indexer
         }
 
         private async Task<bool>                        ShouldForceFinalizeAsync            (string mission, CancellationToken token) {
-            await using var conn = new NpgsqlConnection(_pg);
-            await conn.OpenAsync(token);
-            await using var cmd = new NpgsqlCommand(@"
-                select status, mission_end, coalesce(finalized,false)
-                from missions where mission_address = @a;", conn);
-            cmd.Parameters.AddWithValue("a", mission);
+                    await using var conn = new NpgsqlConnection(_pg);
+                    await conn.OpenAsync(token);
+                    await using var cmd = new NpgsqlCommand(@"
+                        select status, mission_end, coalesce(finalized,false)
+                        from missions where mission_address = @a;", conn);
+                    cmd.Parameters.AddWithValue("a", mission);
 
-            await using var rdr = await cmd.ExecuteReaderAsync(token);
-            if (!await rdr.ReadAsync(token)) return false;
+                    await using var rdr = await cmd.ExecuteReaderAsync(token);
+                    if (!await rdr.ReadAsync(token)) return false;
 
-            var status    = rdr.IsDBNull(0) ? (short)99 : rdr.GetInt16(0);
-            var endSec    = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
-            var finalized = !rdr.IsDBNull(2) && rdr.GetBoolean(2);
+                    var status    = rdr.IsDBNull(0) ? (short)99 : rdr.GetInt16(0);
+                    var endSec    = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
+                    var finalized = !rdr.IsDBNull(2) && rdr.GetBoolean(2);
 
-            if (finalized || status >= 5) return false; // ended or already finalized → skip
+                    // If already finalized in DB, skip.
+                    if (finalized) return false;
 
-            var endAt = DateTimeOffset.FromUnixTimeSeconds(endSec).UtcDateTime;
-            return DateTime.UtcNow >= endAt;            // only after end
+                    var endAt = DateTimeOffset.FromUnixTimeSeconds(endSec).UtcDateTime;
+                    if (DateTime.UtcNow < endAt) return false; // only after end
+
+                    // Optional improvement: query the contract’s realtime status to avoid stale DB decisions.
+                    try
+                    {
+                        var wrap = await RunRpc(
+                            w => w.Eth.GetContractQueryHandler<B6.Contracts.GetMissionDataFunction>()
+                                .QueryDeserializingToObjectAsync<B6.Contracts.MissionDataWrapper>(
+                                    new B6.Contracts.GetMissionDataFunction(), mission, null),
+                            "Call.getMissionData");
+
+                        var onchainStatus = (short)wrap.Data.Status;
+
+                        // If the contract already reports a terminal state (Success/Failed), skip finalization.
+                        if (onchainStatus > 5) return false;
+
+                        // PartlySuccess (=5) and anything not terminal at/after mission_end → attempt finalize.
+                        return true;
+                    }
+                    catch
+                    {
+                        // If we cannot read on-chain, fall back to allowing a finalize attempt.
+                        return true;
+                    }
         }
 
         private async Task                              SaveFactoryLastSeqAsync             (ulong seq, CancellationToken ct) {

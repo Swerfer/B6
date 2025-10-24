@@ -1019,59 +1019,9 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
       if (!zeroFired) {
         zeroFired = true;
 
-        if (missionObj && !pillFlipDone) {
-          const next = statusByClock(missionObj, now); // Pending→Enrolling, Enrolling→Arming/Failed, Arming→Active, Active→Ended
-          const cur  = Number(missionObj.status);
-          if (typeof next === "number" && next !== cur) {
-            pillFlipDone = true;
-
-            // Start from current snapshot
-            const m2 = { ...missionObj, status: next };
-            setStageStatusImage(statusSlug(next));   // ← update the stage title/status image immediately
-            if (next === 3) {
-              // Arming → Active: hydrate before painting
-              await rehydratePillsFromServer(m2, "deadlineFlip-arming→active", true);
-              buildStageLowerHudForStatus({ ...m2, status: 3 });
-            } else if (next === 2) {
-              // Enrolling → Arming:
-              // Freeze Pool (start) to the final enrollment pool immediately:
-              // cro_start_wei = cro_initial_wei + fee * joined
-              try {
-                const initialWei = BigInt(String(m2.cro_initial_wei || "0"));
-                const feeWei     = BigInt(String(m2.enrollment_amount_wei || "0"));
-                const joined     = BigInt(Array.isArray(m2.enrollments) ? m2.enrollments.length : 0);
-
-                // If we already computed current via enrichment, prefer that; else compute now from initial
-                const currentFromEnrolling = (m2?.cro_current_wei != null) ? BigInt(String(m2.cro_current_wei)) : null;
-                const computedFinal        = initialWei + feeWei * joined;
-                const finalStart           = (currentFromEnrolling != null) ? currentFromEnrolling : computedFinal;
-
-                m2.cro_start_wei = finalStart.toString();
-              } catch {}
-
-              // Paint immediately with corrected Pool (start), then hydrate to confirm
-
-              await rehydratePillsFromServer(m2, "deadlineFlip-enrolling→arming", true);
-              buildStageLowerHudForStatus(m2);
-            } else {
-              // keep existing behavior for other statuses
-              buildStageLowerHudForStatus(m2);
-              if (next === 1) {
-                rehydratePillsFromServer(m2, "deadlineFlip", true).catch(()=>{});
-              }
-            }
-
-            await bindRingToMission(m2);
-            await bindCenterTimerToMission(m2);
-            renderStageCtaForStatus(m2);
-            await renderStageEndedPanelIfNeeded(m2);
-            await maybeShowMissionEndPopup(m2);
-            stageCurrentStatus = next;
-          }
-        }
-
-        // Keep the quick reconcile so DB fields (players, rounds, pause flag) catch up safely
-        refreshOpenStageFromServer(2);
+        // No local stage flip. Let the server/indexer drive the status.
+        // Do a gentle refresh; push events will also update the stage.
+        refreshOpenStageFromServer(3);
       }
     }
 
@@ -1486,24 +1436,39 @@ async function  startHub() { // SignalR HUB via shared hub.js
           const apiStatus = Number(m.status);
           const curStatus = Number(stageCurrentStatus ?? -1);
 
-          // ⬇️ Spectator optimism during Enrolling: show +1 Players (and derived Pool) instantly
+          // ⬇️ Spectator optimism during Enrolling: skip +1 for the self-enrolling tab
+          // and derive CRO from (initial + fee * players) to avoid double-adding.
           if (apiStatus === 1) {
             try {
               const fromApi = (m?.enrolled_players != null)
                 ? Number(m.enrolled_players)
                 : (Array.isArray(m?.enrollments) ? m.enrollments.length : 0);
 
-              const feeWei  = String(m.enrollment_amount_wei || "0");
-              const baseWei = String(m.cro_current_wei || m.cro_start_wei || "0");
+              const me = (walletAddress || "").toLowerCase();
+              const selfEnrolled = !!(me && joinedCacheHas(currentMissionAddr, me));
 
-              const targetPlayers = Math.max(fromApi + 1, Number(optimisticGuard?.players || 0));
+              // Only bump when API hasn’t moved yet AND this tab isn’t the joining player.
+              const prevBase = Number(optimisticGuard?.fromPlayers ?? (__lastChainPlayers || 0));
+              const needBump = !selfEnrolled && (fromApi <= prevBase);
+
+              const targetPlayers = Math.max(
+                needBump ? (fromApi + 1) : fromApi,
+                Number(optimisticGuard?.players || 0)
+              );
+
+              // Derive croNow from initial + fee * players (consistent with pill derivation/enrichment)
+              const initialWei = BigInt(String(m.cro_initial_wei || "0"));
+              const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
+              const derivedCro = (initialWei + feeWei * BigInt(targetPlayers)).toString();
+
               optimisticGuard = {
-                untilMs: Date.now() + 8000,                     // short window to avoid stale optimism
-                players: targetPlayers,
-                croNow:  (BigInt(baseWei) + BigInt(feeWei)).toString()
+                untilMs:     Date.now() + 8000,
+                players:     targetPlayers,
+                fromPlayers: fromApi,
+                croNow:      derivedCro
               };
 
-              // Immediate repaint (no network) so pills jump now
+              // Immediate repaint (no network)
               try { buildStageLowerHudForStatus(m); } catch {}
             } catch {}
           }
@@ -2140,23 +2105,9 @@ async function  showGameStage(missionRaw){
     rounds: missionRaw.rounds
   });
 
-  // Compute the live status based purely on clocks, not trusting stale mission.status
-  const liveStatus = statusByClock(mission); // 0..7
+  // Single source of truth: use the server/indexer status as-is
   const snapStatus = Number(mission.status ?? -1);
 
-  // Decide the effective starting status for the stage:
-  // - Never start "behind" what the clock says.
-  // - Allow Active<->Paused flip (3<->4) to pass through.
-  let effectiveStatus = snapStatus;
-  const toggle34 = (snapStatus === 3 && liveStatus === 4) || (snapStatus === 4 && liveStatus === 3);
-  if (liveStatus > snapStatus && !toggle34) {
-    effectiveStatus = liveStatus;
-  } else if (toggle34) {
-    effectiveStatus = liveStatus;
-  }
-
-  // Mutate the local mission object so downstream renderers see the corrected status
-  mission.status = effectiveStatus;
 
   // Enter stage mode / show the stage section
   document.getElementById('gameMain').classList.add('stage-mode');
@@ -2658,24 +2609,18 @@ async function  handleEnrollClick       (mission){
     const tx  = await c.enrollPlayer({ value: val });
 
     // Kick the indexer as soon as we have the tx hash (UI also de-dupes ~2s)
+    // and mark *locally joined* right away so the push guard detects self-enroll.
     try {
       const me = (await signer.getAddress()).toLowerCase();
       postKickEnrolled({ mission: mission.mission_address, player: me, txHash: tx.hash }).catch(()=>{});
+      joinedCacheAdd(mission.mission_address, me); // ← moved up
     } catch {}
 
-    await tx.wait();
-
-    // remember locally + instant disable for this wallet
-    try {
-      const me = (await signer.getAddress()).toLowerCase();
-      joinedCacheAdd(mission.mission_address, me);
-    } catch {}
-
-    mission._joinedByMe = true;          // in-memory flag for this session
-    renderStageCtaForStatus(mission);    // repaint CTA immediately
+    mission._joinedByMe = true;                      // in-memory flag for this session
+    renderStageCtaForStatus(mission);                // repaint CTA immediately
     showAlert("You joined the mission!", "success");
-    
-    // OPTIMISTIC UI UPDATE so the player sees the new numbers instantly
+
+    // OPTIMISTIC UI UPDATE immediately (before waiting for mining)
     try {
       const feeWei = String(mission.enrollment_amount_wei || "0");
 
@@ -2684,18 +2629,24 @@ async function  handleEnrollClick       (mission){
         ? Number(mission.enrolled_players)
         : (Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0);
 
-      // remember optimistic values (longer window so DB/indexer can catch up)
+      // Prefer derived CRO = initial + fee * players to avoid double-adding on top of a fast DB cro_current_wei
+      const derivedCro = (() => {
+        try {
+          const initialWei = BigInt(String(mission.cro_initial_wei || "0"));
+          return (initialWei + BigInt(feeWei) * BigInt(beforeJoined + 1)).toString();
+        } catch {
+          return (BigInt(mission.cro_current_wei || mission.cro_start_wei || "0") + BigInt(feeWei)).toString();
+        }
+      })();
+
       optimisticGuard = {
         untilMs: Date.now() + 15000, // 15s guard window
         players: beforeJoined + 1,
-        croNow:  (BigInt(mission.cro_current_wei || mission.cro_start_wei || "0") + BigInt(feeWei)).toString()
+        croNow:  derivedCro
       };
 
       // paint immediately
-      const m2 = {
-        ...mission,
-        cro_current_wei: optimisticGuard.croNow,
-      };
+      const m2 = { ...mission, cro_current_wei: optimisticGuard.croNow };
       buildStageLowerHudForStatus(m2);
       renderStageCtaForStatus(m2);
 
@@ -2704,6 +2655,8 @@ async function  handleEnrollClick       (mission){
     } catch (e) {
       console.warn("[CTA/JOIN] optimistic paint failed:", e?.message || e);
     }
+
+    await tx.wait();
 
     // Let indexer catch up, then reconcile (no await, slight delay)
     // setTimeout(() => { refreshOpenStageFromServer(2).catch(()=>{}); }, 1200);
