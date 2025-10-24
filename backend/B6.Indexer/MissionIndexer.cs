@@ -4,7 +4,10 @@ using Microsoft.Extensions.Logging;
 using Nethereum.ABI.FunctionEncoding.Attributes;
 using Nethereum.Contracts;
 using Nethereum.Contracts.ContractHandlers;
+using Nethereum.Hex.HexTypes;
+using Nethereum.RPC.Eth.DTOs;      
 using Nethereum.Web3;
+using Nethereum.Web3.Accounts;      
 using Npgsql;
 using NpgsqlTypes;
 using System;
@@ -62,7 +65,21 @@ namespace B6.Indexer
 
         private DateTime                                _activeTickNextUtc;                                                 // next active poll time
 
+        private Account?                                _finalizerAccount;
+        private readonly string                         _ownerPk            = string.Empty;
+
         private static readonly TimeSpan                ActivePoll          = TimeSpan.FromSeconds(5);                      // every 5 seconds
+
+        private readonly ConcurrentDictionary<string, EndWatch> _endWatch = new(StringComparer.OrdinalIgnoreCase);
+
+        private sealed class EndWatch {
+            public string      Mission      = "";
+            public DateTime    EndAtUtc;
+            public bool        Finalized    = false;     // set true once finalize succeeds (removed afterwards)
+            public int         Attempts     = 0;         // number of finalize attempts
+            public DateTime    NextTryUtc   = DateTime.MinValue; // backoff scheduler
+        }
+
         // --------------------------------------------------------------------------------------------------------------
 
         [Function("getChangesAfter", typeof(GetChangesAfterOutput))]
@@ -85,6 +102,9 @@ namespace B6.Indexer
             [Parameter("uint8[]",   "statuses",   4)]
             public List<byte> Statuses   { get; set; } = new();
         }
+
+        [Function("forceFinalizeMission")]
+        public class ForceFinalizeMissionFunction : FunctionMessage { }
 
         private sealed class                            SnapshotChanges {
             public bool HasMeaningfulChange { get; set; }
@@ -121,13 +141,35 @@ namespace B6.Indexer
                 catch { }
             };
 
-            // Read from configuration only (Key Vault/appsettings/env) — no hardcoded defaults.
             _rpc     = cfg["Cronos:Rpc"] 
                     ?? throw new InvalidOperationException("Missing configuration key: Cronos:Rpc");
             _factory = cfg["Contracts:Factory"] 
                     ?? throw new InvalidOperationException("Missing configuration key: Contracts:Factory");
             _pg      = cfg.GetConnectionString("Db") 
                     ?? throw new InvalidOperationException("Missing connection string: Db");
+
+            // NEW: signer preference = Owner:PK (or Owner--PK in Key Vault). Fallback to Cronos:Finalizer:PrivateKey.
+            // --- push config (optional; if empty, pushing is disabled) ---
+            _pushBase = cfg["Push:BaseUrl"] ?? "";
+            _pushKey  = cfg["Push:Key"]     ?? "";            
+            _ownerPk  = cfg["Owner:PK"]     ?? cfg["Owner--PK"] ?? string.Empty;
+
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(_ownerPk))
+                {
+                    _finalizerAccount = new Account(_ownerPk);
+                }
+                else
+                {
+                    _finalizerAccount = null;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Signer configuration invalid (Owner:PK). Finalize disabled.");
+                _finalizerAccount = null;
+            }
 
             // Normalize addresses
             _factory = _factory.ToLowerInvariant();
@@ -147,9 +189,7 @@ namespace B6.Indexer
 
             _nextRpcSummaryUtc = DateTime.UtcNow.AddMinutes(1);
 
-            // --- push config (optional; if empty, pushing is disabled) ---
-            _pushBase = cfg["Push:BaseUrl"] ?? "";
-            _pushKey  = cfg["Push:Key"]     ?? "";
+
         }
 
         protected override async Task                   ExecuteAsync                        (CancellationToken token) {
@@ -163,6 +203,9 @@ namespace B6.Indexer
                 _activeTickNextUtc   = DateTime.UtcNow;
                 // Load factory change cursor (lastSeq = 0 if table/row missing)
                 _factoryLastSeq = await LoadFactoryLastSeqAsync(token);
+
+                // NEW: prime the end-watch with all not-ended missions from DB
+                await LoadEndWatchAsync(token);
 
             }
             catch (Exception ex)
@@ -189,6 +232,48 @@ namespace B6.Indexer
                     {
                         await RefreshFactoryChangesAsync(token);
                         _activeTickNextUtc = now.Add(ActivePoll);
+                    }
+
+                    // NEW: attempt finalize() for missions that just passed mission_end
+                    // (kept tight and cheap: only missions we specifically track)
+                    if (!_endWatch.IsEmpty)
+                    {
+                        var due = _endWatch.Values
+                            .Where(w => !w.Finalized && now >= w.EndAtUtc && now >= w.NextTryUtc)
+                            .Take(10) // small batch to cap RPC load
+                            .ToList();
+
+                        foreach (var w in due)
+                        {
+                            var ok = await AttemptFinalizeAsync(w.Mission, token);
+                            if (ok)
+                            {
+                                // remove from watch and refresh snapshot to flip DB finalized + push
+                                _endWatch.TryRemove(w.Mission, out _);
+                                try { await RefreshMissionSnapshotAsync(w.Mission, token); } catch { /* best effort */ }
+                            }
+                            else
+                            {
+                                // backoff: 5s, 10s, 30s, 60s, 5m, then every 30m
+                                w.Attempts++;
+
+                                // After the 3rd failed attempt, stop retrying and drop from watch
+                                if (w.Attempts >= 3)
+                                {
+                                    _endWatch.TryRemove(w.Mission, out _);
+                                    continue; // do not schedule another try
+                                }
+
+                                // Backoff for attempts 1 and 2; attempt 3 would have been removed above
+                                var next = w.Attempts switch
+                                {
+                                    1 => TimeSpan.FromSeconds(5),
+                                    2 => TimeSpan.FromSeconds(10),
+                                    _ => TimeSpan.FromSeconds(30) // not used because we remove at 3
+                                };
+                                w.NextTryUtc = DateTime.UtcNow + next;
+                            }
+                        }
                     }
 
                 }
@@ -751,9 +836,133 @@ namespace B6.Indexer
                     fin.Parameters.AddWithValue("a", mission);
                     await fin.ExecuteNonQueryAsync(token);
                 }
+
+                try
+                {
+                    // Watch only if not finalized yet; we’ll trigger finalize() when EndAtUtc is reached
+                    if (!curFinal)
+                    {
+                        var endAt = DateTimeOffset.FromUnixTimeSeconds((long)md.MissionEnd).UtcDateTime;
+                        var ended = now >= endAt;
+                        var w = _endWatch.GetOrAdd(mission, _ => new EndWatch { Mission = mission, EndAtUtc = endAt });
+                        w.EndAtUtc  = endAt;                               // update if schedule shifts
+                        w.Finalized = false;                               // until we succeed
+                        if (ended && w.NextTryUtc < DateTime.UtcNow)       // ready to try now
+                            w.NextTryUtc = DateTime.UtcNow;
+                        else if (!ended)
+                            w.NextTryUtc = endAt;                          // first attempt right after end
+                    }
+                    else
+                    {
+                        _endWatch.TryRemove(mission, out _);               // no need to watch
+                    }
+                }
+                catch { /* never block */ }
             }
 
             return changes;
+        }
+
+        private async Task                              LoadEndWatchAsync                   (CancellationToken token) {
+            try
+            {
+                await using var conn = new NpgsqlConnection(_pg);
+                await conn.OpenAsync(token);
+
+                // Watch all missions that aren’t finalized yet (status < 5 means not terminal in your mapping)
+                await using var cmd = new NpgsqlCommand(@"
+                    select mission_address, mission_end, coalesce(finalized,false)
+                    from missions
+                    where coalesce(finalized,false) = false
+                    and mission_end is not null;", conn);
+
+                await using var rdr = await cmd.ExecuteReaderAsync(token);
+                while (await rdr.ReadAsync(token))
+                {
+                    var addr = (rdr.IsDBNull(0) ? "" : rdr.GetString(0)).ToLowerInvariant();
+                    if (string.IsNullOrWhiteSpace(addr)) continue;
+
+                    if (rdr.IsDBNull(1)) continue;
+                    var endSec = rdr.GetInt64(1);
+                    var endAt  = DateTimeOffset.FromUnixTimeSeconds(endSec).UtcDateTime;
+
+                    var w = _endWatch.GetOrAdd(addr, _ => new EndWatch { Mission = addr, EndAtUtc = endAt });
+                    w.EndAtUtc  = endAt;
+                    w.Finalized = false;
+                    w.NextTryUtc = (DateTime.UtcNow >= endAt) ? DateTime.UtcNow : endAt; // first try right after end
+                }
+                _log.LogInformation("End-watch seeded with {n} mission(s)", _endWatch.Count);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "LoadEndWatchAsync failed");
+            }
+        }
+
+        private async Task<bool>                        AttemptFinalizeAsync                (string mission, CancellationToken token) {
+            if (_finalizerAccount == null)
+            {
+                _log.LogWarning("Finalize requested for {mission} but no signer configured (Owner:PK). Skipping.", mission);
+                return false;
+            }
+
+            if (!await ShouldForceFinalizeAsync(mission, token))
+            {
+                _endWatch.TryRemove(mission, out _); // no more attempts
+                return false;
+            }
+
+            try
+            {
+                // 1) send finalize() tx
+                var txHash = await RunRpc(
+                    w => w.Eth.GetContractTransactionHandler<ForceFinalizeMissionFunction>()
+                            .SendRequestAsync(mission, new ForceFinalizeMissionFunction()),
+                    "Tx.forceFinalizeMission");
+
+                // 2) poll for receipt (older Nethereum: no TransactionReceiptService on Web3)
+                var receipt = await RunRpc<TransactionReceipt?>(async w =>
+                {
+                    for (int i = 0; i < 60; i++)
+                    {
+                        var r = await w.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+                        if (r != null) return r;
+                        await Task.Delay(TimeSpan.FromSeconds(1), token);
+                    }
+                    return (TransactionReceipt?)null;
+                }, "Tx.waitFinalize");
+
+                // success when status == 1
+                var ok = receipt != null && receipt.Status != null && receipt.Status.Value == 1;
+                _log.LogInformation("forceFinalizeMission() {mission} -> {status} (tx={tx})", mission, ok ? "OK" : "FAILED", txHash);
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "forceFinalizeMission() attempt failed for {mission}", mission);
+                return false;
+            }
+        }
+
+        private async Task<bool>                        ShouldForceFinalizeAsync            (string mission, CancellationToken token) {
+            await using var conn = new NpgsqlConnection(_pg);
+            await conn.OpenAsync(token);
+            await using var cmd = new NpgsqlCommand(@"
+                select status, mission_end, coalesce(finalized,false)
+                from missions where mission_address = @a;", conn);
+            cmd.Parameters.AddWithValue("a", mission);
+
+            await using var rdr = await cmd.ExecuteReaderAsync(token);
+            if (!await rdr.ReadAsync(token)) return false;
+
+            var status    = rdr.IsDBNull(0) ? (short)99 : rdr.GetInt16(0);
+            var endSec    = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
+            var finalized = !rdr.IsDBNull(2) && rdr.GetBoolean(2);
+
+            if (finalized || status >= 5) return false; // ended or already finalized → skip
+
+            var endAt = DateTimeOffset.FromUnixTimeSeconds(endSec).UtcDateTime;
+            return DateTime.UtcNow >= endAt;            // only after end
         }
 
         private async Task                              SaveFactoryLastSeqAsync             (ulong seq, CancellationToken ct) {
@@ -915,7 +1124,9 @@ namespace B6.Indexer
         private void                                    UseRpc                              (int idx) {
             _rpcIndex = idx % _rpcEndpoints.Count;
             var url = _rpcEndpoints[_rpcIndex];
-            _web3 = new Web3(url);
+            // NEW: use signer when available so we can send finalize()
+            _web3 = _finalizerAccount != null ? new Web3(_finalizerAccount, url)
+                                            : new Web3(url);
             //_log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
         }
 
@@ -1093,7 +1304,6 @@ namespace B6.Indexer
             catch { /* never block caller */ }
         }
 
-        // RunRpc helpers
         private static string                           NormalizeKind                       (string context) {
             if (string.IsNullOrWhiteSpace(context)) return "RPC";
             var p = context.IndexOf('(');
