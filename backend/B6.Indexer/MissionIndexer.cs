@@ -761,48 +761,28 @@ namespace B6.Indexer
                 // Detect round increment
                 if (oldRound != newRound)
                 {
-                    // Write/Backfill mission_rounds based on snapshot wins
-                    // - Cold start (oldRound null/0): reconstruct from players' WonTS (distinct, ascending)
-                    // - Incremental (newRound > oldRound): append the last round using PauseTimestamp
-                    var wins = new List<(short Round, string? Winner, System.Numerics.BigInteger Amount, long Ts)>();
-
-                    var prev = oldRound ?? 0;
                     var next = newRound ?? 0;
 
-                    if (prev == 0 && next > 0)
-                    {
-                        // Cold start: rebuild per-round rows from players' WonTS
-                        var byTs = (md.Players ?? new List<B6.Contracts.PlayerTuple>())
-                            .Where(p => p.WonTS != 0)
-                            .GroupBy(p => (long)p.WonTS)
-                            .OrderBy(g => g.Key)
-                            .ToList();
-
-                        short r = 1;
-                        foreach (var g in byTs)
+                    // Build ALL rounds from snapshot (distinct WonTS ↑), then upsert 1..next.
+                    // This backfills if the writer was enabled mid-mission.
+                    var winsAll = (md.Players ?? new List<B6.Contracts.PlayerTuple>())
+                        .Where(p => p.WonTS != 0)
+                        .GroupBy(p => (long)p.WonTS)
+                        .OrderBy(g => g.Key)
+                        .Select((g, i) =>
                         {
                             var w   = g.First();
                             var adr = (w.Player ?? string.Empty).Trim().ToLowerInvariant();
-                            var amt = w.AmountWon;                    // BigInteger
-                            var ts  = (long)w.WonTS;                  // epoch seconds
-                            wins.Add((r++, adr.Length == 0 ? null : adr, amt, ts));
-                        }
-                    }
-                    else if (next > prev)
-                    {
-                        // Incremental: append the latest round
-                        long ts = md.PauseTimestamp == 0 ? 0 : (long)md.PauseTimestamp;
-                        var w   = (md.Players ?? new List<B6.Contracts.PlayerTuple>())
-                                    .FirstOrDefault(p => (long)p.WonTS == ts);
+                            return (
+                                Round:  (short)(i + 1),
+                                Winner: string.IsNullOrWhiteSpace(adr) ? null : adr,
+                                Amount: w.AmountWon,
+                                Ts:     (long)w.WonTS
+                            );
+                        })
+                        .ToList();
 
-                        string? adr = w?.Player?.Trim().ToLowerInvariant();
-                        var     amt = w?.AmountWon ?? new System.Numerics.BigInteger(0);
-
-                        if (ts != 0 && next > 0)
-                            wins.Add(((short)next, string.IsNullOrWhiteSpace(adr) ? null : adr, amt, ts));
-                    }
-
-                    foreach (var win in wins)
+                    foreach (var win in winsAll.Where(w => w.Round <= next))
                     {
                         await using var upRound = new NpgsqlCommand(@"
                             insert into mission_rounds
@@ -817,13 +797,12 @@ namespace B6.Indexer
                         upRound.Parameters.AddWithValue("a",  mission);
                         upRound.Parameters.AddWithValue("n",  win.Round);
                         upRound.Parameters.AddWithValue("w",  (object?)win.Winner ?? DBNull.Value);
-                        upRound.Parameters.AddWithValue("p",  (object)win.Amount); // BigInteger -> NUMERIC
-                        upRound.Parameters.AddWithValue("ts", win.Ts);             // unix seconds
-
+                        upRound.Parameters.AddWithValue("p",  (object)win.Amount);
+                        upRound.Parameters.AddWithValue("ts", win.Ts);
                         await upRound.ExecuteNonQueryAsync(token);
                     }
 
-                    changes.NewRound = next;               // keep your existing push semantics
+                    changes.NewRound = next;               // push latest only, like before
                     changes.HasMeaningfulChange = true;
                 }
 
