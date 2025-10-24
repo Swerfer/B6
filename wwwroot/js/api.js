@@ -107,27 +107,6 @@ export async function   postKickBanked({ mission, player, txHash } = {}) {
   return postJson("/events/banked", { mission: missionLc, player: playerLc, txHash });
 }
 
-// ------------------------ Helper: batch refetch (optional) ----------
-// If you debounce refetches after hub pushes in game.js, you can import this.
-// It collapses multiple getMission(addr) calls within ~250ms.
-const MICRO_TTL_MS = 250;
-const __detailInflight = new Map();
-
-export async function   getMissionDebounced(addressLc) {
-  const addr = toLc(addressLc);
-  const now  = Date.now();
-  const hit  = __detailInflight.get(addr);
-  if (hit && (now - hit.ts) < MICRO_TTL_MS) return hit.p;
-
-  const p = getMission(addr).finally(() => {
-    // clear after TTL window; keeps a short-lived “burst” cache
-    setTimeout(() => __detailInflight.delete(addr), MICRO_TTL_MS);
-  });
-
-  __detailInflight.set(addr, { ts: now, p });
-  return p;
-}
-
 /** GET /players/{address}/eligibility — memorized ~10s per address */
 const __eligCache = new Map();  // addrLc -> { ts, p }
 const ELIG_TTL_MS = 10_000;

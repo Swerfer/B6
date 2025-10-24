@@ -33,7 +33,7 @@ if (res.ok) {
 
 export const FACTORY_ABI = [
   // --------- Factory methods ----------
-  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint8,string,bytes32,address) payable returns (address,string)",
+  "function createMission(uint8,uint256,uint256,uint256,uint8,uint8,uint8,uint8,uint256,uint256,uint8,string,bytes32,address) payable returns (address,string)",
   "event MissionCreated(address indexed mission,string name,uint8 missionType,uint256 enrollmentStart,uint256 enrollmentEnd,uint8 minPlayers,uint8 maxPlayers,uint8 roundPauseDuration,uint8 lastRoundPauseDuration,uint256 enrollmentAmount,uint256 missionStart,uint256 missionEnd,uint8 missionRounds, address creator)",
   // --------- Get missions views (tuple array) ----------
   "function getAllMissions() view returns((uint8,uint256,string,uint8,uint8,uint8,uint8,uint256,uint256,uint256,uint256,uint8,uint8,uint256,uint256,uint256,uint256,(address,uint256,uint256,uint256,bool,bool,uint256)[],uint8,uint8,uint256,bool,address)[])",
@@ -74,24 +74,29 @@ export const FACTORY_ABI = [
 export const MISSION_ABI = [
   "function getMissionData() view returns (\
       tuple(\
-        address[] players,\
-        uint8 missionType,\
-        uint256 enrollmentStart,\
-        uint256 enrollmentEnd,\
-        uint256 enrollmentAmount,\
-        uint8 enrollmentMinPlayers,\
-        uint8 enrollmentMaxPlayers,\
-        uint8 roundPauseDuration,\
-        uint8 lastRoundPauseDuration,\
-        uint256 missionStart,\
-        uint256 missionEnd,\
-        uint8 missionRounds,\
-        uint8 roundCount,\
+        uint8   status,\
+        uint40  missionCreated,\
+        string  name,\
+        uint8   missionType,\
+        uint8   missionRounds,\
+        uint8   roundPauseDuration,\
+        uint8   lastRoundPauseDuration,\
+        uint256 croInitial,\
         uint256 croStart,\
         uint256 croCurrent,\
-        (address,uint256)[] playersWon,\
-        uint256 pauseTimestamp,\
-        address[] refundedPlayers\
+        uint256 enrollmentAmount,\
+        uint8   enrollmentMinPlayers,\
+        uint8   enrollmentMaxPlayers,\
+        uint40  enrollmentStart,\
+        uint40  enrollmentEnd,\
+        uint40  missionStart,\
+        uint40  missionEnd,\
+        address[] players,\
+        uint256 enrollmentCount,\
+        uint8   roundCount,\
+        uint40  pauseTimestamp,\
+        bool    allRefunded,\
+        address creator\
       )\
   )",
   "function getRealtimeStatus() view returns (uint8)",
@@ -253,13 +258,15 @@ document.addEventListener("click", e=>{
 });
 
 export const missionTypeName = {
-  0:  "Custom",         // Custom mission type
-  1:  "Hourly",         // Hourly missions
-  2:  "Quarter-Daily",  // Quarter-Daily missions
-  3:  "Bi-Daily",       // Bi-Daily missions
-  4:  "Daily",          // Daily missions
-  5:  "Weekly",         // Weekly missions
-  6:  "Monthly"         // Monthly missions
+  0:"Custom",
+  1:"Hourly",
+  2:"Quarter-Daily",
+  3:"Bi-Daily",
+  4:"Daily",
+  5:"Weekly",
+  6:"Monthly",
+  7:"Invite-Only",
+  8:"User Mission"
 };
 
 export const Status = {

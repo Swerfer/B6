@@ -163,53 +163,47 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       setBtnLoading(btnRef, true, "Reloading");
     }
 
-    const [
-      players,
+    // Fetch on-chain snapshot (matches core.js MISSION_ABI)
+    const md = await mc.getMissionData();
+    const {
+      status,
+      missionCreated,
+      name,
       missionType,
-      enrollmentStart,
-      enrollmentEnd,
+      missionRounds,
+      roundPauseDuration,
+      lastRoundPauseDuration,
+      croInitial,
+      croStart,
+      croCurrent,
       enrollmentAmount,
       enrollmentMinPlayers,
       enrollmentMaxPlayers,
-      roundPauseDuration,
-      lastRoundPauseDuration,
+      enrollmentStart,
+      enrollmentEnd,
       missionStart,
       missionEnd,
-      missionRounds,
+      players,
+      enrollmentCount,
       roundCount,
-      croStart,
-      croCurrent,
-      playersWon,
       pauseTimestamp,
-      refundedPlayers
-    ] = await mc.getMissionData();
+      allRefunded,
+      creator
+    } = md;
 
-    // Read realtime status from chain (unchanged)
-    const status        = await mc.getRealtimeStatus();
+    // Realtime label/color (unchanged helpers)
     const realtimeLabel = statusText(status);
     const rtColor       = colorForStatusLabel(realtimeLabel);
 
-    // NEW: fetch CRO Initial from the backend API (/api/missions/mission/{addr})
-    let croInitialDisplay = "—";
-    try {
-      const r = await fetch(`/api/missions/mission/${item.addr.toLowerCase()}`);
-      if (r.ok) {
-        const j = await r.json();
-        const wei = j?.mission?.cro_initial_wei;   // string (wei) per Program.cs
-        if (wei && /^\d+$/.test(wei)) {
-          croInitialDisplay = `${ethers.utils.formatEther(wei)} CRO`;
-        } else {
-          croInitialDisplay = "0 CRO";
-        }
-      }
-    } catch {}
+    const playersCount = Array.isArray(players) ? players.length : 0;
 
     /* build rows */
     const rowTemplates = [
-      `<tr><th>Factory Status</th>     <td>${statusText(factoryStatus)}</td></tr>`,
+      `<tr><th>Factory Status</th>     <td>${factoryStatus == null ? "—" : statusText(factoryStatus)}</td></tr>`,
       `<tr><th>Realtime Status</th>    <td style="${rtColor ? `color:${rtColor};font-weight:600` : ""}">${realtimeLabel}</td></tr>`,
-      `<tr><th>Players</th>            <td${players.length < enrollmentMinPlayers ? ' class="text-warning fw-bold"' : ''}>${players.length}</td></tr>`,
-      `<tr><th>Mission Type</th>       <td>${missionTypeName[missionType]}</td></tr>`,
+      `<tr><th>Mission Name</th>       <td>${name || item.name || "—"}</td></tr>`,
+      `<tr><th>Players</th>            <td${playersCount < Number(enrollmentMinPlayers) ? ' class="text-warning fw-bold"' : ''}>${playersCount}</td></tr>`,
+      `<tr><th>Mission Type</th>       <td>${missionTypeName[missionType] ?? `Type #${missionType}`}</td></tr>`,
       `<tr><th>Enrollment Start</th>   <td>${formatLocalDateTime(enrollmentStart)}</td></tr>`,
       `<tr><th>Enrollment End</th>     <td>${formatLocalDateTime(enrollmentEnd)}</td></tr>`,
       `<tr><th>Mission Start</th>      <td>${formatLocalDateTime(missionStart)}</td></tr>`,
@@ -219,18 +213,19 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       `<tr><th>Round Pause</th>        <td>${formatSecondsToDHMS(Number(roundPauseDuration))}</td></tr>`,
       `<tr><th>Final Round Pause</th>  <td>${formatSecondsToDHMS(Number(lastRoundPauseDuration))}</td></tr>`,
       `<tr><th>Rounds</th>             <td>${missionRounds}</td></tr>`,
-      `<tr><th>Mission round Count</th><td>${roundCount}</td></tr>`,
+      `<tr><th>Round Count</th>        <td>${roundCount}</td></tr>`,
       `<tr><th>Enrollment Amount</th>  <td>${ethers.utils.formatEther(enrollmentAmount)} CRO</td></tr>`,
-      // NEW: CRO Initial (from API)
-      `<tr><th>CRO Initial</th>        <td>${croInitialDisplay}</td></tr>`,
+      `<tr><th>CRO Initial</th>        <td>${ethers.utils.formatEther(croInitial)} CRO</td></tr>`,
       `<tr><th>CRO Start</th>          <td>${ethers.utils.formatEther(croStart)} CRO</td></tr>`,
       `<tr><th>CRO Current</th>        <td>${ethers.utils.formatEther(croCurrent)} CRO</td></tr>`,
-      `<tr><th>Players Won</th>        <td>${playersWon.length}</td></tr>`,
-      `<tr><th>Refunded Players</th>   <td>${refundedPlayers.length}</td></tr>`,
-      // NEW: inline Increase Pot input + button
+      `<tr><th>All Refunded</th>       <td>${allRefunded ? "Yes" : "No"}</td></tr>`,
+      `<tr><th>Creator</th>            <td>${creator && creator !== ethers.constants.AddressZero ? copyableAddr(creator) : "—"}</td></tr>`,
+      `<tr><th>Mission Created</th>    <td>${formatLocalDateTime(missionCreated)}</td></tr>`,
+      `<tr><th>Pause Timestamp</th>    <td>${pauseTimestamp ? formatLocalDateTime(pauseTimestamp) : "—"}</td></tr>`,
+      // Inline Increase Pot
       `<tr><th>Increase Pot</th><td>
         <div class="d-flex align-items-center gap-2">
-          <input type="number" id="increasePotAmount" class="form-control form-control-sm" 
+          <input type="number" id="increasePotAmount" class="form-control form-control-sm"
                  placeholder="Amount in CRO" min="0" step="any" style="max-width:120px;">
           <button class="btn btn-sm btn-outline-success" id="increasePotBtn">
             <i class="fa-solid fa-plus"></i> Add
@@ -239,27 +234,20 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       </td></tr>`
     ];
 
-    const shouldRefund = (
-      status === 7 &&            // Failed
-      players.length > 0 &&
-      refundedPlayers.length === 0
-    );
+    // Refund condition: use the new boolean (no refundedPlayers array anymore)
+    const shouldRefund = (status === 7 && playersCount > 0 && !allRefunded);
     if (shouldRefund) triggerRefundModal(item.addr);
 
-    modalTitle.innerHTML = `Mission ${copyableAddr(item.addr)}</br><span class="missionTitle">Mission name: ${item.name}</span>`;
+    // Title
+    modalTitle.innerHTML = `Mission ${copyableAddr(item.addr)}<br><span class="missionTitle">Mission name: ${name || item.name || "—"}</span>`;
 
-    // Build top button row (Reload / Refund / Close)
+    // Buttons (Reload / Refund / Close)
     let buttons = `
       <button class="btn btn-sm btn-outline-info me-2 reload-btn" data-addr="${item.addr}">
         <i class="fa-solid fa-rotate-right me-1"></i> Reload
       </button>
     `;
-    const needsRefund = (
-      status === 7 &&
-      players.length > 0 &&
-      refundedPlayers.length === 0
-    );
-    if (needsRefund) {
+    if (shouldRefund) {
       buttons = `
         <button class="btn btn-sm btn-outline-warning me-2 refund-btn" data-addr="${item.addr}">
           <i class="fa-solid fa-coins me-1"></i> Refund
@@ -271,32 +259,24 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       </button>
     `;
 
-    // Compute finalize conditions (derived from fetched data; shown to user)
-    const stPartlySuccess        = status === 5;
+    // Finalize block (PartlySuccess)
+    const finalizeBlock = status === 5 ? `
+      <hr class="my-3" />
+      <div class="mt-3">
+        <h4 class="mb-2" style="color:#9fd0ff;">Force Finalize</h4>
+        <ul class="list-unstyled mb-3">
+          <li class="d-flex align-items-center gap-2">
+            <i class="fa-solid fa-circle-check text-success"></i>
+            <span>Status is PartlySuccess</span>
+          </li>
+        </ul>
+        <button class="btn btn-sm btn-outline-danger finalize-btn" data-addr="${item.addr}">
+          <i class="fa-solid fa-flag-checkered me-1"></i> Force Finalize Mission
+        </button>
+      </div>
+    ` : "";
 
-    // Enable if mission has ended AND no refunds were issued AND it is in a terminal-ish state (5/6/7)
-
-    let finalizeBlock = "";
-    if (stPartlySuccess) {
-      finalizeBlock = `
-        <hr class="my-3" />
-        <div class="mt-3">
-          <h4 class="mb-2" style="color:#9fd0ff;">Force Finalize</h4>
-          <ul class="list-unstyled mb-3">
-            <li class="d-flex align-items-center gap-2">
-              <i class="fa-solid fa-circle-check text-success"></i>
-              <span>Status is PartlySuccess</span>
-            </li>
-          </ul>
-          <button class="btn btn-sm btn-outline-danger finalize-btn"
-                  data-addr="${item.addr}""}>
-            <i class="fa-solid fa-flag-checkered me-1"></i> Force Finalize Mission
-          </button>
-        </div>
-      `;
-    }
-
-    // Render table + buttons + finalize section (at bottom)
+    // Render
     modalBody.innerHTML = `
       <table class="mission-table w-100"><tbody id="missionDataBody"></tbody></table>
       <div class="text-center mt-4">${buttons}</div>
@@ -305,7 +285,6 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
 
     const tbody = document.getElementById("missionDataBody");
     tbody.innerHTML = "";
-
     rowTemplates.forEach((rowHTML, i) => {
       const row = document.createElement("tr");
       row.innerHTML = rowHTML.replace(/^<tr>|<\/tr>$/g, "");
@@ -317,38 +296,31 @@ async function openMissionModal(item, btnRef = null, factoryStatus = null){
       }, i * 30);
     });
 
+    // Wire actions
     document.getElementById("missionModalCloseBtn")?.addEventListener("click", closeMissionModal);
+    const reloadBtn = modalBody.querySelector(".reload-btn");
+    if (reloadBtn) reloadBtn.addEventListener("click", () => openMissionModal(item, reloadBtn, factoryStatus));
+    const refundBtn = modalBody.querySelector(".refund-btn");
+    if (refundBtn) refundBtn.addEventListener("click", () => triggerRefundModal(item.addr, refundBtn, factoryStatus));
+    const finalizeBtn = modalBody.querySelector(".finalize-btn");
+    if (finalizeBtn) finalizeBtn.addEventListener("click", () => forceFinalizeMission(item.addr, finalizeBtn, factoryStatus));
 
-    const reloadBtn = modalBody.querySelector('.reload-btn');
-    if (reloadBtn) reloadBtn.addEventListener('click', () => openMissionModal(item, reloadBtn, factoryStatus));
-
-    const refundBtn = modalBody.querySelector('.refund-btn');
-    if (refundBtn) refundBtn.addEventListener('click', () => triggerRefundModal(item.addr, refundBtn, factoryStatus));
-
-    const finalizeBtn = modalBody.querySelector('.finalize-btn');
-    if (finalizeBtn) {
-      finalizeBtn.addEventListener('click', () =>
-        forceFinalizeMission(item.addr, finalizeBtn, factoryStatus)
-      );
-    }
-
-    // NEW: delegate click for Increase Pot (rows are appended async)
+    // Increase Pot
     modalBody.addEventListener("click", (e) => {
       const incBtn = e.target.closest("#increasePotBtn");
       if (!incBtn) return;
       e.preventDefault();
       const incIn = modalBody.querySelector("#increasePotAmount");
-      if (!incIn) {
-        return showAlert("Amount input is missing.", "error");
-      }
+      if (!incIn) return showAlert("Amount input is missing.", "error");
       increasePot(item.addr, incIn, incBtn);
     });
 
     adminSections.forEach(sec => sec.classList.add("hidden"));
     missionModal.classList.remove("hidden");
-
   }catch(e){
     showAlert(`getMissionData failed:<br>${e.message}`,"error");
+  } finally {
+    if (btnRef instanceof HTMLButtonElement) setBtnLoading(btnRef, false);
   }
 }
 
@@ -425,6 +397,13 @@ async function forceFinalizeMission(address, btnRef, factoryStatus = null) {
 
         if (success) {
           showAlert("Mission finalized.", "success");
+
+          // Kick the indexer so Factory Status refreshes immediately
+          fetch("/api/events/finalized", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mission: address.toLowerCase() })
+          }).catch(()=>{ /* non-fatal */ });
         }
 
         // Always reload the modal to reflect the new state
@@ -878,14 +857,6 @@ function applyDateDefaults(){
 
 /* ---------- ask to apply defaults ---------- */
 const askDefaults = () => {
-  // only offer when a base date exists and type isn't "Custom"
-  if (missionNameIn) {
-    if (Number(missionTypeSel.value) === 0) {
-      missionNameIn.placeholder = "";
-    } else {
-      missionNameIn.placeholder = "Optional";
-    }
-  }
 
   if (!enrollmentStartIn.value || Number(missionTypeSel.value) === 0) return;
 
@@ -1011,60 +982,43 @@ async function loadMissions(filter = "all") {
     missionsList.innerHTML = "";
     missionsList.classList.remove("empty");
 
-    const provider = getReadProvider();
-    const factory  = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
+    // 1) Fetch all missions from DB
+    const res = await fetch("/api/missions/all", { cache: "no-store" });
+    const all = res.ok ? await res.json() : [];
 
-    let addrs = [], stats = [], names = [];
-
+    // 2) Client-side filter to match the old dropdowns
+    let rows = all;
     switch (filter) {
       case "active":
-        [addrs, stats, names] = await factory.getMissionsNotEnded();
+        rows = all.filter(x => Number(x.status) < 5);
         setTitle("Active Missions");
         break;
       case "partial":
-        [addrs, stats, names] = await factory.getMissionsByStatus(5);
+        rows = all.filter(x => Number(x.status) === 5);
         setTitle("Partly Ended Missions");
         break;
       case "failed":
-        [addrs, stats, names] = await factory.getMissionsByStatus(7);
+        rows = all.filter(x => Number(x.status) === 7);
         setTitle("Failed Missions");
         break;
       case "ended":
-        [addrs, stats, names] = await factory.getMissionsEnded();
+        rows = all.filter(x => Number(x.status) >= 5);
         setTitle("Ended Missions");
         break;
       default:
-        [addrs, stats, names] = await factory.getAllMissions();
         setTitle("All Missions");
     }
-    const items = addrs.map((addr, i) => ({
-      addr,
-      name: names[i],
-      status: Number(stats[i]),
-      idx: addrs.length - i
-    }));
 
-    items.sort((a, b) => {
-      if (a.status === 5 && b.status !== 5) return -1;
-      if (b.status === 5 && a.status !== 5) return 1;
-      return b.idx - a.idx;
-    });
+    // 3) Adapt to the old grid builder’s expected arrays
+    const addrs = rows.map(r => r.mission_address);
+    const stats = rows.map(r => Number(r.status));
+    const names = rows.map(r => r.name || "");
 
-    missionsList.innerHTML = "";
-    missionsList.classList.remove("empty");
-    if (items.length === 0) {
-      missionsList.classList.add("empty");
-      const li = document.createElement("li");
-      li.className = "mission-empty text-muted";
-      li.textContent = "No missions found for this filter.";
-      missionsList.appendChild(li);
-    } else {
-        await buildMissionGrid(addrs, stats, names);
-    }
-
+    await buildMissionGrid(addrs, stats, names);
     missionsSection.classList.remove("hidden");
   } catch (err) {
     console.warn("loadMissions()", err);
+    showAlert("Could not load missions list.", "error");
   } finally {
     spinner.classList.remove("show");
     setTimeout(() => spinner.classList.add("hidden"), 500);
@@ -1075,18 +1029,19 @@ async function loadLatestMissions(n = 10){
   const spinner = document.getElementById("missionsLoadingSpinner");
   fadeSpinner(spinner, true);
   try{
-    const p       = getReadProvider();
-    const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, p);
+    const res  = await fetch("/api/missions/all", { cache: "no-store" });
+    const all  = res.ok ? await res.json() : [];
+    const rows = all.slice(0, Math.max(0, Number(n)||0));
 
-    const [addrs, stats, names] = await factory.getLatestMissions(n);
-    addrs.length == 1 
-      ? setTitle(`Latest ${addrs.length} Mission`)
-      : setTitle(`Latest ${addrs.length} Missions`);
+    const addrs = rows.map(r => r.mission_address);
+    const stats = rows.map(r => Number(r.status));
+    const names = rows.map(r => r.name || "");
 
-    /* reuse existing grid builder */
+    setTitle(addrs.length === 1 ? `Latest 1 Mission` : `Latest ${addrs.length} Missions`);
     await buildMissionGrid(addrs, stats, names);
   }catch(err){
     console.warn("loadLatestMissions()", err);
+    showAlert("Could not load latest missions.", "error");
   }finally{
     fadeSpinner(spinner, false);
   }
@@ -1204,23 +1159,23 @@ form?.addEventListener("submit", async e => {
     /* ─ gather & convert ─ */
     const f = form.elements;
     const args = [
-      parseInt(f.missionType.value),           // MissionType
-      toUnix(f.enrollmentStart.value),         // enrollmentStart
-      toUnix(f.enrollmentEnd.value),           // enrollmentEnd
-      eth.parseEther(f.enrollmentAmount.value),// enrollmentAmount
-      parseInt(f.minPlayers.value),            // min players
-      parseInt(f.maxPlayers.value),            // max players
-      parseInt(f.roundPauseDuration.value),    // roundPauseDuration  (uint8)
-      parseInt(f.lastRoundPauseDuration.value),// lastRoundPauseDuration (uint8)
-      toUnix(f.missionStart.value),            // missionStart
-      toUnix(f.missionEnd.value),              // missionEnd
-      parseInt(f.rounds.value),                // missionRounds
-      f.missionName.value.trim(),              // name
-      ethers.ZeroHash,                         // pinHash (bytes32) – zero for types 0–6
-      ethers.ZeroAddress                       // creator (address) – zero for types 0–6
+      parseInt(f.missionType.value),
+      toUnix(f.enrollmentStart.value),
+      toUnix(f.enrollmentEnd.value),
+      eth.parseEther(f.enrollmentAmount.value),
+      parseInt(f.minPlayers.value),
+      parseInt(f.maxPlayers.value),
+      parseInt(f.roundPauseDuration.value),
+      parseInt(f.lastRoundPauseDuration.value),
+      toUnix(f.missionStart.value),
+      toUnix(f.missionEnd.value),
+      parseInt(f.rounds.value),
+      f.missionName.value.trim(),
+      ethers.constants.HashZero,     // ✅ ethers v5
+      ethers.constants.AddressZero   // ✅ ethers v5
     ];
     const tx = await factory.createMission(
-      ...args,
+      ...args,                        // ✅ spread the array
       { value: eth.parseEther(f.initialPot.value || "0") }
     );
     showAlert("Transaction sent – waiting for confirmation…","info");

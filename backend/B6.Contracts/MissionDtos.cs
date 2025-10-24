@@ -5,59 +5,72 @@ using Nethereum.Contracts;
 
 namespace B6.Contracts
 {
-    // ---- Mission.getMissionData (wrapped single tuple) ----
     [Function("getMissionData", typeof(MissionDataWrapper))]
     public class GetMissionDataFunction : FunctionMessage { }
 
     [FunctionOutput]
-    public class PlayerWin : IFunctionOutputDTO {
-        [Parameter("address",  "player",    1)] public string     Player { get; set; } = string.Empty;
-        [Parameter("uint256",  "amountWon", 2)] public BigInteger Amount { get; set; }
-    }
-
-    // function returns ( tuple(...) ) → wrap it:
-    [FunctionOutput]
-    public class MissionDataWrapper : IFunctionOutputDTO {
-        [Parameter("tuple", "", 1)] public MissionDataTuple Data { get; set; } = new();
+    public class MissionDataWrapper : IFunctionOutputDTO
+    {
+        // getMissionData returns a single tuple
+        [Parameter("tuple", "", 1)]
+        public MissionDataTuple Data { get; set; } = new();
     }
 
     [FunctionOutput]
-    public class MissionDataTuple : IFunctionOutputDTO {
-        // keep players at the top (as you requested)
-        [Parameter("address[]", "players",                1)] public List<string>    Players                 { get; set; } = new();
+    public class PlayerWin : IFunctionOutputDTO
+    {
+        [Parameter("address", "player",    1)] public string     Player { get; set; } = string.Empty;
+        [Parameter("uint256", "amountWon", 2)] public BigInteger Amount { get; set; }
+    }
 
-        // mission_type, schedule, enrollment, and pauses (order aligned with your API projections)
-        [Parameter("uint8",     "missionType",            2)] public byte            MissionType             { get; set; }
-        [Parameter("uint256",   "enrollmentStart",        3)] public BigInteger      EnrollmentStart         { get; set; }
-        [Parameter("uint256",   "enrollmentEnd",          4)] public BigInteger      EnrollmentEnd           { get; set; }
-        [Parameter("uint256",   "enrollmentAmount",       5)] public BigInteger      EnrollmentAmount        { get; set; }
-        [Parameter("uint8",     "enrollmentMinPlayers",   6)] public byte            EnrollmentMinPlayers    { get; set; }
-        [Parameter("uint8",     "enrollmentMaxPlayers",   7)] public byte            EnrollmentMaxPlayers    { get; set; }
+    // Player tuple matching the Solidity struct Players { address player; uint256 enrolledTS; uint256 amountWon; uint256 wonTS; bool refunded; bool refundFailed; uint256 refundTS; }
+    [FunctionOutput]
+    public class PlayerTuple : IFunctionOutputDTO
+    {
+        [Parameter("address","player",       1)] public string     Player        { get; set; } = string.Empty;
+        [Parameter("uint256","enrolledTS",   2)] public BigInteger EnrolledTS    { get; set; }
+        [Parameter("uint256","amountWon",    3)] public BigInteger AmountWon     { get; set; }
+        [Parameter("uint256","wonTS",        4)] public BigInteger WonTS         { get; set; }
+        [Parameter("bool",   "refunded",     5)] public bool       Refunded      { get; set; }
+        [Parameter("bool",   "refundFailed", 6)] public bool       RefundFailed  { get; set; }
+        [Parameter("uint256","refundTS",     7)] public BigInteger RefundTS      { get; set; }
+    }
 
-        [Parameter("uint256",   "missionStart",           8)] public BigInteger      MissionStart            { get; set; }
-        [Parameter("uint256",   "missionEnd",             9)] public BigInteger      MissionEnd              { get; set; }
-        [Parameter("uint8",     "missionRounds",         10)] public byte            MissionRounds           { get; set; }
-        [Parameter("uint8",     "roundCount",            11)] public byte            RoundCount              { get; set; }
+    [FunctionOutput]
+    public class MissionDataTuple : IFunctionOutputDTO
+    {
+        [Parameter("uint8",   "status",                 1)] public byte       Status                 { get; set; }
+        [Parameter("uint256", "missionCreated",         2)] public BigInteger MissionCreated         { get; set; }
+        [Parameter("string",  "name",                   3)] public string     Name                   { get; set; } = string.Empty;
 
-        // CRO values (add croInitial, then croStart/croCurrent)
-        [Parameter("uint256",   "croInitial",            12)] public BigInteger      CroInitial              { get; set; }   
-        [Parameter("uint256",   "croStart",              13)] public BigInteger      CroStart                { get; set; }
-        [Parameter("uint256",   "croCurrent",            14)] public BigInteger      CroCurrent              { get; set; }
+        [Parameter("uint8",   "missionType",            4)] public byte       MissionType            { get; set; }
+        [Parameter("uint8",   "missionRounds",          5)] public byte       MissionRounds          { get; set; }
+        [Parameter("uint8",   "roundPauseDuration",     6)] public byte       RoundPauseDuration     { get; set; }
+        [Parameter("uint8",   "lastRoundPauseDuration", 7)] public byte       LastRoundPauseDuration { get; set; }
 
-        // pauses (seconds) + pause timestamp
-        [Parameter("uint32",    "roundPauseDuration",    15)] public uint            RoundPauseDuration      { get; set; }
-        [Parameter("uint32",    "lastRoundPauseDuration",16)] public uint            LastRoundPauseDuration  { get; set; }
-        [Parameter("uint256",   "pauseTimestamp",        17)] public BigInteger      PauseTimestamp          { get; set; }
+        [Parameter("uint256", "croInitial",             8)] public BigInteger CroInitial             { get; set; }
+        [Parameter("uint256", "croStart",               9)] public BigInteger CroStart               { get; set; }
+        [Parameter("uint256", "croCurrent",            10)] public BigInteger CroCurrent             { get; set; }
+        [Parameter("uint256", "enrollmentAmount",      11)] public BigInteger EnrollmentAmount       { get; set; }
 
-        // win/refund lists, name, created
-        [Parameter("tuple[]",   "playersWon",            18)] public List<PlayerWin> PlayersWon              { get; set; } = new();
-        [Parameter("address[]", "refundedPlayers",       19)] public List<string>    RefundedPlayers         { get; set; } = new();
-        [Parameter("string",    "name",                  20)] public string          Name                    { get; set; } = string.Empty;
-        [Parameter("uint256",   "missionCreated",        21)] public BigInteger      MissionCreated          { get; set; }
+        [Parameter("uint8",   "enrollmentMinPlayers",  12)] public byte       EnrollmentMinPlayers   { get; set; }
+        [Parameter("uint8",   "enrollmentMaxPlayers",  13)] public byte       EnrollmentMaxPlayers   { get; set; }
 
-        // creator + allRefunded (added in your contract update)
-        [Parameter("address",   "creator",               22)] public string          Creator                 { get; set; } = string.Empty;  // NEW
-        [Parameter("bool",      "allRefunded",           23)] public bool            AllRefunded             { get; set; }                  // NEW
+        [Parameter("uint256", "enrollmentStart",        14)] public BigInteger EnrollmentStart       { get; set; }
+        [Parameter("uint256", "enrollmentEnd",          15)] public BigInteger EnrollmentEnd         { get; set; }
+        [Parameter("uint256", "missionStart",           16)] public BigInteger MissionStart          { get; set; }
+        [Parameter("uint256", "missionEnd",             17)] public BigInteger MissionEnd            { get; set; }
+
+        // --- dynamic + trailing scalars in on-chain order ---
+        [Parameter("tuple[]","players",                 18)] public List<PlayerTuple> Players        { get; set; } = new();
+
+        // trailing scalars (shift back because arrays are gone)
+        [Parameter("uint8",   "enrollmentCount",     19)] public byte                  EnrollmentCount  { get; set; }
+        [Parameter("uint8",   "roundCount",          20)] public byte                  RoundCount       { get; set; }
+        [Parameter("uint256", "pauseTimestamp",      21)] public BigInteger            PauseTimestamp   { get; set; }
+        [Parameter("bool",    "allRefunded",         22)] public bool                  AllRefunded      { get; set; }
+        [Parameter("address", "creator",             23)] public string                Creator          { get; set; } = string.Empty;
+
     }
 
     // ───────── Events: Factory ─────────

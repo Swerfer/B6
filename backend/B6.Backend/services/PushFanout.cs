@@ -112,11 +112,11 @@ namespace B6.Backend.Services
         private async Task<List<string>> GetEnrolledAsync(string mission) {
             await using var c = new NpgsqlConnection(_cs);
             await c.OpenAsync();
-            await using var cmd = new NpgsqlCommand("select player_address from mission_enrollments where mission_address=@a;", c);
+            await using var cmd = new NpgsqlCommand("select player from players where mission_address=@a;", c);
             cmd.Parameters.AddWithValue("a", mission.ToLowerInvariant());
             var list = new List<string>();
             await using var rd = await cmd.ExecuteReaderAsync();
-            while (await rd.ReadAsync()) list.Add((rd["player_address"] as string ?? "").ToLowerInvariant());
+            while (await rd.ReadAsync()) list.Add((rd["player"] as string ?? "").ToLowerInvariant());
             return list;
         }
 

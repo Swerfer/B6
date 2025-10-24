@@ -321,13 +321,12 @@ namespace B6.Indexer
 
                 try
                 {
-                    await EnsureMissionRowAsync(mission, token);
-                    // Single source of truth: reuse existing snapshot path
+                    // Single source of truth: refresh will UPSERT the row
                     await RefreshMissionSnapshotAsync(mission, token);
                 }
                 catch (Exception ex)
                 {
-                    _log.LogDebug(ex, "Factory change refresh failed for {mission}", mission);
+                    _log.LogWarning(ex, "Factory change refresh failed for {mission}", mission);
                 }
 
                 // Track max seq
@@ -348,17 +347,6 @@ namespace B6.Indexer
                 _factoryLastSeq = newMaxSeq;
                 await SaveFactoryLastSeqAsync(_factoryLastSeq, token);
             }
-        }
-
-        private async Task                              EnsureMissionRowAsync               (string mission, CancellationToken ct) {
-            await using var conn = new NpgsqlConnection(_pg);
-            await conn.OpenAsync(ct);
-            await using var cmd = new NpgsqlCommand(@"
-                insert into missions (mission_address, created_at, updated_at)
-                values (@a, now(), now())
-                on conflict (mission_address) do nothing;", conn);
-            cmd.Parameters.AddWithValue("a", mission);
-            await cmd.ExecuteNonQueryAsync(ct);
         }
 
         private async Task                              RefreshMissionSnapshotAsync         (string mission, CancellationToken token) {
@@ -386,21 +374,19 @@ namespace B6.Indexer
                 if (changes.NewRound != null)
                 {
                     string winner = "";
-                    string amountWei = "0";
+                    string amountWei = "0"; // snapshot doesn't carry per-round payout
+
                     try
                     {
                         var ix = changes.NewRound.Value - 1;
-                        if (ix >= 0 && ix < md.PlayersWon.Count)
-                        {
-                            var rw = md.PlayersWon[ix];
-                            winner    = (rw.Player ?? "").ToLower(System.Globalization.CultureInfo.InvariantCulture);
-                            amountWei = (rw.Amount  ).ToString(System.Globalization.CultureInfo.InvariantCulture);
-                        }
+                        if (ix >= 0 && ix < md.Players.Count)
+                            winner = (md.Players[ix].Player ?? "").ToLower(System.Globalization.CultureInfo.InvariantCulture);
                     }
                     catch { /* best effort */ }
 
                     await NotifyRoundAsync(mission, changes.NewRound.Value, winner, amountWei, token);
                 }
+
             }
 
         }
@@ -419,6 +405,8 @@ namespace B6.Indexer
             string? curName  = null;
             byte?   curType  = null;
             bool    curFinal = false;
+            string? curCroNow = null;   // read as text to avoid numeric precision quirks
+            long?   curPauseTs = null;
 
             await using (var conn = new NpgsqlConnection(_pg))
             {
@@ -426,8 +414,16 @@ namespace B6.Indexer
 
                 // Load current
                 await using (var read = new NpgsqlCommand(@"
-                    select status, round_count, name, mission_type, coalesce(finalized,false)
-                    from missions where mission_address = @a;", conn))
+                    select 
+                        status, 
+                        round_count, 
+                        name, 
+                        mission_type, 
+                        coalesce(finalized,false),
+                        cro_current_wei::text,
+                        pause_timestamp
+                    from missions 
+                    where mission_address = @a;", conn))
                 {
                     read.Parameters.AddWithValue("a", mission);
                     await using var rdr = await read.ExecuteReaderAsync(token);
@@ -438,6 +434,8 @@ namespace B6.Indexer
                         if (!rdr.IsDBNull(2)) curName   = rdr.GetString(2);
                         if (!rdr.IsDBNull(3)) curType   = rdr.GetByte(3);
                         curFinal = !rdr.IsDBNull(4) && rdr.GetBoolean(4);
+                        if (!rdr.IsDBNull(5)) curCroNow  = rdr.GetString(5);
+                        if (!rdr.IsDBNull(6)) curPauseTs = rdr.GetInt64(6);
                     }
                 }
 
@@ -453,63 +451,211 @@ namespace B6.Indexer
                 else if (now < ee)      newStatus = 1; // Enrollment
                 else if (now < ms)      newStatus = 2; // Arming
                 else if (now < me)      newStatus = 3; // Active
-                else                    newStatus = 5; // Ended/Finalizing (5..7 range in your system)
+                else
+                {
+                    // Ended: derive terminal status from progress
+                    var total  = (int)md.MissionRounds;
+                    var played = (int)md.RoundCount;
+
+                    if (played <= 0)                         newStatus = 7; // Failed
+                    else if (total > 0 && played >= total)   newStatus = 6; // Success
+                    else                                     newStatus = 5; // PartlySuccess
+                }
 
                 oldStatus = curStatus;
                 oldRound  = curRound;
 
+                // Durable last-bank: keep last non-zero pause in DB
+                long? snapPause = md.PauseTimestamp == 0 ? (long?)null : (long)md.PauseTimestamp;
+                long? nextPause = snapPause ?? curPauseTs;
+
                 // Update missions row from snapshot
-                await using (var upd = new NpgsqlCommand(@"
-                    update missions
-                    set
-                        name                     = coalesce(@nm, name),
-                        mission_type             = @mt,
-                        status                   = @st,
-                        enrollment_start         = @es,
-                        enrollment_end           = @ee,
-                        enrollment_amount_wei    = @ea,
-                        enrollment_min_players   = @emin,
-                        enrollment_max_players   = @emax,
-                        mission_start            = @ms,
-                        mission_end              = @me,
-                        mission_rounds_total     = @rt,
-                        round_count              = @rc,
-                        cro_initial_wei          = @ci,
-                        cro_start_wei            = @cs,
-                        cro_current_wei          = @cc,
-                        pause_timestamp          = @pt,
+                await using (var upsert = new NpgsqlCommand(@"
+                    insert into missions (
+                        mission_address,
+                        name,
+                        mission_type,
+                        status,
+                        enrollment_start,
+                        enrollment_end,
+                        enrollment_amount_wei,
+                        enrollment_min_players,
+                        enrollment_max_players,
+                        mission_start,
+                        mission_end,
+                        mission_rounds_total,
+                        round_count,
+                        cro_initial_wei,
+                        cro_start_wei,
+                        cro_current_wei,
+                        pause_timestamp,
+                        updated_at,
+                        mission_created,
+                        round_pause_secs,
+                        last_round_pause_secs,
+                        creator_address,
+                        all_refunded
+                    )
+                    values (
+                        @a,
+                        @nmIns,
+                        @mt,
+                        @st,
+                        @es,
+                        @ee,
+                        @ea,
+                        @emin,
+                        @emax,
+                        @ms,
+                        @me,
+                        @rt,
+                        @rc,
+                        @ci,
+                        @cs,
+                        @cc,
+                        @pt,
+                        now(),
+                        @mc,
+                        @rpd,
+                        @lrpd,
+                        @cr,
+                        @ar
+                    )
+                    on conflict (mission_address) do update set
+                        name                     = excluded.name,
+                        mission_type             = excluded.mission_type,
+                        status                   = excluded.status,
+                        enrollment_start         = excluded.enrollment_start,
+                        enrollment_end           = excluded.enrollment_end,
+                        enrollment_amount_wei    = excluded.enrollment_amount_wei,
+                        enrollment_min_players   = excluded.enrollment_min_players,
+                        enrollment_max_players   = excluded.enrollment_max_players,
+                        mission_start            = excluded.mission_start,
+                        mission_end              = excluded.mission_end,
+                        mission_rounds_total     = excluded.mission_rounds_total,
+                        round_count              = excluded.round_count,
+                        cro_initial_wei          = excluded.cro_initial_wei,
+                        cro_start_wei            = excluded.cro_start_wei,
+                        cro_current_wei          = excluded.cro_current_wei,
+                        pause_timestamp          = excluded.pause_timestamp,
                         updated_at               = now(),
-                        mission_created          = @mc,
-                        round_pause_secs         = @rpd,
-                        last_round_pause_secs    = @lrpd,
-                        creator_address          = @cr,
-                        all_refunded             = @ar
-                    where mission_address = @a;", conn))
+                        mission_created          = excluded.mission_created,
+                        round_pause_secs         = excluded.round_pause_secs,
+                        last_round_pause_secs    = excluded.last_round_pause_secs,
+                        creator_address          = excluded.creator_address,
+                        all_refunded             = excluded.all_refunded;", conn))
                 {
-                    upd.Parameters.AddWithValue("a", mission);
-                    upd.Parameters.AddWithValue("nm", (object?)md.Name ?? DBNull.Value);
-                    upd.Parameters.AddWithValue("mt", md.MissionType);
-                    upd.Parameters.AddWithValue("st", newStatus ?? (object)DBNull.Value);
-                    upd.Parameters.AddWithValue("es", md.EnrollmentStart);
-                    upd.Parameters.AddWithValue("ee", md.EnrollmentEnd);
-                    upd.Parameters.AddWithValue("ea", md.EnrollmentAmount);
-                    upd.Parameters.AddWithValue("emin", md.EnrollmentMinPlayers);
-                    upd.Parameters.AddWithValue("emax", md.EnrollmentMaxPlayers);
-                    upd.Parameters.AddWithValue("ms", md.MissionStart);
-                    upd.Parameters.AddWithValue("me", md.MissionEnd);
-                    upd.Parameters.AddWithValue("rt", (short)md.MissionRounds);
-                    upd.Parameters.AddWithValue("rc", (short)md.RoundCount);
-                    upd.Parameters.AddWithValue("ci", md.CroInitial);
-                    upd.Parameters.AddWithValue("cs", md.CroStart);
-                    upd.Parameters.AddWithValue("cc", md.CroCurrent);
-                    upd.Parameters.AddWithValue("pt", md.PauseTimestamp == 0 ? (object)DBNull.Value : (object)md.PauseTimestamp);
-                    upd.Parameters.AddWithValue("mc", md.MissionCreated);
-                    upd.Parameters.AddWithValue("rpd", md.RoundPauseDuration);
-                    upd.Parameters.AddWithValue("lrpd", md.LastRoundPauseDuration);
-                    upd.Parameters.AddWithValue("cr", (object?)md.Creator?.ToLowerInvariant() ?? DBNull.Value);
-                    upd.Parameters.AddWithValue("ar", md.AllRefunded);
-                    await upd.ExecuteNonQueryAsync(token);
+                    upsert.Parameters.AddWithValue("a", mission);
+                    upsert.Parameters.AddWithValue("nmIns", (object?)(md.Name ?? string.Empty));
+                    upsert.Parameters.AddWithValue("mt", md.MissionType);
+                    upsert.Parameters.AddWithValue("st", newStatus ?? (object)DBNull.Value);
+                    upsert.Parameters.AddWithValue("es", md.EnrollmentStart);
+                    upsert.Parameters.AddWithValue("ee", md.EnrollmentEnd);
+                    upsert.Parameters.AddWithValue("ea", md.EnrollmentAmount);
+                    upsert.Parameters.AddWithValue("emin", md.EnrollmentMinPlayers);
+                    upsert.Parameters.AddWithValue("emax", md.EnrollmentMaxPlayers);
+                    upsert.Parameters.AddWithValue("ms", md.MissionStart);
+                    upsert.Parameters.AddWithValue("me", md.MissionEnd);
+                    upsert.Parameters.AddWithValue("rt", (short)md.MissionRounds);
+                    upsert.Parameters.AddWithValue("rc", (short)md.RoundCount);
+                    upsert.Parameters.AddWithValue("ci", md.CroInitial);
+                    upsert.Parameters.AddWithValue("cs", md.CroStart);
+                    upsert.Parameters.AddWithValue("cc", md.CroCurrent);
+                    upsert.Parameters.AddWithValue("pt", (object?)nextPause ?? DBNull.Value);
+                    upsert.Parameters.AddWithValue("mc", md.MissionCreated);
+                    upsert.Parameters.AddWithValue("rpd", md.RoundPauseDuration);
+                    upsert.Parameters.AddWithValue("lrpd", md.LastRoundPauseDuration);
+                    upsert.Parameters.AddWithValue("cr", (object?)md.Creator?.ToLowerInvariant() ?? DBNull.Value);
+                    upsert.Parameters.AddWithValue("ar", md.AllRefunded);
+                    await upsert.ExecuteNonQueryAsync(token);
                 }
+
+                // --- Sync players (full) from snapshot into players table ---
+                var tuples = md.Players ?? new List<B6.Contracts.PlayerTuple>();
+
+                // Current players in DB for this mission
+                var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                await using (var enRead = new NpgsqlCommand(
+                    "select lower(player) from players where mission_address = @a;", conn))
+                {
+                    enRead.Parameters.AddWithValue("a", mission);
+                    await using var enRdr = await enRead.ExecuteReaderAsync(token);
+                    while (await enRdr.ReadAsync(token))
+                        existing.Add(enRdr.GetString(0));
+                }
+
+                int membershipChanges = 0;
+
+                foreach (var t in tuples)
+                {
+                    var addr = (t.Player ?? string.Empty).Trim().ToLowerInvariant();
+                    if (addr.Length == 0) continue;
+
+                    object DbTs(BigInteger ts) => ts == 0 ? (object)DBNull.Value : (long)ts; // uint256 epoch seconds → bigint
+                    object DbWei(BigInteger v) => (object)v;                                 // BigInteger → NUMERIC (or BIGINT if you chose that)
+
+                    await using var up = new NpgsqlCommand(@"
+                        insert into players (
+                            mission_address, player,
+                            ""enrolledTS"", ""amountWon"", ""wonTS"", refunded, ""refundFailed"", ""refundTS""
+                        ) values (
+                            @a, @p,
+                            @en, @aw, @wt, @rf, @rff, @rt
+                        )
+                        on conflict (mission_address, player) do update set
+                            ""enrolledTS""   = excluded.""enrolledTS"",
+                            ""amountWon""    = excluded.""amountWon"",
+                            ""wonTS""        = excluded.""wonTS"",
+                            refunded         = excluded.refunded,
+                            ""refundFailed"" = excluded.""refundFailed"",
+                            ""refundTS""     = excluded.""refundTS"";", conn);
+
+                    up.Parameters.AddWithValue("a",  mission);
+                    up.Parameters.AddWithValue("p",  addr);
+                    up.Parameters.AddWithValue("en", DbTs(t.EnrolledTS));
+                    up.Parameters.AddWithValue("aw", DbWei(t.AmountWon));
+                    up.Parameters.AddWithValue("wt", DbTs(t.WonTS));
+                    up.Parameters.AddWithValue("rf", t.Refunded);
+                    up.Parameters.AddWithValue("rff", t.RefundFailed);
+                    up.Parameters.AddWithValue("rt", DbTs(t.RefundTS));
+
+                    await up.ExecuteNonQueryAsync(token);
+
+                    if (!existing.Contains(addr)) membershipChanges++;
+                }
+
+                // Strict mirror: delete rows not present in snapshot
+                var keep = tuples.Select(x => (x.Player ?? string.Empty).Trim().ToLowerInvariant())
+                                .Where(x => x.Length > 0)
+                                .Distinct()
+                                .ToArray();
+
+                await using (var del = new NpgsqlCommand(@"
+                    delete from players
+                    where mission_address = @a
+                      and lower(player) <> all (@keep);", conn))
+                {
+                    del.Parameters.AddWithValue("a", mission);
+                    del.Parameters.Add("keep", NpgsqlDbType.Array | NpgsqlDbType.Text).Value = keep;
+                    var removed = await del.ExecuteNonQueryAsync(token);
+                    membershipChanges += removed;
+                }
+
+                if (membershipChanges > 0)
+                    changes.HasMeaningfulChange = true;
+
+                try
+                {
+                    var dbCro   = (curCroNow ?? "").Trim();
+                    var snapCro = md.CroCurrent.ToString();
+                    if (!string.Equals(dbCro, snapCro, StringComparison.Ordinal))
+                        changes.HasMeaningfulChange = true;
+
+                    long? dbPause = curPauseTs;
+                    if (dbPause != nextPause)
+                        changes.HasMeaningfulChange = true;
+                }
+                catch { /* best effort */ }
 
                 // Detect status transition
                 if (oldStatus.HasValue && newStatus.HasValue && oldStatus.Value != newStatus.Value)
@@ -581,6 +727,7 @@ namespace B6.Indexer
                 try
                 {
                     await RefreshMissionSnapshotAsync(mission, token);
+                    await NotifyMissionUpdatedAsync  (mission, token);
                 }
                 catch (Exception ex)
                 {

@@ -47,7 +47,6 @@ import {
 
 import {
   getMission,              
-  getMissionDebounced,
   getMissionsAll,
   getMissionsNotEnded,      
   getMissionsJoinable,   
@@ -116,7 +115,7 @@ let   stageRefreshPending   = false;
 const __endPopupShown       = new Set();
 const __endPopupDeferred    = new Set(); // missions whose end popup is queued after video
 let   __bankingInFlight     = null;
-const __viewerWonOnce       = new Set(); // missions the current viewer has already won in this session
+const __viewerWonOnce       = new Map(); // missions the current viewer has already won in this session
 const __viewerWins          = new Set();
 const VAULT_IMG_CLOSED      = 'assets/images/Vault_bg_squared.png';
 const VAULT_IMG_OPEN        = 'assets/images/Vault_bg_squared_opened.png';
@@ -401,12 +400,12 @@ function        enrichMissionFromApi(data){
       ? Number(m.enrolled_players)
       : Array.isArray(m.enrollments) ? m.enrollments.length : 0;
 
-    const joined = BigInt(Math.max(
-      enrolledFromApi,
-      Number(optimisticGuard?.players || 0)
-    ));
+    const joined   = BigInt(Math.max(enrolledFromApi, Number(optimisticGuard?.players || 0)));
+    const derived  = initialWei + feeWei * joined;
+    const current  = BigInt(String(m.cro_current_wei || m.cro_start_wei || "0"));
 
-    m.cro_current_wei = (initialWei + feeWei * joined).toString();
+    // Never regress: prefer the higher value when DB/indexer is ahead of enrollments
+    m.cro_current_wei = (current > derived ? current : derived).toString();
   }
   return m;
 }
@@ -543,7 +542,10 @@ async function  cleanupMissionDetail(){
   staleWarningShown = false;
 
   if (subscribedAddr) {
-    try { await leaveMissionGroup(subscribedAddr); dbg("Unsubscribed (cleanup):", subscribedAddr); } catch {}
+    try { 
+      await leaveMissionGroup(subscribedAddr); 
+      //dbg("Unsubscribed (cleanup):", subscribedAddr); 
+    } catch {}
   }
   subscribedGroups.clear();
   subscribedAddr = null;
@@ -743,7 +745,7 @@ function        topWinners(enrollments = [], rounds = [], n = 5){
   // Tie-break: earlier enrollment first
   const enrolledAt = new Map();
   for (const e of (enrollments || [])){
-    const a = String(e?.player_address || "").toLowerCase();
+    const a = String(e?.address || "").toLowerCase();
     if (a) enrolledAt.set(a, Number(e.enrolled_at || 0));
   }
 
@@ -920,13 +922,13 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
       const st   = Number(missionObj?.status);
       const me   = (walletAddress || "").toLowerCase();
       const joined = !!(me && (missionObj?.enrollments || []).some(e => {
-        const p = String(e?.player_address || e?.address || e?.player || "").toLowerCase();
+        const p = String(e?.address || "").toLowerCase();
         return p === me;
       }));
 
       const addrLc = String(missionObj?.mission_address || "").toLowerCase();
       const alreadyWon = !!(me && (
-        __viewerWonOnce.has(addrLc) ||
+        (__viewerWonOnce.get(addrLc) === me) ||
         (missionObj?.rounds || []).some(r => {
           const w = String(r?.winner_address || "").toLowerCase();
           return w === me;
@@ -1459,11 +1461,36 @@ async function  startHub() { // SignalR HUB via shared hub.js
       dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
 
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
+        // ↓↓↓ invalidate stage snap-cache so the next fetch cannot reuse stale payload
+        if (__missionSnapCache.addr === currentMissionAddr) __missionSnapCache.ts = 0;
+
         try {
-          const m = enrichMissionFromApi(await getMissionDebounced(currentMissionAddr));
+          const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
 
           const apiStatus = Number(m.status);
           const curStatus = Number(stageCurrentStatus ?? -1);
+
+          // ⬇️ Spectator optimism during Enrolling: show +1 Players (and derived Pool) instantly
+          if (apiStatus === 1) {
+            try {
+              const fromApi = (m?.enrolled_players != null)
+                ? Number(m.enrolled_players)
+                : (Array.isArray(m?.enrollments) ? m.enrollments.length : 0);
+
+              const feeWei  = String(m.enrollment_amount_wei || "0");
+              const baseWei = String(m.cro_current_wei || m.cro_start_wei || "0");
+
+              const targetPlayers = Math.max(fromApi + 1, Number(optimisticGuard?.players || 0));
+              optimisticGuard = {
+                untilMs: Date.now() + 8000,                     // short window to avoid stale optimism
+                players: targetPlayers,
+                croNow:  (BigInt(baseWei) + BigInt(feeWei)).toString()
+              };
+
+              // Immediate repaint (no network) so pills jump now
+              try { buildStageLowerHudForStatus(m); } catch {}
+            } catch {}
+          }
 
           if (apiStatus < curStatus) {
             console.debug("[MissionUpdated] stale status from API; ignoring", apiStatus, "<", curStatus);
@@ -1483,8 +1510,15 @@ async function  startHub() { // SignalR HUB via shared hub.js
 
           const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
           if (onStage) {
-            stageCurrentStatus = Number(m.status);
-            renderStage(m);
+            const incoming = apiStatus;
+            const current  = curStatus;
+            const toggle34 = (incoming === 3 && current === 4) || (incoming === 4 && current === 3);
+
+            // only advance or 3↔4 flip; never downgrade stageCurrentStatus
+            if (current < 0 || incoming > current || toggle34) {
+              stageCurrentStatus = incoming;
+            }
+
             refreshOpenStageFromServer(2);
           } else {
             if (m) renderMissionDetail({ mission: m });
@@ -1507,17 +1541,25 @@ async function  startHub() { // SignalR HUB via shared hub.js
       const gameMain = document.getElementById('gameMain');
 
       try {
-        const m = enrichMissionFromApi(await getMissionDebounced(currentMissionAddr));
-        stageCurrentStatus = Number(m.status);
+        const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
+
+        const incoming = Number(m.status);
+        const current  = Number(stageCurrentStatus ?? -1);
+        const toggle34 = (incoming === 3 && current === 4) || (incoming === 4 && current === 3);
+
+        // only advance or 3↔4 flip; never downgrade stageCurrentStatus
+        if (current < 0 || incoming > current || toggle34) {
+          stageCurrentStatus = incoming;
+        }
 
         if (gameMain?.classList.contains('stage-mode')) {
-          renderStage(m);
+          //renderStage(m);
           refreshOpenStageFromServer(3);
         } else {
           renderMissionDetail({ mission: m });
         }
       } catch {
-        // ignore; UI will catch up on next push
+        console.log("startHub MissionUpdated error: " + err)
       }
     },
 
@@ -1525,6 +1567,10 @@ async function  startHub() { // SignalR HUB via shared hub.js
       __lastPushTs = Date.now();
       touchUpdatedAtStampFromPush();
       dbg("RoundResult PUSH", { addr, round, winner, amountWei, currentMissionAddr, groups: Array.from(subscribedGroups) });
+
+      if ((addr || "").toLowerCase() === currentMissionAddr && __missionSnapCache.addr === currentMissionAddr) {
+        __missionSnapCache.ts = 0; // invalidate stage snap-cache
+      }
 
       try {
         const aLc = String(addr || "").toLowerCase();
@@ -1553,15 +1599,18 @@ async function  startHub() { // SignalR HUB via shared hub.js
 
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
         try {
-          const m = enrichMissionFromApi(await getMissionDebounced(currentMissionAddr));
+          const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
           const gameMain = document.getElementById('gameMain');
           if (gameMain?.classList.contains('stage-mode')) {
-            renderStage(m);
+            //renderStage(m);
             refreshOpenStageFromServer(4);
           } else {
             renderMissionDetail({ mission: m });
           }
-        } catch {}
+        } catch 
+        {
+          console.log("startHub MissionUpdated error: " + err)
+        }
       }
     }
   });
@@ -1610,7 +1659,6 @@ function        clearDetailRefresh(){
 function scheduleDetailRefresh(reset = false) {
   // Push-driven model: no periodic polling on the detail page.
   clearDetailRefresh();
-  // no timer; on any hub push we already refetch via getMissionDebounced()
 }
 
 // #endregion
@@ -1667,7 +1715,7 @@ async function  fetchAndRenderAllMissions () {
       });
 
       __allMissionsCache = missions;
-      console.log("Fetched All Missions:", missions);
+      //console.log("Fetched All Missions:", missions);
       applyAllMissionFiltersAndRender();   // existing filters continue to apply
 
       // Snapshot + SignalR only (unchanged)
@@ -1809,7 +1857,7 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
   };
 
   try {
-    const force = (Date.now() < (optimisticGuard?.untilMs || 0)) || (Date.now() - (__lastPushTs || 0) > 8000);
+    const force = (Date.now() < (optimisticGuard?.untilMs || 0)) || (Date.now() - (__lastPushTs || 0) < 8000);
     const data  = await apiMission(currentMissionAddr, force);
     const m = enrichMissionFromApi(data);
 
@@ -2069,20 +2117,47 @@ function disableTemporarily(btn, ms = 5000) {
 // #region Stage utilities
 
 async function  showGameStage(missionRaw){
-  const mission = enrichMissionFromApi({ mission: missionRaw, enrollments: missionRaw.enrollments, rounds: missionRaw.rounds });
+  // Normalize and enrich the mission object we were passed
+  const mission = enrichMissionFromApi({
+    mission: missionRaw,
+    enrollments: missionRaw.enrollments,
+    rounds: missionRaw.rounds
+  });
+
+  // Compute the live status based purely on clocks, not trusting stale mission.status
+  const liveStatus = statusByClock(mission); // 0..7
+  const snapStatus = Number(mission.status ?? -1);
+
+  // Decide the effective starting status for the stage:
+  // - Never start "behind" what the clock says.
+  // - Allow Active<->Paused flip (3<->4) to pass through.
+  let effectiveStatus = snapStatus;
+  const toggle34 = (snapStatus === 3 && liveStatus === 4) || (snapStatus === 4 && liveStatus === 3);
+  if (liveStatus > snapStatus && !toggle34) {
+    effectiveStatus = liveStatus;
+  } else if (toggle34) {
+    effectiveStatus = liveStatus;
+  }
+
+  // Mutate the local mission object so downstream renderers see the corrected status
+  mission.status = effectiveStatus;
+
+  // Enter stage mode / show the stage section
   document.getElementById('gameMain').classList.add('stage-mode');
   showOnlySection("gameStage");
 
-  // Set title text (SVG)
+  // Set the title text in the stage header
   if (stageTitleText){
     const title = mission?.name || mission?.mission_address || "";
     stageTitleText.textContent = title;
   }
 
-  // Load status image (SVG) and size it
+  // Load the correct status banner image based on the effective status
   setStageStatusImage(statusSlug(mission.status));
 
-  stageCurrentStatus = Number(mission?.status ?? -1);
+  // Initialize stageCurrentStatus using the effective status,
+  // not the possibly-stale snapshot status.
+  stageCurrentStatus = Number(mission.status ?? -1);
   __lastPushTs = Date.now();
 
   // Remember which wallet the stage is currently painted for
@@ -2095,30 +2170,38 @@ async function  showGameStage(missionRaw){
     __lastPauseTs     = Number(mission.pause_timestamp || 0);
     // allow post-cooldown guard to function after resume
     __postCooldownUntilSec = 0;
+  } else {
+    // entering not-paused clears cooldown guards
+    __pauseUntilSec         = 0;
+    __postCooldownUntilSec  = 0;
   }
 
-  // Scale image + overlay, then place everything from the vault center
+  // Lay out and scale vault art / overlays
   layoutStage();
-  
+
+  // Pick open/closed vault art for this viewer
   updateVaultImageFor(mission);
 
-  // Build lower HUD pills using chain for Enrolling/Arming
-  if (Number(mission?.status) === 1 || Number(mission?.status) === 2) {
+  // Build lower HUD pills
+  // If we're still truly Enrolling (1) or Arming (2) AFTER correction, hydrate from chain;
+  // otherwise just build directly.
+  if (Number(mission.status) === 1 || Number(mission.status) === 2) {
     await rehydratePillsFromServer(mission, "openStage", true);
   } else {
     buildStageLowerHudForStatus(mission);
   }
 
+  // Progress ring around the vault
   await bindRingToMission(mission);
 
-  // Center timer bound to this mission's next deadline
+  // Center countdown timer / digital display
   await bindCenterTimerToMission(mission);
 
-  // CTA (status 1 → JOIN MISSION)
+  // CTA block ("JOIN MISSION", "BANK IT", cooldown, etc.)
   renderStageCtaForStatus(mission);
 
+  // If ended, render the winners/ended panel
   await renderStageEndedPanelIfNeeded(mission);
-
 }
 
 // #endregion
@@ -2211,10 +2294,10 @@ function        playersAllStatsParts(m){
     ? Number(m.enrolled_players)
     : Array.isArray(m?.enrollments) ? m.enrollments.length : 0;
 
-  const joined = Math.max(
-    fromApi,
-    Number(optimisticGuard?.players || 0)
-  );
+    const joined = Math.max(
+      fromApi,
+      (Date.now() < (optimisticGuard?.untilMs || 0)) ? Number(optimisticGuard?.players || 0) : 0
+    );
 
   const max    = (m?.enrollment_max_players == null) ? "—" : String(m.enrollment_max_players);
   const color  = joined >= min ? "var(--success)" : "var(--error)";
@@ -2245,7 +2328,8 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
           ? Number(m.enrolled_players)
           : Array.isArray(m?.enrollments) ? m.enrollments.length : 0;
 
-        const joined  = BigInt(Math.max(fromApi, Number(optimisticGuard?.players || 0)));
+        const optPlayers = (Date.now() < (optimisticGuard?.untilMs || 0)) ? Number(optimisticGuard?.players || 0) : 0;
+        const joined  = BigInt(Math.max(fromApi, optPlayers));
         const derived = initialWei + feeWei * joined;
         const current = BigInt(String(m?.cro_current_wei || "0"));
         return `${weiToCro((current > derived ? current : derived).toString(), 2)} CRO`;
@@ -2259,7 +2343,9 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
     const fromApi = (m?.enrolled_players != null)
       ? Number(m.enrolled_players)
       : (Array.isArray(m?.enrollments) ? m.enrollments.length : 0);
-    return Math.max(fromApi, Number(optimisticGuard?.players || 0));
+
+    const optPlayers = (Date.now() < (optimisticGuard?.untilMs || 0)) ? Number(optimisticGuard?.players || 0) : 0;
+    return Math.max(fromApi, optPlayers);
   }},
   rounds:         { label: "Rounds",           value: m => Number(m?.mission_rounds_total ?? 0) },
   roundsOff: { 
@@ -2466,8 +2552,20 @@ function        svgImage(href, x, y, w, h){
 
 // UI status shim:
 
-function        uiStatusFor(mission){ // Use "Active" (3) when simulating during Enrolling (1)
-  const st = Number(mission?.status ?? -1);
+function        uiStatusFor(mission){
+  // Start from the snapshot / API status
+  let st = Number(mission?.status ?? -1);
+
+  // Do not let the CTA lag behind what the stage is already showing.
+  // Same idea as hudStatusFor(): allow 3↔4 flips, but never drop below
+  // the current stage status.
+  const cur      = Number(stageCurrentStatus ?? -1);
+  const toggle34 = (st === 3 && cur === 4) || (st === 4 && cur === 3);
+
+  if (cur >= 0 && st < cur && !toggle34) {
+    st = cur;
+  }
+
   return st;
 }
 
@@ -2661,7 +2759,8 @@ async function  handleBankItClick       (mission){
     // Mark self as already-won immediately so CTA hides and labels switch now
     try {
       const addrLc = String(mission.mission_address || "").toLowerCase();
-      __viewerWonOnce?.add?.(addrLc);
+      const meNow  = (walletAddress || (await signer.getAddress())).toLowerCase();
+      __viewerWonOnce?.set?.(addrLc, meNow);
     } catch {}
 
     // --- NEW: compute the just-banked amount now and reflect it immediately ---
@@ -2926,7 +3025,7 @@ async function  renderCtaEnrolling      (host, mission)   {
   // (B) API enrollments → spectators / slower confirmation
   const list = Array.isArray(mission.enrollments) ? mission.enrollments : [];
   const alreadyByApi = !!list.find(e => {
-    const a = String(e.player_address || e.address || e.player || "").toLowerCase();
+    const a = String(e.address || "").toLowerCase();
     return a === me;
   });
   
@@ -2968,11 +3067,6 @@ async function  renderCtaEnrolling      (host, mission)   {
   else if (!hasSpots)               { disabled = true; note = "No spots left for this mission"; }
   else if (!canEnrollSoft)          { disabled = true; note = eligibilityReason || "You’re not eligible to join right now"; }
   if (ctaBusy)                      { disabled = true; note = "Joining…"; }
-
-
-  console.debug("[CTA/JOIN] gating", {
-    me, inWin, alreadyByCache, alreadyByApi, already, hasSpots, canEnrollSoft
-  });
 
   host.innerHTML = "";
 
@@ -3044,7 +3138,7 @@ function        renderCtaArming         (host, mission)   {
 
   host.appendChild(g);
 
-  // One-line: "Starts in 00:12:34"
+/*   // One-line: "Starts in 00:12:34"
   const line = document.createElementNS(SVG_NS, "text");
   line.setAttribute("x", String(xCenter));
   line.setAttribute("y", String(y + btnH + 20));   // tweak this if you want it higher/lower
@@ -3069,7 +3163,7 @@ function        renderCtaArming         (host, mission)   {
 
   line.appendChild(tLabel);
   line.appendChild(tVal);
-  host.appendChild(line);
+  host.appendChild(line); */
 }
 
 function        renderCtaActive         (host, mission)   {
@@ -3088,7 +3182,7 @@ function        renderCtaActive         (host, mission)   {
       mission?._joinedByMe === true ||                              // set on successful local join
       joinedCacheHas(addrLc, me) ||                                 // local storage cache
       (mission?.enrollments || []).some(e => {                      // API snapshot
-        const p = String(e?.player_address || e?.address || e?.player || "").toLowerCase();
+        const p = String(e?.address || "").toLowerCase();
         return p === me;
       })
     );
@@ -3114,7 +3208,7 @@ function        renderCtaActive         (host, mission)   {
 
   // already won any round?
   const alreadyWon = !!(me && (
-    __viewerWonOnce.has(addrLc) ||
+    (__viewerWonOnce.get(addrLc) === me) ||
     (mission?.rounds || []).some(r => {
       const w = String(r?.winner_address || "").toLowerCase();
       return w === me;
@@ -3164,56 +3258,13 @@ function        renderCtaActive         (host, mission)   {
     host.appendChild(g);
   }
 
-  // Line 1: "Ends in …" (auto-ticked by [data-countdown])
-  const line = document.createElementNS(SVG_NS, "text");
-  line.setAttribute("x", String(xCenter));
-  line.setAttribute("y", String(y + btnH + 38));
-  line.setAttribute("text-anchor", "middle");
-  line.setAttribute("dominant-baseline", "middle");
-  line.setAttribute("class", "cta-sub");   // was cta-note
-  line.style.fill = stageTextFill();
-
-  const tLabel = document.createElementNS(SVG_NS, "tspan");
-  tLabel.textContent = "Ends in ";
-
-  const tVal = document.createElementNS(SVG_NS, "tspan");
-  const endTs = Number(mission?.mission_end || 0);
-  if (endTs > 0) {
-    tVal.setAttribute("data-countdown", String(endTs));
-    tVal.textContent = formatCountdown(endTs); // paint initial value, no dash flash
-  } else {
-    tVal.textContent = "—";
-  }
-  tVal.style.fontWeight = "700";
-  line.appendChild(tLabel);
-  line.appendChild(tVal);
-  host.appendChild(line);
-
-  // Line 2: live bank/prize label (updates via [data-bank-now])
-  const bank = document.createElementNS(SVG_NS, "text");
-  bank.setAttribute("x", String(xCenter));
-  bank.setAttribute("y", String(y + btnH + 64));
-  bank.setAttribute("text-anchor", "middle");
-  bank.setAttribute("class", "cta-note");
-  bank.setAttribute("data-bank-now", "1");
-
-  // decide label based on viewer eligibility
-  const eligible  = !!walletAddress && joined && !alreadyWon;
-
-  const lastTs = getLastBankTs(mission, mission?.rounds);
-  const weiNow = computeBankNowWei(mission, lastTs);
-  const croNow = weiToCro(String(weiNow), 2, true);
-  const label  = eligible ? "Bank this round to claim:" : "Current round prize pool:";
-  bank.textContent = `${label} ${croNow} CRO`;
-  // apply progressive color based on how much has accrued
-  applyCounterColor(bank, mission, weiNow);
-  host.appendChild(bank);
+  host.appendChild(accumulatingCRO(mission, walletAddress, joined, alreadyWon, xCenter, y, btnH, SVG_NS));
 
 }
 
 function        renderCtaPaused         (host, mission){
   const { xCenter, topY } = CTA_LAYOUT;
-  const { bg, text, btnW, btnH, txtW, txtH, txtDy } = CTA_ACTIVE; // keep sizes
+  const { bg, btnW, btnH, txtW, txtH, txtDy } = CTA_ACTIVE; // keep sizes
 
   const x = xCenter - Math.round(btnW / 2);
   const y = topY;
@@ -3222,7 +3273,7 @@ function        renderCtaPaused         (host, mission){
   const me  = (walletAddress || "").toLowerCase();
   const addrLc = String(mission?.mission_address || "").toLowerCase();
   const alreadyWon = !!(me && (
-    __viewerWonOnce?.has?.(addrLc) ||
+    (__viewerWonOnce?.get?.(addrLc) === me) ||
     (mission?.rounds || []).some(r => String(r?.winner_address || "").toLowerCase() === me)
   ));
 
@@ -3239,114 +3290,69 @@ function        renderCtaPaused         (host, mission){
     msg.textContent = "View only. You already won a round";
     host.appendChild(msg);
 
-    // 2) Lines one step lower (+18 px)
-    const line = document.createElementNS(SVG_NS, "text");
-    line.setAttribute("class", "cta-sub");
-    line.setAttribute("x", String(xCenter));
-    line.setAttribute("y", String(y + btnH + 38));
-    line.setAttribute("text-anchor", "middle");
-    line.setAttribute("dominant-baseline", "middle");
-    line.style.fill = stageTextFill();
-
-    const tLabel = document.createElementNS(SVG_NS, "tspan");
-    tLabel.textContent = "Ends in ";
-    line.appendChild(tLabel);
-
-    const tVal = document.createElementNS(SVG_NS, "tspan");
-    const endTs = Number(mission?.mission_end || 0);
-    if (endTs > 0) {
-      tVal.setAttribute("data-countdown", String(endTs));
-      tVal.textContent = formatCountdown(endTs);   // set initial value now (no dash flash)
-    } else {
-      tVal.textContent = "—";
-    }
-    tVal.style.fontWeight = "700";
-    line.appendChild(tVal);
-
-    host.appendChild(line);
-
-    const bank = document.createElementNS(SVG_NS, "text");
-    bank.setAttribute("class", "cta-sub");
-    bank.style.fill = stageTextFill();  // ensure colored
-    bank.setAttribute("x", String(xCenter));
-    bank.setAttribute("y", String(y + btnH + 64));
-    bank.setAttribute("text-anchor", "middle");
-    bank.setAttribute("dominant-baseline", "middle");
-    const nowWei = computeBankNowWei(mission, getLastBankTs(mission, mission?.rounds), Math.floor(Date.now()/1000));
-    bank.setAttribute("data-bank-now", "1"); // will tick every second
-    bank.textContent = `Accumulating: ${weiToCro(String(nowWei), 2, true)} CRO`;
-    host.appendChild(bank);
-
-    return; // important: no Cooldown button
-  }
-
-  // Paused: disabled button with visible "Cooldown: mm:ss"
-  const g = document.createElementNS(SVG_NS, "g");
-  g.setAttribute("class", "cta-btn cta-disabled");
-  g.setAttribute("transform", `translate(${x},${y})`);
-
-  // draw the PNG button background (bg is an image path, not a CSS class)
-  g.appendChild(svgImage(bg, 0, 0, btnW, btnH));
-
-  // centered countdown text on top of the button
-  const label = document.createElementNS(SVG_NS, "text");
-  label.setAttribute("x", String(Math.round(btnW / 2)));
-  label.setAttribute("y", String(Math.round(btnH / 2) + txtDy + 5));
-  label.setAttribute("text-anchor", "middle");
-  label.setAttribute("dominant-baseline", "middle");
-  label.setAttribute("class", "cta-sub");
-  label.style.fill = stageTextFill();
-  label.textContent = "Cooldown: ";
-
-  // live-updating countdown value (ticked elsewhere via data-cooldown-end)
-  const t = document.createElementNS(SVG_NS, "tspan");
-  const info = cooldownInfo(mission);
-  const end = Number(info.pauseEnd || 0);
-  t.setAttribute("data-cooldown-end", String(end));
-  // paint an initial value to avoid a dash flash
-  t.textContent = end > 0 ? formatMMSS(Math.max(0, end - Math.floor(Date.now() / 1000))) : "—";
-
-  label.appendChild(t);
-  g.appendChild(label);
-  host.appendChild(g);
-
-  // Lines unchanged for non-winners:
-  const line = document.createElementNS(SVG_NS, "text");
-  line.setAttribute("class", "cta-sub");
-  line.setAttribute("x", String(xCenter));
-  line.setAttribute("y", String(y + btnH + 38));
-  line.setAttribute("text-anchor", "middle");
-  line.setAttribute("dominant-baseline", "middle");
-  line.style.fill = stageTextFill();
-
-  const tLabel = document.createElementNS(SVG_NS, "tspan");
-  tLabel.textContent = "Ends in ";
-  line.appendChild(tLabel);
-
-  const tVal = document.createElementNS(SVG_NS, "tspan");
-  const endTs = Number(mission?.mission_end || 0);
-  if (endTs > 0) {
-    tVal.setAttribute("data-countdown", String(endTs));
-    tVal.textContent = formatCountdown(endTs);   // set initial value now (no dash flash)
   } else {
-    tVal.textContent = "—";
-  }
-  tVal.style.fontWeight = "700";
-  line.appendChild(tVal);
 
-  host.appendChild(line);
+    // Paused: disabled button with visible "Cooldown: mm:ss"
+    const g = document.createElementNS(SVG_NS, "g");
+    g.setAttribute("class", "cta-btn cta-disabled");
+    g.setAttribute("transform", `translate(${x},${y})`);
+
+    // draw the PNG button background (bg is an image path, not a CSS class)
+    g.appendChild(svgImage(bg, 0, 0, btnW, btnH));
+
+    // centered countdown text on top of the button
+    const label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("x", String(Math.round(btnW / 2)));
+    label.setAttribute("y", String(Math.round(btnH / 2) + txtDy + 5));
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("dominant-baseline", "middle");
+    label.setAttribute("class", "cta-sub");
+    label.style.fill = stageTextFill();
+    label.textContent = "Cooldown: ";
+
+    // live-updating countdown value (ticked elsewhere via data-cooldown-end)
+    const t = document.createElementNS(SVG_NS, "tspan");
+    const info = cooldownInfo(mission);
+    const end = Number(info.pauseEnd || 0);
+    t.setAttribute("data-cooldown-end", String(end));
+    // paint an initial value to avoid a dash flash
+    t.textContent = end > 0 ? formatMMSS(Math.max(0, end - Math.floor(Date.now() / 1000))) : "—";
+
+    label.appendChild(t);
+    g.appendChild(label);
+    host.appendChild(g);
+  }
+
+  host.appendChild(accumulatingCRO(mission, walletAddress, joined, alreadyWon, xCenter, y, btnH, SVG_NS));
+}
+
+function        accumulatingCRO         (mission, walletAddress, joined, alreadyWon, xCenter, y, btnH, SVG_NS) {
+  const group = document.createDocumentFragment();
 
   const bank = document.createElementNS(SVG_NS, "text");
   bank.setAttribute("class", "cta-sub");
-  bank.style.fill = stageTextFill();
   bank.setAttribute("x", String(xCenter));
-  bank.setAttribute("y", String(y + btnH + 64));
+  bank.setAttribute("y", String(y + btnH + 38)); 
   bank.setAttribute("text-anchor", "middle");
   bank.setAttribute("dominant-baseline", "middle");
-  const nowWei = computeBankNowWei(mission, getLastBankTs(mission, mission?.rounds), Math.floor(Date.now()/1000));
   bank.setAttribute("data-bank-now", "1");
-  bank.textContent = `Accumulating: ${weiToCro(String(nowWei), 2, true)} CRO`;
-  host.appendChild(bank);
+  bank.style.fill = stageTextFill();
+
+  const lastTs = getLastBankTs(mission, mission?.rounds);
+  const nowTs = Math.floor(Date.now() / 1000);
+  const weiNow = computeBankNowWei(mission, lastTs, nowTs);
+  const croNow = weiToCro(String(weiNow), 2, true);
+
+  let label = "Accumulating:";
+  const eligible = !!walletAddress && joined && !alreadyWon;
+  label = eligible ? "Bank this round to claim:" : "Current round prize pool:";
+
+  bank.textContent = `${label} ${croNow} CRO`;
+
+  applyCounterColor(bank, mission, weiNow);
+
+  group.appendChild(bank);
+  return group;
 }
 
 async function  flipStageToPausedOptimistic(mission){
@@ -3440,7 +3446,7 @@ async function  maybeShowMissionEndPopup(mission){
 
     const me = (walletAddress || "").toLowerCase();
     const joined = !!(me && (enrollments || []).some(e => {
-      const a = String(e.player_address || e.address || e.player || "").toLowerCase();
+      const a = String(e.address || "").toLowerCase();
       return a === me;
     }));
 
@@ -3626,8 +3632,8 @@ function        buildMissionListCard    (m){
   const li = document.createElement("li");
   li.className = "mission-card";
 
-  // live status (same approach used in All Missions)
-  const stNum   = Number(m.status ?? 0);
+  // live status: recompute from mission clocks instead of trusting stale m.status
+  const stNum   = statusByClock(m);
   const mdShim  = { players: Array.from({ length: Number(m.enrolled_players || 0) }) };
   const pretty  = prettyStatusForList(stNum, mdShim, m.all_refunded);
 
@@ -3894,11 +3900,11 @@ function        renderMyMissions        (items){
   startJoinableTicker();
 }
 
-async function  renderMissionDetail     ({ mission, enrollments, rounds }){
+function        renderMissionDetail     ({ mission, enrollments, rounds }){
   const me   = (walletAddress || "").toLowerCase();
   const now  = Math.floor(Date.now()/1000);
   const isEnrolling = mission.status === 1 && now < mission.enrollment_end;
-  const alreadyEnrolled = enrollments?.some(e => (e.player_address || "").toLowerCase() === me);
+  const alreadyEnrolled = enrollments?.some(e => (e.address || "").toLowerCase() === me);
   const hasSpots = mission.enrollment_max_players > (enrollments?.length || 0);
   const canEnroll = isEnrolling && !alreadyEnrolled && hasSpots && walletAddress;
 
@@ -3933,19 +3939,21 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
   showOnlySection("missionDetailSection");
   els.missionTitle.textContent = mission.name || mission.mission_address;
 
-  const st = Number(mission.status); // 0..7
+  // Recompute the live status instead of trusting mission.status,
+  // so we don't lag on "Enrolling"/"Arming" when it's already Active/Mission Time.
+  const st = statusByClock(mission); // 0..7 live status
 
-  // Show only ONE countdown at most:
-  // Pending   → Enrollment start
-  // Enrolling → Enrollment end
-  // Arming    → Mission start
-  // Active    → Mission end
-  // Paused    → Mission end
-  // Ended     → none (all fixed)
+  // Show only ONE countdown at most based on the live status:
+  // 0 Pending        → Enrollment start
+  // 1 Enrolling      → Enrollment end
+  // 2 Arming         → Mission start
+  // 3 Active         → Mission end
+  // 4 Paused         → Mission end
+  // 5+ ended states  → none
   let countdownKey = null;
-  if (st === 0)          countdownKey = "enrollStart";
-  else if (st === 1)     countdownKey = "enrollEnd";
-  else if (st === 2)     countdownKey = "missionStart";
+  if (st === 0)                countdownKey = "enrollStart";
+  else if (st === 1)           countdownKey = "enrollEnd";
+  else if (st === 2)           countdownKey = "missionStart";
   else if (st === 3 || st === 4) countdownKey = "missionEnd";
   // st >= 5 → ended → keep countdownKey = null
 
@@ -3954,7 +3962,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
   const showMissionStartCountdown = (countdownKey === "missionStart");
   const showMissionEndCountdown   = (countdownKey === "missionEnd");
 
-  const statusCls = statusColorClass(mission.status);
+  const statusCls = statusColorClass(st);
 
   // No-regress: prefer chain-truth for Enrolling/Arming
   const safe = applyNoRegress(mission);
@@ -3974,20 +3982,24 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
   const joinedCls   = (joinedPlayers >= minP) ? "text-success" : "text-error";
 
   const prettyDet = prettyStatusForList(
-    Number(mission.status),
-    mission,                                      // detail has the full object
-    mission.all_refunded);
-  const statusLbl  = prettyDet ? prettyDet.label : statusText(mission.status);
-  const statusCls2 = prettyDet ? prettyDet.css   : statusColorClass(mission.status);
+    st,
+    mission,
+    mission.all_refunded
+  );
+  const statusLbl  = prettyDet ? prettyDet.label : statusText(st);
+  const statusCls2 = prettyDet ? prettyDet.css   : statusColorClass(st);
   const statusTtl  = prettyDet ? prettyDet.title : "";
+  const pushSec  = Math.floor((__lastPushTs || 0) / 1000);
+  const baseUpd  = Number(mission.updated_at || 0);
+  const stampSec = Math.max(baseUpd || Math.floor(Date.now()/1000), pushSec);
 
   els.missionCore.innerHTML = `
     <div class="row g-3">
-      <!-- Legend chips under the title (keep yours) -->
+      <!-- Legend chips under the title -->
       <div class="col-12">
         <div class="d-flex flex-wrap align-items-center gap-2">
-          <span class="status-pill status-${mission.status}">
-            ${statusText(mission.status)}
+          <span class="status-pill status-${st}">
+            ${statusText(st)}
           </span>
           <span class="status-pill">
             Type: ${missionTypeName[mission.mission_type] ?? mission.mission_type}
@@ -4001,7 +4013,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
         </div>
       </div>
 
-      <!-- 👇 Two-by-two aligned key/value pairs -->
+      <!-- Two-by-two aligned key/value pairs -->
       <div class="col-12">
         <div class="kv-grid">
 
@@ -4055,12 +4067,10 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
 
         <div class="label">Data updated at</div>
           <div class="value">
-            <span id="updatedAtStamp"
-                  data-updated="${Math.max(mission.updated_at || 0, Math.floor((__lastPushTs || 0)/1000))}">
-              ${formatLocalDateTime(Math.max(mission.updated_at || 0, Math.floor((__lastPushTs || 0)/1000)))}
-            </span>
+          <span id="updatedAtStamp" data-updated="${stampSec}">
+            ${formatLocalDateTime(stampSec)}
+          </span>
             <i id="updatedAtIcon"
-
               class="fa-solid fa-circle-exclamation ms-1 text-error"
               style="display:none"
               title="Data may be stale"></i>
@@ -4105,7 +4115,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
       const pushQuiet = lastPushAgeMs > 75000; // ~75s without any push
 
       // Only flag/warn during live states (1=enrolling, 2=arming, 3=active, 4=paused)
-      const liveState = [1, 2, 3, 4].includes(Number(mission.status));
+      const liveState = [1, 2, 3, 4].includes(st);
 
       // Visual staleness only when API looks old AND pushes have been quiet
       const showStaleMarker = liveState && staleAge && pushQuiet;
@@ -4143,8 +4153,8 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
 
   // sort players by winnings desc, then by enrolled_at asc
   const sorted = [...(enrollments || [])].sort((a, b) => {
-    const aw = winTotals.get((a.player_address || "").toLowerCase()) || 0n;
-    const bw = winTotals.get((b.player_address || "").toLowerCase()) || 0n;
+    const aw = winTotals.get((a.address || "").toLowerCase()) || 0n;
+    const bw = winTotals.get((b.address || "").toLowerCase()) || 0n;
     if (aw !== bw) return aw > bw ? -1 : 1;
     const at = a.enrolled_at || 0, bt = b.enrolled_at || 0;
     return (at || 0) - (bt || 0);
@@ -4153,7 +4163,7 @@ async function  renderMissionDetail     ({ mission, enrollments, rounds }){
   els.enrollmentsList.innerHTML = "";
   els.enrollmentsEmpty.style.display = sorted.length ? "none" : "";
   for (const e of sorted) {
-    const addr = (e.player_address || "");
+    const addr = (e.address || "");
     const wwei = winTotals.get(addr.toLowerCase()) || 0n;
     const won  = wwei > 0n;
     const wonLabel = won ? `${weiToCro(String(wwei), 2)} CRO` : "";
@@ -4380,7 +4390,7 @@ async function  subscribeToMission(addr){
 
   // Join new
   await joinMissionGroup(targetLc);
-
+  __lastPushTs = Date.now();
   // Track for UI/debug parity
   let targetCk = null; try { targetCk = ethers.utils.getAddress(targetLc); } catch {}
   subscribedAddr   = targetLc;
