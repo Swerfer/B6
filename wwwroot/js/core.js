@@ -27,7 +27,7 @@ if (res.ok) {
   READ_ONLY_RPC = '/api/rpc';
 
   if (factory) FACTORY_ADDRESS = factory;
-  console.log(`[core] /api/config loaded. Factory: ${FACTORY_ADDRESS}`);
+  //console.log(`[core] /api/config loaded. Factory: ${FACTORY_ADDRESS}`);
 }
 
 

@@ -280,22 +280,47 @@ app.MapGet("/missions/all",             async (IConfiguration cfg) => { // all m
     var list = new List<object>();
     while (await rd.ReadAsync())
     {
+        // Derive real-time status (match contract getRealTimeStatus)
+        var es     = Convert.ToInt64(rd["enrollment_start"]);
+        var ee     = Convert.ToInt64(rd["enrollment_end"]);
+        var ms     = Convert.ToInt64(rd["mission_start"]);
+        var me     = Convert.ToInt64(rd["mission_end"]);
+        var total  = Convert.ToInt32(rd["mission_rounds_total"]);
+        var played = Convert.ToInt32(rd["round_count"]);
+        var ccTxt  = rd["cro_current_wei"]?.ToString() ?? "0";
+        System.Numerics.BigInteger.TryParse(ccTxt, out var ccBI);
+        var poolZero    = ccBI == 0;
+        var allRefunded = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"];
+        var now         = ToUnixSeconds(DateTime.UtcNow);
+
+        int statusRT;
+        if (now < es)           statusRT = 0;
+        else if (now < ee)      statusRT = 1;
+        else if (now < ms)      statusRT = 2;
+        else if (now < me)      statusRT = 3;
+        else {
+            if (played <= 0)                         statusRT = 7;
+            else if (total > 0 && played >= total)   statusRT = 6;
+            else if (poolZero || allRefunded)        statusRT = 6; // ← fix: Success when pool drained / fully refunded
+            else                                     statusRT = 5;
+        }
+
         list.Add(new {
             mission_address        = rd["mission_address"] as string,
             name                   = rd["name"] as string,
             mission_type           = Convert.ToInt16(rd["mission_type"]),
-            status                 = Convert.ToInt16(rd["status"]),
-            enrollment_start       = Convert.ToInt64(rd["enrollment_start"]),
-            enrollment_end         = Convert.ToInt64(rd["enrollment_end"]),
+            status                 = statusRT, // ← use derived status
+            enrollment_start       = es,
+            enrollment_end         = ee,
             enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
             enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
             enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
-            mission_start          = Convert.ToInt64(rd["mission_start"]),
-            mission_end            = Convert.ToInt64(rd["mission_end"]),
-            mission_rounds_total   = Convert.ToInt16(rd["mission_rounds_total"]),
-            round_count            = Convert.ToInt16(rd["round_count"]),
+            mission_start          = ms,
+            mission_end            = me,
+            mission_rounds_total   = Convert.ToInt16(total),
+            round_count            = Convert.ToInt16(played),
             cro_start_wei          = rd["cro_start_wei"]?.ToString(),
-            cro_current_wei        = rd["cro_current_wei"]?.ToString(),
+            cro_current_wei        = ccTxt,
             cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),
             pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
             updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
@@ -303,9 +328,10 @@ app.MapGet("/missions/all",             async (IConfiguration cfg) => { // all m
             round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
             last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
             creator_address        = rd["creator_address"] as string,
-            all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            all_refunded           = allRefunded,
             enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
         });
+
     }
 
     return Results.Ok(list);
@@ -359,22 +385,47 @@ app.MapGet("/missions/all/{n}",         async (int n, IConfiguration cfg) => { /
     var list = new List<object>();
     while (await rd.ReadAsync())
     {
+        // derive real-time status per row
+        var es     = Convert.ToInt64(rd["enrollment_start"]);
+        var ee     = Convert.ToInt64(rd["enrollment_end"]);
+        var ms     = Convert.ToInt64(rd["mission_start"]);
+        var me     = Convert.ToInt64(rd["mission_end"]);
+        var total  = Convert.ToInt32(rd["mission_rounds_total"]);
+        var played = Convert.ToInt32(rd["round_count"]);
+        var ccTxt  = rd["cro_current_wei"]?.ToString() ?? "0";
+        System.Numerics.BigInteger.TryParse(ccTxt, out var ccBI);
+        var poolZero    = ccBI == 0;
+        var allRefunded = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"];
+        var now         = ToUnixSeconds(DateTime.UtcNow);
+
+        int statusRT;
+        if (now < es) statusRT = 0;
+        else if (now < ee) statusRT = 1;
+        else if (now < ms) statusRT = 2;
+        else if (now < me) statusRT = 3;
+        else {
+            if (played <= 0)                         statusRT = 7;
+            else if (total > 0 && played >= total)   statusRT = 6;
+            else if (poolZero || allRefunded)        statusRT = 6;
+            else                                     statusRT = 5;
+        }
+
         list.Add(new {
             mission_address        = rd["mission_address"] as string,
             name                   = rd["name"] as string,
             mission_type           = Convert.ToInt16(rd["mission_type"]),
-            status                 = Convert.ToInt16(rd["status"]),
-            enrollment_start       = Convert.ToInt64(rd["enrollment_start"]),
-            enrollment_end         = Convert.ToInt64(rd["enrollment_end"]),
+            status                 = statusRT,
+            enrollment_start       = es,
+            enrollment_end         = ee,
             enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
             enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
             enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
-            mission_start          = Convert.ToInt64(rd["mission_start"]),
-            mission_end            = Convert.ToInt64(rd["mission_end"]),
-            mission_rounds_total   = Convert.ToInt16(rd["mission_rounds_total"]),
-            round_count            = Convert.ToInt16(rd["round_count"]),
+            mission_start          = ms,
+            mission_end            = me,
+            mission_rounds_total   = Convert.ToInt16(total),
+            round_count            = Convert.ToInt16(played),
             cro_start_wei          = rd["cro_start_wei"]?.ToString(),
-            cro_current_wei        = rd["cro_current_wei"]?.ToString(),
+            cro_current_wei        = ccTxt,
             cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),
             pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
             updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
@@ -382,7 +433,7 @@ app.MapGet("/missions/all/{n}",         async (int n, IConfiguration cfg) => { /
             round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
             last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
             creator_address        = rd["creator_address"] as string,
-            all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
+            all_refunded           = allRefunded,
             enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
         });
     }
@@ -684,31 +735,47 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
     await using var rd = await core.ExecuteReaderAsync();
     if (!await rd.ReadAsync()) return Results.NotFound("Mission not found");
 
+    // derive real-time status for detail view too
+    var es     = Convert.ToInt64(rd["enrollment_start"]);
+    var ee     = Convert.ToInt64(rd["enrollment_end"]);
+    var ms     = Convert.ToInt64(rd["mission_start"]);
+    var me     = Convert.ToInt64(rd["mission_end"]);
+    var total  = Convert.ToInt32(rd["mission_rounds_total"]);
+    var played = Convert.ToInt32(rd["round_count"]);
+    var ccTxt  = rd["cro_current_wei"]?.ToString() ?? "0";
+    System.Numerics.BigInteger.TryParse(ccTxt, out var ccBI);
+    var poolZero    = ccBI == 0;
+    var allRefunded = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"];
+    var now         = ToUnixSeconds(DateTime.UtcNow);
+    int statusRT;
+    if (now < es) statusRT = 0; else if (now < ee) statusRT = 1; else if (now < ms) statusRT = 2; else if (now < me) statusRT = 3;
+    else { if (played <= 0) statusRT = 7; else if (total > 0 && played >= total) statusRT = 6; else if (poolZero || allRefunded) statusRT = 6; else statusRT = 5; }
+
     var mission = new {
-            mission_address        = rd["mission_address"] as string,
-            name                   = rd["name"] as string,
-            mission_type           = Convert.ToInt16(rd["mission_type"]),
-            status                 = Convert.ToInt16(rd["status"]),
-            enrollment_start       = Convert.ToInt64(rd["enrollment_start"]),
-            enrollment_end         = Convert.ToInt64(rd["enrollment_end"]),
-            enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
-            enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
-            enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
-            mission_start          = Convert.ToInt64(rd["mission_start"]),
-            mission_end            = Convert.ToInt64(rd["mission_end"]),
-            mission_rounds_total   = Convert.ToInt16(rd["mission_rounds_total"]),
-            round_count            = Convert.ToInt16(rd["round_count"]),
-            cro_start_wei          = rd["cro_start_wei"]?.ToString(),
-            cro_current_wei        = rd["cro_current_wei"]?.ToString(),
-            cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),
-            pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
-            updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
-            mission_created        = Convert.ToInt64(rd["mission_created"]),
-            round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
-            last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
-            creator_address        = rd["creator_address"] as string,
-            all_refunded           = rd["all_refunded"] is DBNull ? false : (bool) rd["all_refunded"],
-            enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
+        mission_address        = rd["mission_address"] as string,
+        name                   = rd["name"] as string,
+        mission_type           = Convert.ToInt16(rd["mission_type"]),
+        status                 = statusRT, // ← use derived status
+        enrollment_start       = es,
+        enrollment_end         = ee,
+        enrollment_amount_wei  = rd["enrollment_amount_wei"]?.ToString(),
+        enrollment_min_players = Convert.ToInt16(rd["enrollment_min_players"]),
+        enrollment_max_players = Convert.ToInt16(rd["enrollment_max_players"]),
+        mission_start          = Convert.ToInt64(rd["mission_start"]),
+        mission_end            = Convert.ToInt64(rd["mission_end"]),
+        mission_rounds_total   = Convert.ToInt16(total),
+        round_count            = Convert.ToInt16(played),
+        cro_start_wei          = rd["cro_start_wei"]?.ToString(),
+        cro_current_wei        = ccTxt,
+        cro_initial_wei        = rd["cro_initial_wei"]?.ToString(),            
+        pause_timestamp        = rd["pause_timestamp"] is DBNull ? (long?)null : Convert.ToInt64(rd["pause_timestamp"]),
+        updated_at             = ToUnixSeconds(((DateTime) rd["updated_at"]).ToUniversalTime()),
+        mission_created        = Convert.ToInt64(rd["mission_created"]),
+        round_pause_secs       = rd["round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["round_pause_secs"]),
+        last_round_pause_secs  = rd["last_round_pause_secs"] is DBNull ? (int?)null : Convert.ToInt32(rd["last_round_pause_secs"]),
+        creator_address        = rd["creator_address"] as string,
+        all_refunded           = allRefunded,
+        enrolled_players       = Convert.ToInt32(rd["enrolled_players"])
     };
     await rd.CloseAsync();
 
@@ -1159,7 +1226,11 @@ app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration c
     if (rc == null || rc.Status == null || rc.Status.Value != 1)
         return Results.BadRequest("Transaction not successful");
 
+    Console.WriteLine($"[API] /events/banked ACCEPT mission={mission} tx={txHash} {DateTime.UtcNow:o}");
+
     await KickMissionAsync(mission, txHash, cfg, hub);
+
+    Console.WriteLine($"[API] /events/banked DONE KickMissionAsync mission={mission} {DateTime.UtcNow:o}");
 
     return Results.Ok(new { pushed = true });
 });

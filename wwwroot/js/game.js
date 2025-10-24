@@ -387,7 +387,23 @@ function        joinedCacheAdd(addr, me){
 
 function        enrichMissionFromApi(data){
   const m = data?.mission || data || {};
-  if (data && Array.isArray(data.enrollments)) m.enrollments = data.enrollments;
+  if (data && Array.isArray(data.enrollments)) {
+    // Normalize API → UI shape:
+    // - API provides 'player' + '*_ts'
+    // - UI expects 'address' + 'enrolled_at'
+    m.enrollments = data.enrollments.map(e => ({
+      address: String(e.address || e.player || "").toLowerCase(),
+      enrolled_at: Number(
+        e.enrolled_at ?? e.enrolled_ts ?? e.enrolledTS ?? 0
+      ) || 0,
+      refunded: !!e.refunded,
+      refund_ts: (e.refund_ts != null)
+        ? Number(e.refund_ts)
+        : (e.refundTS != null ? Number(e.refundTS) : null),
+      refunded_failed: !!e.refunded_failed
+    }));
+  }
+
   if (data && Array.isArray(data.rounds))      m.rounds      = data.rounds;
 
   if (Number(m.status) === 1 &&
@@ -1521,7 +1537,7 @@ async function  startHub() { // SignalR HUB via shared hub.js
 
             refreshOpenStageFromServer(2);
           } else {
-            if (m) renderMissionDetail({ mission: m });
+            if (m) renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
           }
         } catch (err) {
           console.log("startHub MissionUpdated error: " + err)
@@ -1556,7 +1572,7 @@ async function  startHub() { // SignalR HUB via shared hub.js
           //renderStage(m);
           refreshOpenStageFromServer(3);
         } else {
-          renderMissionDetail({ mission: m });
+          renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
         }
       } catch {
         console.log("startHub MissionUpdated error: " + err)
@@ -1605,7 +1621,7 @@ async function  startHub() { // SignalR HUB via shared hub.js
             //renderStage(m);
             refreshOpenStageFromServer(4);
           } else {
-            renderMissionDetail({ mission: m });
+            renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
           }
         } catch 
         {
@@ -3901,6 +3917,10 @@ function        renderMyMissions        (items){
 }
 
 function        renderMissionDetail     ({ mission, enrollments, rounds }){
+  enrollments = Array.isArray(enrollments) ? enrollments
+               : Array.isArray(mission?.enrollments) ? mission.enrollments : [];
+  rounds      = Array.isArray(rounds) ? rounds
+               : Array.isArray(mission?.rounds) ? mission.rounds : [];
   const me   = (walletAddress || "").toLowerCase();
   const now  = Math.floor(Date.now()/1000);
   const isEnrolling = mission.status === 1 && now < mission.enrollment_end;
@@ -4332,7 +4352,8 @@ async function  openMission(addr){
     currentMissionAddr = addr.toLowerCase();
     await subscribeToMission(currentMissionAddr);
     const data = await apiMission(currentMissionAddr, false);
-    renderMissionDetail(data);
+    const m    = enrichMissionFromApi(data);
+    renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
     scheduleDetailRefresh(true);
     window.scrollTo({ top: els.missionDetail.offsetTop - 20, behavior: "smooth" });
   } catch (e) {

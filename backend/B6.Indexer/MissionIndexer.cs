@@ -676,7 +676,69 @@ namespace B6.Indexer
                 // Detect round increment
                 if (oldRound != newRound)
                 {
-                    changes.NewRound = newRound ?? 0;     // ← assign to the nullable short
+                    // Write/Backfill mission_rounds based on snapshot wins
+                    // - Cold start (oldRound null/0): reconstruct from players' WonTS (distinct, ascending)
+                    // - Incremental (newRound > oldRound): append the last round using PauseTimestamp
+                    var wins = new List<(short Round, string? Winner, System.Numerics.BigInteger Amount, long Ts)>();
+
+                    var prev = oldRound ?? 0;
+                    var next = newRound ?? 0;
+
+                    if (prev == 0 && next > 0)
+                    {
+                        // Cold start: rebuild per-round rows from players' WonTS
+                        var byTs = (md.Players ?? new List<B6.Contracts.PlayerTuple>())
+                            .Where(p => p.WonTS != 0)
+                            .GroupBy(p => (long)p.WonTS)
+                            .OrderBy(g => g.Key)
+                            .ToList();
+
+                        short r = 1;
+                        foreach (var g in byTs)
+                        {
+                            var w   = g.First();
+                            var adr = (w.Player ?? string.Empty).Trim().ToLowerInvariant();
+                            var amt = w.AmountWon;                    // BigInteger
+                            var ts  = (long)w.WonTS;                  // epoch seconds
+                            wins.Add((r++, adr.Length == 0 ? null : adr, amt, ts));
+                        }
+                    }
+                    else if (next > prev)
+                    {
+                        // Incremental: append the latest round
+                        long ts = md.PauseTimestamp == 0 ? 0 : (long)md.PauseTimestamp;
+                        var w   = (md.Players ?? new List<B6.Contracts.PlayerTuple>())
+                                    .FirstOrDefault(p => (long)p.WonTS == ts);
+
+                        string? adr = w?.Player?.Trim().ToLowerInvariant();
+                        var     amt = w?.AmountWon ?? new System.Numerics.BigInteger(0);
+
+                        if (ts != 0 && next > 0)
+                            wins.Add(((short)next, string.IsNullOrWhiteSpace(adr) ? null : adr, amt, ts));
+                    }
+
+                    foreach (var win in wins)
+                    {
+                        await using var upRound = new NpgsqlCommand(@"
+                            insert into mission_rounds
+                                (mission_address, round_number, winner_address, payout_wei, block_number, tx_hash, created_at)
+                            values
+                                (@a, @n, @w, @p, null, null, to_timestamp(@ts))
+                            on conflict (mission_address, round_number) do update
+                            set winner_address = excluded.winner_address,
+                                payout_wei    = excluded.payout_wei,
+                                created_at    = excluded.created_at;", conn);
+
+                        upRound.Parameters.AddWithValue("a",  mission);
+                        upRound.Parameters.AddWithValue("n",  win.Round);
+                        upRound.Parameters.AddWithValue("w",  (object?)win.Winner ?? DBNull.Value);
+                        upRound.Parameters.AddWithValue("p",  (object)win.Amount); // BigInteger -> NUMERIC
+                        upRound.Parameters.AddWithValue("ts", win.Ts);             // unix seconds
+
+                        await upRound.ExecuteNonQueryAsync(token);
+                    }
+
+                    changes.NewRound = next;               // keep your existing push semantics
                     changes.HasMeaningfulChange = true;
                 }
 
@@ -726,8 +788,18 @@ namespace B6.Indexer
 
                 try
                 {
-                    await RefreshMissionSnapshotAsync(mission, token);
-                    await NotifyMissionUpdatedAsync  (mission, token);
+                    // Try a few times so the chain state (round/pool) is visible after bank.
+                    const int maxAttempts = 3;
+                    for (int attempt = 0; attempt < maxAttempts; attempt++)
+                    {
+                        await RefreshMissionSnapshotAsync(mission, token);
+                        if (attempt < maxAttempts - 1)
+                        {
+                            try { await Task.Delay(TimeSpan.FromSeconds(1), token); } catch { }
+                        }
+                    }
+
+                    await NotifyMissionUpdatedAsync(mission, token);
                 }
                 catch (Exception ex)
                 {

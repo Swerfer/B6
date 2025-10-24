@@ -80,7 +80,7 @@ async function  enableGamePush(address) {
     const existing = await reg.pushManager.getSubscription();
      
     let sub = existing;
-    console.log('[push] endpoint', sub?.endpoint);  
+    //console.log('[push] endpoint', sub?.endpoint);  
 
     // Force a fresh subscription once after you deploy this fix.
     // (You can remove this block after confirming notifications work.)
