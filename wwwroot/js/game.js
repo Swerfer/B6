@@ -1239,13 +1239,14 @@ function        statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute
 
   const min = Number(m.enrollment_min_players ?? 0);
 
-  if (now < es)                           return 0;                               // Pending
-  if (now < ee)                           return 1;                               // Enrolling
-  if (now < ms) {
-    const GRACE = 30; // seconds
-    if (cur < min && (now - ee) <= GRACE) return 2;                               // Arming (grace period)          
-                                          return (cur >= min ? 2 : 7);            // Arming vs Failed (not enough players)
+  if (now < es) return 0;                 // Pending
+  if (now < ee) return 1;                 // Enrolling
+  // After enrollment closes: fail if minimum not met (allow brief grace)
+  {
+    const GRACE = 30;
+    if ((now - ee) > GRACE && cur < min) return 7;  // <-- always Failed if not enough players
   }
+  if (now < ms) return 2;                 // Arming (enough players)
   if (now < me)                           return (m.pause_timestamp ? 4 : 3);     // Paused vs Active
                                           return (m.status >= 5 ? m.status : 6);  // Ended bucket (keep subtype if present)
 }
