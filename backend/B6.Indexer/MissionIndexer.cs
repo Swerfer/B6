@@ -272,13 +272,6 @@ namespace B6.Indexer
                                 await RefreshMissionSnapshotAsync(w.Mission, token); // will push if status/pool/round changed
                             }
                             catch { /* best effort */ }
-
-                            // Reschedule to the next future boundary among (es, ee, ms, me); else disable
-                            var next = new[] { w.EnrollStartUtc, w.EnrollEndUtc, w.StartAtUtc, w.EndAtUtc }
-                                .Where(t => t > DateTime.UtcNow)
-                                .DefaultIfEmpty(DateTime.MinValue)
-                                .Min();
-                            w.NextPollUtc = next;
                         }
                     }
 
@@ -344,7 +337,8 @@ namespace B6.Indexer
                             .Take(10)
                             .ToList();
 
-                        _log.LogInformation((int)IdxEvt.RefundQueued, "Refund queue size this tick: {n}", dueRefund.Count);
+                        if (dueRefund.Count > 0)
+                            _log.LogInformation((int)IdxEvt.RefundQueued, "Refund queue size this tick: {n}", dueRefund.Count);
 
                         foreach (var w in dueRefund)
                         {
@@ -642,8 +636,26 @@ namespace B6.Indexer
                     }
                 }
 
-                // Persist the contract's real-time status as-is
-                newStatus = (short)md.Status;
+                // Persist the contract's real-time status as-is (with anti-regression guard)
+                var snapped = (short)md.Status;
+
+                // Once terminal (>5), never go backwards; after mission_end, never go below 5.
+                if (curStatus.HasValue)
+                {
+                    var endAtUtc = DateTimeOffset.FromUnixTimeSeconds((long)md.MissionEnd).UtcDateTime;
+
+                    // If DB already says Success/Failed, keep it (ignore any lower snapshot from a lagging RPC).
+                    if (curStatus.Value > 5 && snapped < curStatus.Value)
+                    {
+                        snapped = curStatus.Value;
+                    }
+                    // After mission_end, do not regress to non-ended (<5) states.
+                    else if (DateTime.UtcNow >= endAtUtc && snapped < 5)
+                    {
+                        snapped = curStatus.Value;
+                    }
+                }
+                newStatus = snapped;
 
                 oldStatus = curStatus;
                 oldRound  = curRound;
@@ -900,21 +912,53 @@ namespace B6.Indexer
                         await upRound.ExecuteNonQueryAsync(token);
                     }
 
+                    // Derive current pool from start − sum(payouts so far) to avoid the "last win still included" blip
+                    try
+                    {
+                        var paidTotal = winsAll.Where(w => w.Round <= next)
+                                            .Aggregate(System.Numerics.BigInteger.Zero, (s, w) => s + w.Amount);
+                        var derived   = md.CroStart - paidTotal;
+                        if (derived < 0) derived = System.Numerics.BigInteger.Zero;
+
+                        await using var updPool = new NpgsqlCommand(@"
+                            update missions
+                            set cro_current_wei = @cc, updated_at = now()
+                            where mission_address = @a;", conn);
+                        updPool.Parameters.AddWithValue("a",  mission);
+                        updPool.Parameters.AddWithValue("cc", (object)derived);
+                        await updPool.ExecuteNonQueryAsync(token);
+                    }
+                    catch { /* best effort: never block round write */ }
+
                     changes.NewRound = next;               // push latest only, like before
                     changes.HasMeaningfulChange = true;
                 }
 
                 // Mark finalized ONLY when ended AND (not Failed pending refunds).
-                if (newStatus.HasValue && newStatus.Value > 5 && !curFinal)
+                if (newStatus.HasValue && newStatus.Value > 5)
                 {
-                    var endedAndRefundsDone = !(newStatus.Value == 7 && md.AllRefunded == false);
-                    if (endedAndRefundsDone)
+                    // Current pool is zero after end (leftover split is outside player pool)
+                    try
                     {
-                        await using var fin = new NpgsqlCommand(@"
-                            update missions set finalized = true, updated_at = now()
+                        await using var zero = new NpgsqlCommand(@"
+                            update missions set cro_current_wei = 0, updated_at = now()
                             where mission_address = @a;", conn);
-                        fin.Parameters.AddWithValue("a", mission);
-                        await fin.ExecuteNonQueryAsync(token);
+                        zero.Parameters.AddWithValue("a", mission);
+                        await zero.ExecuteNonQueryAsync(token);
+                    }
+                    catch { /* best effort */ }
+
+                    if (!curFinal)
+                    {
+                        var endedAndRefundsDone = !(newStatus.Value == 7 && md.AllRefunded == false);
+                        if (endedAndRefundsDone)
+                        {
+                            await using var fin = new NpgsqlCommand(@"
+                                update missions set finalized = true, updated_at = now()
+                                where mission_address = @a;", conn);
+                            fin.Parameters.AddWithValue("a", mission);
+                            await fin.ExecuteNonQueryAsync(token);
+                        }
                     }
                 }
 
@@ -955,9 +999,22 @@ namespace B6.Indexer
                                 w.RefundNextTryUtc = endAt;
                         }
 
-                        // next time-based poll = nearest future of (es, ee, ms, me)
-                        var futurePolls = new[] { esAt, eeAt, msAt, endAt }.Where(t => t > DateTime.UtcNow);
-                        w.NextPollUtc = futurePolls.Any() ? futurePolls.Min() : DateTime.MinValue;
+                        // Next poll: if Active(3)/Paused(4) keep a short cadence; also respect next boundary.
+                        var boundaryNext = new[] { esAt, eeAt, msAt, endAt }
+                            .Where(t => t > DateTime.UtcNow)
+                            .DefaultIfEmpty(DateTime.MinValue)
+                            .Min();
+
+                        if (newStatus == 3 || newStatus == 4) // Active or Paused
+                        {
+                            var soon = DateTime.UtcNow.AddSeconds(1);
+                            w.NextPollUtc = boundaryNext == DateTime.MinValue ? soon : (soon < boundaryNext ? soon : boundaryNext);
+                        }
+                        else
+                        {
+                            w.NextPollUtc = boundaryNext;
+                        }
+
                     }
                     else
                     {
@@ -1010,9 +1067,17 @@ namespace B6.Indexer
                     // finalize attempts begin after mission_end
                     w.NextTryUtc = (DateTime.UtcNow >= endAt && endAt != DateTime.MinValue) ? DateTime.UtcNow : endAt;
 
-                    // schedule first time-based poll at the nearest future of (es, ee, ms, me)
-                    var futurePolls = new[] { esAt, eeAt, msAt, endAt }.Where(t => t > DateTime.UtcNow);
-                    w.NextPollUtc = futurePolls.Any() ? futurePolls.Min() : DateTime.MinValue;
+                    // If currently between mission_start and mission_end → start short cadence; else use next boundary.
+                    if (DateTime.UtcNow >= msAt && DateTime.UtcNow < endAt)
+                    {
+                        w.NextPollUtc = DateTime.UtcNow.AddSeconds(1);
+                    }
+                    else
+                    {
+                        var futurePolls = new[] { esAt, eeAt, msAt, endAt }.Where(t => t > DateTime.UtcNow);
+                        w.NextPollUtc = futurePolls.Any() ? futurePolls.Min() : DateTime.MinValue;
+                    }
+
                 }
                 _log.LogInformation((int)IdxEvt.EndWatchSeeded, "End-watch seeded with {n} mission(s)", _endWatch.Count);
             }

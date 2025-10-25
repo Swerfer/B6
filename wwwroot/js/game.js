@@ -170,7 +170,7 @@ let __maxRoundSeen          = Object.create(null); // keyed by mission address L
 
 // #region Degug helpers
 
-window.__B6_DEBUG = true;
+window.__B6_DEBUG = false;
 function dbg(...args){ if (window.__B6_DEBUG) console.debug("[B6]", ...args); }
 
 window.debugPing = (addr) => fetch(`/api/debug/push/${(addr||window.currentMissionAddr)||""}`)
@@ -558,7 +558,7 @@ async function  cleanupMissionDetail(){
   if (subscribedAddr) {
     try { 
       await leaveMissionGroup(subscribedAddr); 
-      //dbg("Unsubscribed (cleanup):", subscribedAddr); 
+      dbg("Unsubscribed (cleanup):", subscribedAddr); 
     } catch {}
   }
   subscribedGroups.clear();
@@ -723,7 +723,7 @@ function        formatMMSS(s){
   return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
 }
 
-function nonDecreasingRound(m) {
+function        nonDecreasingRound(m) {
   const addr = String(m?.mission_address || "").toLowerCase();
   const cApi = Number(m?.round_count ?? 0);
   const cArr = Array.isArray(m?.rounds) ? m.rounds.length : 0; // final-round safe
@@ -731,6 +731,16 @@ function nonDecreasingRound(m) {
   const cur  = Math.max(cApi, cArr, cMem);
   __maxRoundSeen[addr] = cur; // remember
   return cur;
+}
+
+function        roundsForDisplay(m) {
+  const total  = Number(m?.mission_rounds_total ?? 0);
+  const banked = Number(m?.round_count ?? 0);
+  const st     = statusByClock(m);   // 0..7
+
+  // 1-based only during Mission Time
+  const v = (st >= 3) ? (banked + 1) : banked;
+  return Math.min(v, total);
 }
 
 // Chain timestamp:
@@ -900,7 +910,28 @@ function        setStageStatusImage(slug){
 
 // Center timer core:
 
+async function  localAdvanceIfDue(m) {
+  try {
+    const byClock = statusByClock(m);
+    const cur     = Number(stageCurrentStatus ?? -1);
+    const toggle34= (byClock === 3 && cur === 4) || (byClock === 4 && cur === 3);
+    if (byClock > cur || toggle34) {
+      const m2 = { ...m, status: byClock };
+      setStageStatusImage(statusSlug(byClock));
+      await bindRingToMission(m2);
+      await bindCenterTimerToMission(m2);
+      renderStageCtaForStatus(m2);
+      await renderStageEndedPanelIfNeeded(m2);
+      stageCurrentStatus = byClock;
+      buildStageLowerHudForStatus(m2);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
 async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
+
   stopStageTimer();
   const node = document.getElementById("vaultTimerText");
   if (!node || !endTs) { if (node) node.textContent = ""; return; }
@@ -1017,9 +1048,9 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
       if (!zeroFired) {
         zeroFired = true;
 
-        // No local stage flip. Let the server/indexer drive the status.
-        // Do a gentle refresh; push events will also update the stage.
-        refreshOpenStageFromServer(3);
+        // Flip locally (by clock) so banner/timer advance immediately; then reconcile.
+        const advanced = await localAdvanceIfDue(missionObj);
+        refreshOpenStageFromServer(advanced ? 2 : 5);
       }
     }
 
@@ -1028,6 +1059,7 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
   paint();
   stageTicker = setInterval(paint, 1000);
 }
+
 
 function        stopStageTimer(){ 
   if (stageTicker){ clearInterval(stageTicker); stageTicker = null; } 
@@ -1247,8 +1279,13 @@ function        statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute
     if ((now - ee) > GRACE && cur < min) return 7;  // <-- always Failed if not enough players
   }
   if (now < ms) return 2;                 // Arming (enough players)
-  if (now < me)                           return (m.pause_timestamp ? 4 : 3);     // Paused vs Active
-                                          return (m.status >= 5 ? m.status : 6);  // Ended bucket (keep subtype if present)
+  if (now < me) {
+    // Only Paused while cooldown window is still active.
+    const info = cooldownInfo(m, now);    // uses pause_timestamp + correct pause duration
+    const isPausedNow = Number(m.pause_timestamp || 0) > 0 && info.secsLeft > 0;
+    return isPausedNow ? 4 : 3;
+  }
+  return (m.status >= 5 ? m.status : 6);  // Ended bucket (keep subtype if present)
 }
 
 async function  bindCenterTimerToMission(mission){
@@ -1423,7 +1460,7 @@ async function  startHub() { // SignalR HUB via shared hub.js
     onMissionUpdated: async (addr) => {
       __lastPushTs = Date.now();
       touchUpdatedAtStampFromPush();
-      // dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
+      dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
 
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
         // ↓↓↓ invalidate stage snap-cache so the next fetch cannot reuse stale payload
@@ -1559,40 +1596,49 @@ async function  startHub() { // SignalR HUB via shared hub.js
         }
       } catch {}
 
-      const me  = (walletAddress || "").toLowerCase();
-      const win = String(winner || "").toLowerCase();
-      const cro = weiToCro(String(amountWei), 2);
+      const me   = (walletAddress || "").toLowerCase();
+      const win  = String(winner || "").toLowerCase();
+      const amt  = BigInt(String(amountWei || "0"));
+      const cro  = weiToCro(String(amountWei), 2);
 
+      // PLAYER: suppress the early win popup; defer to the vault-video final popup
       if (win === me) {
-        if (window.__winPopupSuppressUntil && Date.now() < window.__winPopupSuppressUntil) {
-          if (__vaultVideoFlowActive) {
-            try { await finalizeVaultVideoFlow(addr, round, winner, amountWei); } catch {}
-          }
-        } else {
-          window.__winPopupSuppressUntil = Date.now() + 5000;
-          showAlert(`You won <b>${cro} CRO</b> in round ${round}!`, "success", 5000);
-          try { await finalizeVaultVideoFlow(addr, round, winner, amountWei); } catch {}
+        if (amt > 0n) {
+          // If the indexer already provided the final amount, prefer it for the video popup
+          __vaultVideoPendingWin = { cro, round };
         }
+        // no showAlert here — single, correct popup will be shown by the video flow
       } else {
-        showStripe(`${copyableAddr(winner)} won <b>${cro} CRO</b> in round ${round}`, "info", 5000);
+        // SPECTATORS / other players: only show when the amount is non-zero
+        if (amt > 0n) {
+          showAlert(`${copyableAddr(winner)} won <b>${cro} CRO</b> in round ${round}`, "info", 5000);
+        }
       }
 
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
         try {
           const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
+
+          // Immediately flip UI to Paused so cooldown + accumulating reset from bank time (and keep counting during cooldown)
+          await flipStageToPausedOptimistic(m);
+
+          // If the video already ended, finish the win flow now for the player
+          if (win === me && __vaultVideoFlowActive) {
+            try { await finalizeVaultVideoFlow(addr, round, winner, amountWei); } catch {}
+          }
+
           const gameMain = document.getElementById('gameMain');
           if (gameMain?.classList.contains('stage-mode')) {
-            //renderStage(m);
             refreshOpenStageFromServer(4);
           } else {
             renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
           }
-        } catch 
-        {
+        } catch {
           console.log("startHub MissionUpdated error: " + err)
         }
       }
     }
+
   });
 
   // Ensure we are joined to the currently open mission (if any)
@@ -1890,7 +1936,7 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
 
     buildStageLowerHudForStatus(m);
 
-    //dbg("refreshOpenStageFromServer", { newStatus, stageCurrentStatus, retries });
+    dbg("refreshOpenStageFromServer", { newStatus, stageCurrentStatus, retries });
 
     if (newStatus !== stageCurrentStatus) {
       setStageStatusImage(statusSlug(m.status));
@@ -1918,8 +1964,11 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
 
       scheduleRetry(Math.min(retries, 1));
     } else {
-      scheduleRetry(0);
+      // Server still shows the old status — advance locally if the clock says so
+      const advanced = await localAdvanceIfDue(m);
+      scheduleRetry(advanced ? Math.min(retries, 1) : (retries - 1));
     }
+
   } catch (e) {
     dbg("refreshOpenStageFromServer FAILED", e?.message || e);
     scheduleRetry(retries);
@@ -3158,8 +3207,9 @@ function        renderCtaActive         (host, mission)   {
       })
     );
 
-    // If still unsure, do a one-off snapshot check and repaint on success (no chain calls).
-    if (!joined && me && addrLc) {
+    // If still unsure, do a one-off snapshot check (run only once per mission/viewer).
+    if (!joined && me && addrLc && !mission.__checkedJoinedOnce) {
+      mission.__checkedJoinedOnce = true;
       (async () => {
         try {
           // Uses GET /missions/player/{address} via apiPlayerMissions()
@@ -3248,6 +3298,14 @@ function        renderCtaPaused         (host, mission){
     (mission?.rounds || []).some(r => String(r?.winner_address || "").toLowerCase() === me)
   ));
 
+  // NEW: compute joined (cheap signals only; no network)
+  let joined =
+    !!(me) && (
+      mission?._joinedByMe === true ||
+      joinedCacheHas(addrLc, me) ||
+      (mission?.enrollments || []).some(e => String(e?.address || "").toLowerCase() === me)
+    );
+
   if (alreadyWon) {
 
     // 1) Center “View only. You already won a round”
@@ -3286,7 +3344,6 @@ function        renderCtaPaused         (host, mission){
     const info = cooldownInfo(mission);
     const end = Number(info.pauseEnd || 0);
     t.setAttribute("data-cooldown-end", String(end));
-    // paint an initial value to avoid a dash flash
     t.textContent = end > 0 ? formatMMSS(Math.max(0, end - Math.floor(Date.now() / 1000))) : "—";
 
     label.appendChild(t);
@@ -3658,7 +3715,8 @@ function        buildMissionListCard    (m){
     }
   const duration  = (m.mission_start && m.mission_end) ? (Number(m.mission_end) - Number(m.mission_start)) : 0;
   const rounds    = Number(m.round_count || 0);
-  const maxRounds = Number(m.mission_rounds_total || 0);
+  const maxRounds   = Number(m.mission_rounds_total || 0);
+  const roundsShown = roundsForDisplay(m);
   const feeWei    = m.enrollment_amount_wei;
   const feeCro    = weiToCro(feeWei, 2);
   const curPlayers= Number(m.enrolled_players || 0);
@@ -3693,7 +3751,7 @@ function        buildMissionListCard    (m){
         <div class="label">Duration:</div>
         <div class="value">${formatDurationShort(duration)}</div>
       ` : `<div class="label"></div><div class="value"></div>`}
-      ${ showRounds ? `<div class="ms-auto fw-bold">Rounds ${rounds}/${maxRounds}</div>` : ``}
+      ${ showRounds ? `<div class="ms-auto fw-bold">Round ${roundsShown}/${maxRounds}</div>` : ``}
     </div>` : ``}
 
     ${ showFee ? `
@@ -3968,6 +4026,8 @@ function        renderMissionDetail     ({ mission, enrollments, rounds }){
   const baseUpd  = Number(mission.updated_at || 0);
   const stampSec = Math.max(baseUpd || Math.floor(Date.now()/1000), pushSec);
 
+  const roundsShown = roundsForDisplay(mission);
+
   els.missionCore.innerHTML = `
     <div class="row g-3">
       <!-- Legend chips under the title -->
@@ -3980,7 +4040,7 @@ function        renderMissionDetail     ({ mission, enrollments, rounds }){
             Type: ${missionTypeName[mission.mission_type] ?? mission.mission_type}
           </span>
           <span class="status-pill">
-            Rounds: ${mission.round_count}/${mission.mission_rounds_total}
+            Round: ${roundsShown}/${mission.mission_rounds_total}
           </span>
           <span class="status-pill">
             Players: Minimum ${minP} | Joined <span class="${joinedCls}">${joinedPlayers}</span> | Maximum ${maxP || "—"}
@@ -4004,7 +4064,7 @@ function        renderMissionDetail     ({ mission, enrollments, rounds }){
           <div class="value"><span class="${statusCls2}" title="${statusTtl}">${statusLbl}</span></div>
 
           <div class="label">Rounds played</div>
-          <div class="value">${mission.round_count}/${mission.mission_rounds_total}</div>
+          <div class="value">${roundsShown}/${mission.mission_rounds_total}</div>
 
           <div class="label">Mission Fee</div>
           <div class="value">${weiToCro(mission.enrollment_amount_wei, 2)} CRO</div>
@@ -4481,17 +4541,28 @@ async function init(){
     showAlert("Loading All Missions timed out. Tap Refresh to retry.", "warning");
   }
 
-  // 4) Manual reload button
   els.reloadMissionBtn?.addEventListener("click", async () => {
     if (!currentMissionAddr) { return; }
+
+    // Flash-hide the detail content for 0.1s so the refresh is visible
+    const host =
+      document.getElementById("missionCoreSection") ||
+      document.getElementById("gameMain"); // fallback if detail id differs
+    if (host) {
+      host.style.opacity = "0";
+      await new Promise(r => setTimeout(r, 100));
+      host.style.opacity = "";
+    }
+
     try {
       const data = await apiMission(currentMissionAddr, true);
-      renderMissionDetail(data);
+      const m = enrichMissionFromApi(data);
+      renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
       __lastPushTs = Date.now();
       touchUpdatedAtStampFromPush();
     } catch (e) {
       showAlert("Reload failed. Please check your connection.", "error");
-    } 
+    }
   });
 
   buildAllFiltersUI();

@@ -565,7 +565,7 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
         player_missions AS (
             SELECT DISTINCT mission_address
             FROM players
-            WHERE lower(address) = lower(trim(@p))
+            WHERE lower(player) = lower(trim(@p))
         )
         SELECT
             m.mission_address,
