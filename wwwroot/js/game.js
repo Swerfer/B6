@@ -4548,11 +4548,6 @@ async function init(){
     const host =
       document.getElementById("missionCoreSection") ||
       document.getElementById("gameMain"); // fallback if detail id differs
-    if (host) {
-      host.style.opacity = "0";
-      await new Promise(r => setTimeout(r, 100));
-      host.style.opacity = "";
-    }
 
     try {
       const data = await apiMission(currentMissionAddr, true);
@@ -4562,6 +4557,12 @@ async function init(){
       touchUpdatedAtStampFromPush();
     } catch (e) {
       showAlert("Reload failed. Please check your connection.", "error");
+    } finally {
+      if (host) {
+        host.style.opacity = "0";
+        await new Promise(r => setTimeout(r, 100));
+        host.style.opacity = "";
+      }
     }
   });
 
