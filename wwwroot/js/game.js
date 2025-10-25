@@ -1901,6 +1901,9 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
       await renderStageEndedPanelIfNeeded(m);
       stageCurrentStatus = newStatus;
 
+      // Rebuild pills once more after committing the new stage to avoid any race
+      buildStageLowerHudForStatus(m);
+
       // update sticky windows / last pause stamp
       if (newStatus === 4) {
         const info = cooldownInfo(m);
