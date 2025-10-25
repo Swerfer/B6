@@ -82,7 +82,10 @@ namespace B6.Indexer
             public int         Attempts     = 0;
             public DateTime    NextTryUtc   = DateTime.MinValue; // finalize() backoff
             public DateTime    NextPollUtc  = DateTime.MinValue; // time-based snapshot poll at es/ee/ms/me
+            public int         RefundAttempts  = 0;
+            public DateTime    RefundNextTryUtc = DateTime.MinValue;
         }
+
         // --------------------------------------------------------------------------------------------------------------
 
         [Function("getChangesAfter", typeof(GetChangesAfterOutput))]
@@ -305,6 +308,63 @@ namespace B6.Indexer
                         }
                     }
 
+                    // Sweep DB for Failed+pending refunds that are not yet in watch (handles legacy/manual flips)
+                    try { await SeedRefundWatchAsync(token); } catch { /* best effort */ }
+
+                    // attempt refundPlayers() for Failed missions with refunds pending
+                    if (!_endWatch.IsEmpty)
+                    {
+                    var dueRefund = _endWatch.Values
+                        .Where(w => now >= w.RefundNextTryUtc)
+                        .Take(10)
+                        .ToList();
+
+                        foreach (var w in dueRefund)
+                        {
+                            // Ensure DB snapshot is current before deciding
+                            try { await RefreshMissionSnapshotAsync(w.Mission, token); } catch { /* best effort */ }
+
+                            var ok = await AttemptRefundAsync(w.Mission, token);
+
+                            // Snapshot after attempt so all_refunded is persisted if it changed
+                            try { await RefreshMissionSnapshotAsync(w.Mission, token); } catch { /* best effort */ }
+
+                            if (ok)
+                            {
+                                _endWatch.TryRemove(w.Mission, out _);
+                            }
+                            else
+                            {
+                                w.RefundAttempts++;
+
+                                if (w.RefundAttempts >= 2)
+                                {
+                                    // After 2 failed attempts, mark finalized = true to stop watching this mission
+                                    try
+                                    {
+                                        await using var conn = new NpgsqlConnection(_pg);
+                                        await conn.OpenAsync(token);
+                                        await using var fin = new NpgsqlCommand(@"
+                                            update missions set finalized = true, updated_at = now()
+                                            where mission_address = @a;", conn);
+                                        fin.Parameters.AddWithValue("a", w.Mission);
+                                        await fin.ExecuteNonQueryAsync(token);
+                                    }
+                                    catch { /* best effort */ }
+
+                                    _endWatch.TryRemove(w.Mission, out _);
+                                    continue;
+                                }
+
+                                var next = w.RefundAttempts switch
+                                {
+                                    1 => TimeSpan.FromSeconds(5),
+                                    _ => TimeSpan.FromSeconds(10)
+                                };
+                                w.RefundNextTryUtc = DateTime.UtcNow + next;
+                            }
+                        }
+                    }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
@@ -815,20 +875,25 @@ namespace B6.Indexer
                     changes.HasMeaningfulChange = true;
                 }
 
-                // Mark finalized ONLY when the contract’s realtime status is a fully-ended state (Success/Failed).
+                // Mark finalized ONLY when ended AND (not Failed pending refunds).
                 if (newStatus.HasValue && newStatus.Value > 5 && !curFinal)
                 {
-                    await using var fin = new NpgsqlCommand(@"
-                        update missions set finalized = true, updated_at = now()
-                        where mission_address = @a;", conn);
-                    fin.Parameters.AddWithValue("a", mission);
-                    await fin.ExecuteNonQueryAsync(token);
+                    var endedAndRefundsDone = !(newStatus.Value == 7 && md.AllRefunded == false);
+                    if (endedAndRefundsDone)
+                    {
+                        await using var fin = new NpgsqlCommand(@"
+                            update missions set finalized = true, updated_at = now()
+                            where mission_address = @a;", conn);
+                        fin.Parameters.AddWithValue("a", mission);
+                        await fin.ExecuteNonQueryAsync(token);
+                    }
                 }
 
                 try
                 {
-                    // Watch only if not finalized yet; keep all time boundaries in sync
-                    if (!curFinal)
+                    // Watch while not finalized OR (Failed & refunds pending); keep time boundaries in sync
+                    var mustWatch = !curFinal || (newStatus == 7 && md.AllRefunded == false);
+                    if (mustWatch)
                     {
                         var esAt  = DateTimeOffset.FromUnixTimeSeconds((long)md.EnrollmentStart).UtcDateTime;
                         var eeAt  = DateTimeOffset.FromUnixTimeSeconds((long)md.EnrollmentEnd).UtcDateTime;
@@ -848,13 +913,26 @@ namespace B6.Indexer
                         else if (DateTime.UtcNow < endAt)
                             w.NextTryUtc = endAt;
 
+                        // Refunds: if Failed (7) & not all_refunded → try immediately; else, defer to mission_end
+                        if (newStatus == 7 && md.AllRefunded == false)
+                        {
+                            w.RefundNextTryUtc = DateTime.UtcNow;
+                        }
+                        else
+                        {
+                            if (DateTime.UtcNow >= endAt && w.RefundNextTryUtc < DateTime.UtcNow)
+                                w.RefundNextTryUtc = DateTime.UtcNow;
+                            else if (DateTime.UtcNow < endAt)
+                                w.RefundNextTryUtc = endAt;
+                        }
+
                         // next time-based poll = nearest future of (es, ee, ms, me)
                         var futurePolls = new[] { esAt, eeAt, msAt, endAt }.Where(t => t > DateTime.UtcNow);
                         w.NextPollUtc = futurePolls.Any() ? futurePolls.Min() : DateTime.MinValue;
                     }
                     else
                     {
-                        _endWatch.TryRemove(mission, out _); // no need to watch
+                        _endWatch.TryRemove(mission, out _);
                     }
                 }
                 catch { /* never block */ }
@@ -873,7 +951,8 @@ namespace B6.Indexer
                 await using var cmd = new NpgsqlCommand(@"
                     select mission_address, enrollment_start, enrollment_end, mission_start, mission_end, coalesce(finalized,false)
                     from missions
-                    where coalesce(finalized,false) = false
+                    where (coalesce(finalized,false) = false
+                        or (status = 7 and coalesce(all_refunded,false) = false))
                     and (enrollment_start is not null or enrollment_end is not null or mission_start is not null or mission_end is not null);", conn);
 
                 await using var rdr = await cmd.ExecuteReaderAsync(token);
@@ -963,49 +1042,133 @@ namespace B6.Indexer
             }
         }
 
-        private async Task<bool>                        ShouldForceFinalizeAsync            (string mission, CancellationToken token) {
-                    await using var conn = new NpgsqlConnection(_pg);
-                    await conn.OpenAsync(token);
-                    await using var cmd = new NpgsqlCommand(@"
-                        select status, mission_end, coalesce(finalized,false)
-                        from missions where mission_address = @a;", conn);
-                    cmd.Parameters.AddWithValue("a", mission);
+        private async Task<bool>                        ShouldRefundAsync                   (string mission, CancellationToken token) {
+            await using var conn = new NpgsqlConnection(_pg);
+            await conn.OpenAsync(token);
+            await using var cmd = new NpgsqlCommand(@"
+                select status, coalesce(finalized,false), coalesce(all_refunded,false)
+                from missions where mission_address = @a;", conn);
+            cmd.Parameters.AddWithValue("a", mission);
 
-                    await using var rdr = await cmd.ExecuteReaderAsync(token);
-                    if (!await rdr.ReadAsync(token)) return false;
+            await using var rdr = await cmd.ExecuteReaderAsync(token);
+            if (!await rdr.ReadAsync(token)) return false;
 
-                    var status    = rdr.IsDBNull(0) ? (short)99 : rdr.GetInt16(0);
-                    var endSec    = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
-                    var finalized = !rdr.IsDBNull(2) && rdr.GetBoolean(2);
+            var status      = rdr.IsDBNull(0) ? (short)99 : rdr.GetInt16(0);
+            var finalized   = !rdr.IsDBNull(1) && rdr.GetBoolean(1);
+            var allRefunded = !rdr.IsDBNull(2) && rdr.GetBoolean(2);
 
-                    // If already finalized in DB, skip.
-                    if (finalized) return false;
+            if (finalized) return false;
+            if (status != 7) return false;
+            if (allRefunded) return false;
 
-                    var endAt = DateTimeOffset.FromUnixTimeSeconds(endSec).UtcDateTime;
-                    if (DateTime.UtcNow < endAt) return false; // only after end
+            // No time gating: Failed (7) + !all_refunded → refund now
+            return true;
+        }
 
-                    // Optional improvement: query the contract’s realtime status to avoid stale DB decisions.
-                    try
+        private async Task<bool>                        ShouldRefundAsync                   (string mission, CancellationToken token) {
+            await using var conn = new NpgsqlConnection(_pg);
+            await conn.OpenAsync(token);
+            await using var cmd = new NpgsqlCommand(@"
+                select status, mission_end, coalesce(finalized,false), coalesce(all_refunded,false)
+                from missions where mission_address = @a;", conn);
+            cmd.Parameters.AddWithValue("a", mission);
+
+            await using var rdr = await cmd.ExecuteReaderAsync(token);
+            if (!await rdr.ReadAsync(token)) return false;
+
+            var status      = rdr.IsDBNull(0) ? (short)99 : rdr.GetInt16(0);
+            var endSec      = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
+            var finalized   = !rdr.IsDBNull(2) && rdr.GetBoolean(2);
+            var allRefunded = !rdr.IsDBNull(3) && rdr.GetBoolean(3);
+
+            if (finalized) return false;
+            if (status != 7) return false;
+            if (allRefunded) return false;
+
+            var endAt = DateTimeOffset.FromUnixTimeSeconds(endSec).UtcDateTime;
+            return DateTime.UtcNow >= endAt;
+        }
+
+        private async Task<bool>                        AttemptRefundAsync                  (string mission, CancellationToken token) {
+            if (_finalizerAccount == null)
+            {
+                _log.LogWarning("Refund requested for {mission} but no signer configured (Owner:PK). Skipping.", mission);
+                return false;
+            }
+
+            if (!await ShouldRefundAsync(mission, token))
+                return false;
+
+            try
+            {
+                var txHash = await RunRpc(
+                    async w => {
+                        var handler = w.Eth.GetContractTransactionHandler<RefundPlayersFunction>();
+                        await handler.EstimateGasAsync(mission, new RefundPlayersFunction());
+                        return await handler.SendRequestAsync(mission, new RefundPlayersFunction());
+                    },
+                    "Tx.refundPlayers");
+
+                var receipt = await RunRpc<TransactionReceipt?>(async w =>
+                {
+                    for (int i = 0; i < 60; i++)
                     {
-                        var wrap = await RunRpc(
-                            w => w.Eth.GetContractQueryHandler<B6.Contracts.GetMissionDataFunction>()
-                                .QueryDeserializingToObjectAsync<B6.Contracts.MissionDataWrapper>(
-                                    new B6.Contracts.GetMissionDataFunction(), mission, null),
-                            "Call.getMissionData");
-
-                        var onchainStatus = (short)wrap.Data.Status;
-
-                        // If the contract already reports a terminal state (Success/Failed), skip finalization.
-                        if (onchainStatus > 5) return false;
-
-                        // PartlySuccess (=5) and anything not terminal at/after mission_end → attempt finalize.
-                        return true;
+                        var r = await w.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+                        if (r != null) return r;
+                        await Task.Delay(TimeSpan.FromSeconds(1), token);
                     }
-                    catch
-                    {
-                        // If we cannot read on-chain, fall back to allowing a finalize attempt.
-                        return true;
-                    }
+                    return (TransactionReceipt?)null;
+                }, "Tx.waitRefund");
+
+                var ok = receipt != null && receipt.Status != null && receipt.Status.Value == 1;
+                _log.LogInformation("refundPlayers() {mission} -> {status} (tx={tx})", mission, ok ? "OK" : "FAILED", txHash);
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "refundPlayers() attempt failed for {mission}", mission);
+                return false;
+            }
+        }
+
+        private async Task                              SeedRefundWatchAsync                (CancellationToken token) {
+            try
+            {
+                await using var conn = new NpgsqlConnection(_pg);
+                await conn.OpenAsync(token);
+
+                await using var cmd = new NpgsqlCommand(@"
+                    select mission_address, mission_end
+                    from missions
+                    where coalesce(finalized,false) = false
+                    and status = 7
+                    and coalesce(all_refunded,false) = false
+                    limit 200;", conn);
+
+                await using var rdr = await cmd.ExecuteReaderAsync(token);
+                var now = DateTime.UtcNow;
+
+                while (await rdr.ReadAsync(token))
+                {
+                    var addr = (rdr.IsDBNull(0) ? "" : rdr.GetString(0)).ToLowerInvariant();
+                    if (string.IsNullOrWhiteSpace(addr)) continue;
+
+                    var meSec = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
+                    var endAt = meSec == 0 ? DateTime.MinValue : DateTimeOffset.FromUnixTimeSeconds(meSec).UtcDateTime;
+
+                    var w = _endWatch.GetOrAdd(addr, _ => new EndWatch { Mission = addr });
+                    w.EndAtUtc = endAt;
+
+                    // schedule refund attempts (now if ended; else at end)
+                    w.RefundNextTryUtc = now;
+
+                    // keep finalize/backoff fields untouched; refunds path is independent
+                }
+            }
+            catch
+            {
+                // best effort only
+            }
         }
 
         private async Task                              SaveFactoryLastSeqAsync             (ulong seq, CancellationToken ct) {

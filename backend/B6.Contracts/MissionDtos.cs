@@ -8,25 +8,25 @@ namespace B6.Contracts
     [Function("getMissionData", typeof(MissionDataWrapper))]
     public class GetMissionDataFunction : FunctionMessage { }
 
+    [Function("refundPlayers")]
+    public class RefundPlayersFunction  : FunctionMessage { }
+
     [FunctionOutput]
-    public class MissionDataWrapper : IFunctionOutputDTO
-    {
+    public class MissionDataWrapper : IFunctionOutputDTO {
         // getMissionData returns a single tuple
         [Parameter("tuple", "", 1)]
         public MissionDataTuple Data { get; set; } = new();
     }
 
     [FunctionOutput]
-    public class PlayerWin : IFunctionOutputDTO
-    {
+    public class PlayerWin : IFunctionOutputDTO {
         [Parameter("address", "player",    1)] public string     Player { get; set; } = string.Empty;
         [Parameter("uint256", "amountWon", 2)] public BigInteger Amount { get; set; }
     }
 
     // Player tuple matching the Solidity struct Players { address player; uint256 enrolledTS; uint256 amountWon; uint256 wonTS; bool refunded; bool refundFailed; uint256 refundTS; }
     [FunctionOutput]
-    public class PlayerTuple : IFunctionOutputDTO
-    {
+    public class PlayerTuple : IFunctionOutputDTO {
         [Parameter("address","player",       1)] public string     Player        { get; set; } = string.Empty;
         [Parameter("uint256","enrolledTS",   2)] public BigInteger EnrolledTS    { get; set; }
         [Parameter("uint256","amountWon",    3)] public BigInteger AmountWon     { get; set; }
@@ -37,8 +37,7 @@ namespace B6.Contracts
     }
 
     [FunctionOutput]
-    public class MissionDataTuple : IFunctionOutputDTO
-    {
+    public class MissionDataTuple : IFunctionOutputDTO {
         [Parameter("uint8",   "status",                 1)] public byte       Status                 { get; set; }
         [Parameter("uint256", "missionCreated",         2)] public BigInteger MissionCreated         { get; set; }
         [Parameter("string",  "name",                   3)] public string     Name                   { get; set; } = string.Empty;

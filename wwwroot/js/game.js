@@ -2,8 +2,6 @@
  game.js – home page bootstrap, re-uses core.js & walletConnect.js
 **********************************************************************/
 
-// V4
-
 // #region Imports
 import { 
   connectWallet, 
@@ -1424,7 +1422,7 @@ async function  startHub() { // SignalR HUB via shared hub.js
     onMissionUpdated: async (addr) => {
       __lastPushTs = Date.now();
       touchUpdatedAtStampFromPush();
-      dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
+      // dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
 
       if (currentMissionAddr && addr?.toLowerCase() === currentMissionAddr) {
         // ↓↓↓ invalidate stage snap-cache so the next fetch cannot reuse stale payload
