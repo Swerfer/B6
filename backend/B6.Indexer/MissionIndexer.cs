@@ -70,6 +70,23 @@ namespace B6.Indexer
 
         private static readonly TimeSpan                ActivePoll          = TimeSpan.FromSeconds(5);                      // every 5 seconds
 
+        enum IdxEvt { 
+                                                        RpcSummary          =  9001,
+                                                        PushMission         =  9002, 
+                                                        UseRpc              =  9003,
+                                                        RpcBenignError      =  9004,
+                                                        EndWatchSeeded      = 11001, 
+                                                        RefundSeeded        = 21001, 
+                                                        RefundQueued        = 21002, 
+                                                        RefundDue           = 21003, 
+                                                        RefundAttempt       = 21004, 
+                                                        RefundEligible      = 21005, 
+                                                        RefundSkip          = 21006,
+                                                        RefundSkipped       = 21007,
+                                                        RefundPlayers       = 21008,
+                                                        ForceFinalizeMission= 31001,
+        }
+
         private readonly ConcurrentDictionary<string, EndWatch> _endWatch = new(StringComparer.OrdinalIgnoreCase);
 
         private sealed class EndWatch {
@@ -312,7 +329,7 @@ namespace B6.Indexer
                     try
                     {
                         var added = await SeedRefundWatchAsync(token);
-                        if (added > 0) _log.LogInformation("Refund watch seeded/updated for {n} mission(s)", added);
+                        if (added > 0) _log.LogInformation((int)IdxEvt.RefundSeeded, "Refund watch seeded/updated for {n} mission(s)", added);
                     }
                     catch { /* best effort */ }
 
@@ -327,11 +344,11 @@ namespace B6.Indexer
                             .Take(10)
                             .ToList();
 
-                        _log.LogInformation("Refund queue size this tick: {n}", dueRefund.Count);
+                        _log.LogInformation((int)IdxEvt.RefundQueued, "Refund queue size this tick: {n}", dueRefund.Count);
 
                         foreach (var w in dueRefund)
                         {
-                            _log.LogInformation("Refund attempt scheduled for {mission}", w.Mission);
+                            _log.LogInformation((int)IdxEvt.RefundAttempt, "Refund attempt scheduled for {mission}", w.Mission);
 
                             // Ensure DB snapshot is current before deciding
                             try { await RefreshMissionSnapshotAsync(w.Mission, token); } catch { /* best effort */ }
@@ -997,7 +1014,7 @@ namespace B6.Indexer
                     var futurePolls = new[] { esAt, eeAt, msAt, endAt }.Where(t => t > DateTime.UtcNow);
                     w.NextPollUtc = futurePolls.Any() ? futurePolls.Min() : DateTime.MinValue;
                 }
-                _log.LogInformation("End-watch seeded with {n} mission(s)", _endWatch.Count);
+                _log.LogInformation((int)IdxEvt.EndWatchSeeded, "End-watch seeded with {n} mission(s)", _endWatch.Count);
             }
             catch (Exception ex)
             {
@@ -1044,7 +1061,7 @@ namespace B6.Indexer
 
                 // success when status == 1
                 var ok = receipt != null && receipt.Status != null && receipt.Status.Value == 1;
-                _log.LogInformation("forceFinalizeMission() {mission} -> {status} (tx={tx})", mission, ok ? "OK" : "FAILED", txHash);
+                _log.LogInformation((int)IdxEvt.ForceFinalizeMission, "forceFinalizeMission() {mission} -> {status} (tx={tx})", mission, ok ? "OK" : "FAILED", txHash);
                 return ok;
             }
             catch (Exception ex)
@@ -1114,12 +1131,12 @@ namespace B6.Indexer
             var finalized   = !rdr.IsDBNull(1) && rdr.GetBoolean(1);
             var allRefunded = !rdr.IsDBNull(2) && rdr.GetBoolean(2);
 
-            if (finalized  ) { _log.LogInformation("Refund skip: {mission} is already finalized", mission);         return false; }
-            if (status != 7) { _log.LogInformation("Refund skip: {mission} status={st} (need 7)", mission, status); return false; }
-            if (allRefunded) { _log.LogInformation("Refund skip: {mission} already refunded"    , mission);         return false; }
+            if (finalized  ) { _log.LogInformation((int)IdxEvt.RefundSkip, "Refund skip: {mission} is already finalized", mission);         return false; }
+            if (status != 7) { _log.LogInformation((int)IdxEvt.RefundSkip, "Refund skip: {mission} status={st} (need 7)", mission, status); return false; }
+            if (allRefunded) { _log.LogInformation((int)IdxEvt.RefundSkip, "Refund skip: {mission} already refunded"    , mission);         return false; }
 
             // No time gating: Failed (7) + !all_refunded → refund now
-            _log.LogInformation("Refund eligible: {mission} (status=7, all_refunded=false)", mission);
+            _log.LogInformation((int)IdxEvt.RefundEligible, "Refund eligible: {mission} (status=7, all_refunded=false)", mission);
             return true;
         }
 
@@ -1127,7 +1144,7 @@ namespace B6.Indexer
             if (_finalizerAccount == null)
             {
                 _log.LogWarning("Refund requested for {mission} but no signer configured (Owner:PK). Skipping.", mission);
-                _log.LogInformation("Refund SKIPPED (no signer) for {mission}", mission);
+                _log.LogInformation((int)IdxEvt.RefundSkipped, "Refund SKIPPED (no signer) for {mission}", mission);
                 return false;
             }
 
@@ -1157,7 +1174,7 @@ namespace B6.Indexer
                 }, "Tx.waitRefund");
 
                 var ok = receipt != null && receipt.Status != null && receipt.Status.Value == 1;
-                _log.LogInformation("refundPlayers() {mission} -> {status} (tx={tx})", mission, ok ? "OK" : "FAILED", txHash);
+                _log.LogInformation((int)IdxEvt.RefundPlayers, "refundPlayers() {mission} -> {status} (tx={tx})", mission, ok ? "OK" : "FAILED", txHash);
                 return ok;
             }
             catch (Exception ex)
@@ -1268,7 +1285,7 @@ namespace B6.Indexer
             try
             {
                 var resp = await _http.SendAsync(req, ct);
-                _log.LogInformation("push/mission {mission} -> {code}", mission, (int)resp.StatusCode);
+                _log.LogInformation((int)IdxEvt.PushMission, "push/mission {mission} -> {code}", mission, (int)resp.StatusCode);
             }
             catch (Exception ex)
             {
@@ -1370,7 +1387,7 @@ namespace B6.Indexer
             // NEW: use signer when available so we can send finalize()
             _web3 = _finalizerAccount != null ? new Web3(_finalizerAccount, url)
                                             : new Web3(url);
-            //_log.LogInformation("Using RPC[{idx}]: {url}", _rpcIndex, url);
+            //_log.LogInformation((int)IdxEvt.UseRpc, "Using RPC[{idx}]: {url}", _rpcIndex, url);
         }
 
         private bool                                    SwitchRpc                           () {
@@ -1432,7 +1449,7 @@ namespace B6.Indexer
                     $"ByContext:{nl}{ctxPretty}{nl}{nl}" +
                     $"ByCaller:{nl}{callerPretty}";
 
-                _log.LogInformation(new EventId(9001, "RpcSummary"), "{msg}", msg);
+                _log.LogInformation((int)IdxEvt.RpcSummary, "{msg}", msg);
 
         }
 
@@ -1513,7 +1530,7 @@ namespace B6.Indexer
                     {
                         var y = _benignDayUtc.Date.ToString("yyyy-MM-dd");
                         var summary = string.Join(", ", _benignCounts.Select(kv => $"{kv.Key}={kv.Value}"));
-                        _log.LogInformation("RPC benign error rollup {day}: {summary}", y, summary);
+                        _log.LogInformation((int)IdxEvt.RpcBenignError, "RPC benign error rollup {day}: {summary}", y, summary);
                         _benignCounts.Clear();
                     }
                     _benignDayUtc = DateTime.UtcNow;
