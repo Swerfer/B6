@@ -934,24 +934,31 @@ namespace B6.Indexer
                     changes.HasMeaningfulChange = true;
                 }
 
-                // Mark finalized ONLY when ended AND (not Failed pending refunds).
+                // Mark finalized ONLY when ended AND funds are actually settled.
                 if (newStatus.HasValue && newStatus.Value > 5)
                 {
-                    // Current pool is zero after end (leftover split is outside player pool)
-                    try
+                    // Only set pool to zero if the on-chain snapshot says it's zero
+                    // (or if a Failed mission has completed all refunds).
+                    var shouldZeroPool = md.CroCurrent == 0
+                                        || (newStatus.Value == 7 && md.AllRefunded == true);
+                    if (shouldZeroPool)
                     {
-                        await using var zero = new NpgsqlCommand(@"
-                            update missions set cro_current_wei = 0, updated_at = now()
-                            where mission_address = @a;", conn);
-                        zero.Parameters.AddWithValue("a", mission);
-                        await zero.ExecuteNonQueryAsync(token);
+                        try
+                        {
+                            await using var zero = new NpgsqlCommand(@"
+                                update missions set cro_current_wei = 0, updated_at = now()
+                                where mission_address = @a;", conn);
+                            zero.Parameters.AddWithValue("a", mission);
+                            await zero.ExecuteNonQueryAsync(token);
+                        }
+                        catch { /* best effort */ }
                     }
-                    catch { /* best effort */ }
 
                     if (!curFinal)
                     {
-                        var endedAndRefundsDone = !(newStatus.Value == 7 && md.AllRefunded == false);
-                        if (endedAndRefundsDone)
+                        var settled = (newStatus.Value == 6 && md.CroCurrent == 0)
+                                    || (newStatus.Value == 7 && md.AllRefunded == true);
+                        if (settled)
                         {
                             await using var fin = new NpgsqlCommand(@"
                                 update missions set finalized = true, updated_at = now()
@@ -964,8 +971,11 @@ namespace B6.Indexer
 
                 try
                 {
-                    // Watch while not finalized OR (Failed & refunds pending); keep time boundaries in sync
-                    var mustWatch = !curFinal || (newStatus == 7 && md.AllRefunded == false);
+                    // Watch while not finalized, or Failed with refunds pending, or terminal but funds still in pool.
+                    var mustWatch = !curFinal
+                                    || (newStatus == 7 && md.AllRefunded == false)
+                                    || (newStatus.HasValue && newStatus.Value > 5 && md.CroCurrent > 0);
+
                     if (mustWatch)
                     {
                         var esAt  = DateTimeOffset.FromUnixTimeSeconds((long)md.EnrollmentStart).UtcDateTime;
@@ -1137,48 +1147,49 @@ namespace B6.Indexer
         }
 
         private async Task<bool>                        ShouldForceFinalizeAsync            (string mission, CancellationToken token) {
-                    await using var conn = new NpgsqlConnection(_pg);
-                    await conn.OpenAsync(token);
-                    await using var cmd = new NpgsqlCommand(@"
-                        select status, mission_end, coalesce(finalized,false)
-                        from missions where mission_address = @a;", conn);
-                    cmd.Parameters.AddWithValue("a", mission);
+            await using var conn = new NpgsqlConnection(_pg);
+            await conn.OpenAsync(token);
+            await using var cmd = new NpgsqlCommand(@"
+                select status, mission_end, coalesce(finalized,false)
+                from missions where mission_address = @a;", conn);
+            cmd.Parameters.AddWithValue("a", mission);
 
-                    await using var rdr = await cmd.ExecuteReaderAsync(token);
-                    if (!await rdr.ReadAsync(token)) return false;
+            await using var rdr = await cmd.ExecuteReaderAsync(token);
+            if (!await rdr.ReadAsync(token)) return false;
 
-                    var status    = rdr.IsDBNull(0) ? (short)99 : rdr.GetInt16(0);
-                    var endSec    = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
-                    var finalized = !rdr.IsDBNull(2) && rdr.GetBoolean(2);
+            var status    = rdr.IsDBNull(0) ? (short)99 : rdr.GetInt16(0);
+            var endSec    = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
+            var finalized = !rdr.IsDBNull(2) && rdr.GetBoolean(2);
 
-                    // If already finalized in DB, skip.
-                    if (finalized) return false;
+            if (finalized) return false;
 
-                    var endAt = DateTimeOffset.FromUnixTimeSeconds(endSec).UtcDateTime;
-                    if (DateTime.UtcNow < endAt) return false; // only after end
+            var endAt = DateTimeOffset.FromUnixTimeSeconds(endSec).UtcDateTime;
+            if (DateTime.UtcNow < endAt) return false;
 
-                    // Optional improvement: query the contract’s realtime status to avoid stale DB decisions.
-                    try
-                    {
-                        var wrap = await RunRpc(
-                            w => w.Eth.GetContractQueryHandler<B6.Contracts.GetMissionDataFunction>()
-                                .QueryDeserializingToObjectAsync<B6.Contracts.MissionDataWrapper>(
-                                    new B6.Contracts.GetMissionDataFunction(), mission, null),
-                            "Call.getMissionData");
+            // Read live snapshot to decide if funds still sit in the pool.
+            try {
+                var wrap = await RunRpc(
+                    w => w.Eth.GetContractQueryHandler<B6.Contracts.GetMissionDataFunction>()
+                        .QueryDeserializingToObjectAsync<B6.Contracts.MissionDataWrapper>(
+                            new B6.Contracts.GetMissionDataFunction(), mission, null),
+                    "Call.getMissionData");
 
-                        var onchainStatus = (short)wrap.Data.Status;
+                var d              = wrap.Data;
+                var onchainStatus  = (short)d.Status;
+                var fundsInPool    = d.CroCurrent > 0;
+                var refundsPending = onchainStatus == 7 && d.AllRefunded == false;
 
-                        // If the contract already reports a terminal state (Success/Failed), skip finalization.
-                        if (onchainStatus > 5) return false;
+                // Need finalize whenever we’re past end and there’s still money to move,
+                // even if the computed status already says Success/Failed.
+                if (fundsInPool || refundsPending) return true;
 
-                        // PartlySuccess (=5) and anything not terminal at/after mission_end → attempt finalize.
-                        return true;
-                    }
-                    catch
-                    {
-                        // If we cannot read on-chain, fall back to allowing a finalize attempt.
-                        return true;
-                    }
+                // Otherwise no finalize needed.
+                return onchainStatus <= 5;
+            }
+            catch {
+                // If we cannot read on-chain, allow a finalize attempt (safe fallback).
+                return true;
+            }
         }
 
         private async Task<bool>                        ShouldRefundAsync                   (string mission, CancellationToken token) {
