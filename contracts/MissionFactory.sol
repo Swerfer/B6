@@ -1956,7 +1956,7 @@ contract Mission        is Ownable, ReentrancyGuard {
                     ? _missionData.lastRoundPauseDuration
                     : _missionData.roundPauseDuration))
             {
-                return Status.Paused;
+                return Status.Paused;                                       // mission is in cooldown between rounds
             }
             else {
                 return Status.Active;                                       // mission is active, no pause in progress                   
