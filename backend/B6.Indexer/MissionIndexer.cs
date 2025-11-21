@@ -1016,7 +1016,21 @@ namespace B6.Indexer
 
                 // success when status == 1
                 var ok = receipt != null && receipt.Status != null && receipt.Status.Value == 1;
-                _log.LogInformation((int)IdxEvt.ForceFinalizeMission, "forceFinalizeMission() {mission} -> {status} (tx={tx})", mission, ok ? "OK" : "FAILED", txHash);
+
+                if (ok)
+                {
+                    long? blockNumber = (receipt != null && receipt.BlockNumber != null)
+                        ? (long?)receipt.BlockNumber.Value
+                        : null;
+
+                    // Indexer-gestuurde finalize vastleggen in mission_tx
+                    await InsertMissionTxAsync(mission, null, "Finalized", txHash, blockNumber, token);
+                }
+
+                _log.LogInformation((int)IdxEvt.ForceFinalizeMission,
+                    "forceFinalizeMission() {mission} -> {status} (tx={tx})",
+                    mission, ok ? "OK" : "FAILED", txHash);
+
                 return ok;
             }
             catch (Exception ex)
@@ -1140,7 +1154,7 @@ namespace B6.Indexer
             return true;
         }
 
-        /// <summary>
+         /// <summary>
         /// Attempts to call refundPlayers for the given mission using the signer
         /// account, after validating preconditions via ShouldRefundAsync.
         /// Returns true when the transaction succeeds (receipt.Status == 1).
@@ -1179,13 +1193,64 @@ namespace B6.Indexer
                 }, "Tx.waitRefund");
 
                 var ok = receipt != null && receipt.Status != null && receipt.Status.Value == 1;
-                _log.LogInformation((int)IdxEvt.RefundPlayers, "refundPlayers() {mission} -> {status} (tx={tx})", mission, ok ? "OK" : "FAILED", txHash);
+
+                if (ok)
+                {
+                    long? blockNumber = (receipt != null && receipt.BlockNumber != null)
+                        ? (long?)receipt.BlockNumber.Value
+                        : null;
+
+                    // Indexer-gestuurde refunds vastleggen in mission_tx
+                    await InsertMissionTxAsync(mission, null, "Refunded", txHash, blockNumber, token);
+                }
+
+                _log.LogInformation((int)IdxEvt.RefundPlayers,
+                    "refundPlayers() {mission} -> {status} (tx={tx})",
+                    mission, ok ? "OK" : "FAILED", txHash);
+
                 return ok;
             }
             catch (Exception ex)
             {
                 _log.LogDebug(ex, "refundPlayers() attempt failed for {mission}", mission);
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Persists an indexer-initiated mission transaction (refund/finalize)
+        /// to the mission_tx table.
+        /// </summary>
+        private async Task                              InsertMissionTxAsync                (string mission, string? player, string eventType, string txHash, long? blockNumber, CancellationToken token){
+            if (string.IsNullOrWhiteSpace(mission))   return;
+            if (string.IsNullOrWhiteSpace(eventType)) return;
+            if (string.IsNullOrWhiteSpace(txHash))    return;
+
+            try
+            {
+                await using var conn = new NpgsqlConnection(_pg);
+                await conn.OpenAsync(token);
+
+                await using var cmd = new NpgsqlCommand(@"
+                    insert into mission_tx (mission_address, player_address, event_type, tx_hash, block_number)
+                    values (@mission, @player, @event_type, @tx_hash, @block_number);", conn);
+
+                cmd.Parameters.AddWithValue("mission",     mission);
+                cmd.Parameters.AddWithValue("player",      (object?)player ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("event_type",  eventType);
+                cmd.Parameters.AddWithValue("tx_hash",     txHash);
+                if (blockNumber.HasValue)
+                    cmd.Parameters.AddWithValue("block_number", blockNumber.Value);
+                else
+                    cmd.Parameters.AddWithValue("block_number", DBNull.Value);
+
+                await cmd.ExecuteNonQueryAsync(token);
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex,
+                    "InsertMissionTxAsync() failed for {mission} ({evt}, tx={tx})",
+                    mission, eventType, txHash);
             }
         }
 
