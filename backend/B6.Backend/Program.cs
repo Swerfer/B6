@@ -109,6 +109,37 @@ static async Task   KickMissionAsync(string mission, string? txHash, string? eve
     }
 }
 
+static async Task   InsertMissionTxAsync(IConfiguration cfg, string mission, string? player, string eventType, string txHash, long? blockNumber){
+    try
+    {
+        if (string.IsNullOrWhiteSpace(mission))   throw new ArgumentException("mission is required", nameof(mission));
+        if (string.IsNullOrWhiteSpace(eventType)) throw new ArgumentException("eventType is required", nameof(eventType));
+        if (string.IsNullOrWhiteSpace(txHash))    throw new ArgumentException("txHash is required", nameof(txHash));
+
+        var cs = cfg.GetConnectionString("Db");
+        await using var conn = new Npgsql.NpgsqlConnection(cs);
+        await conn.OpenAsync();
+
+        await using (var cmd = new Npgsql.NpgsqlCommand(@"
+            insert into mission_tx (mission_address, player_address, event_type, tx_hash, block_number)
+            values (@m, @p, @e, @h, @b);", conn))
+        {
+            cmd.Parameters.AddWithValue("m", mission);
+            cmd.Parameters.AddWithValue("p", (object?)player      ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("e", eventType);
+            cmd.Parameters.AddWithValue("h", txHash);
+            cmd.Parameters.AddWithValue("b", (object?)blockNumber ?? DBNull.Value);
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+    catch (Exception ex)
+    {
+        // logging mag best simpel blijven; dit mag de API niet breken
+        Console.WriteLine($"mission_tx insert failed for {mission} {txHash}: {ex.Message}");
+    }
+}
+
 /* ------------------- API endpoints ----------------- */
 
 app.MapGet("/",                               ()                                        => // health check 
@@ -1022,6 +1053,9 @@ app.MapPost("/events/created",          async (HttpRequest req, IConfiguration c
         var rc   = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
         if (rc == null || rc.Status == null || rc.Status.Value != 1)
             return Results.BadRequest("Transaction not successful");
+
+        var blockNumber = rc.BlockNumber != null ? (long?)rc.BlockNumber.Value : null;
+        await InsertMissionTxAsync(cfg, mission, null, "Created", txHash, blockNumber);
     }
 
     await KickMissionAsync(mission, txHash, "Created", cfg, hub);
@@ -1058,6 +1092,11 @@ app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration c
     if (enrollPingThrottle.TryGetValue(mission, out var prev) && (now - prev) < TimeSpan.FromSeconds(2))
         return Results.Ok(new { pushed = false, reason = "throttled" });
     enrollPingThrottle[mission] = now;
+
+    if (!string.IsNullOrWhiteSpace(txHash))
+    {
+        await InsertMissionTxAsync(cfg, mission, player, "Enrolled", txHash, null);
+    }
 
     await KickMissionAsync(mission, txHash, "Enrolled", cfg, hub);
 
@@ -1106,6 +1145,9 @@ app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration c
     if (rc == null || rc.Status == null || rc.Status.Value != 1)
         return Results.BadRequest("Transaction not successful");
 
+    var blockNumber = rc.BlockNumber != null ? (long?)rc.BlockNumber.Value : null;
+    await InsertMissionTxAsync(cfg, mission, null, "Banked", txHash, blockNumber);
+
     Console.WriteLine($"[API] /events/banked ACCEPT mission={mission} tx={txHash} {DateTime.UtcNow:o}");
 
     await KickMissionAsync(mission, txHash, "Banked", cfg, hub);
@@ -1151,6 +1193,9 @@ app.MapPost("/events/finalized",        async (HttpRequest req, IConfiguration c
         var rc   = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
         if (rc == null || rc.Status == null || rc.Status.Value != 1)
             return Results.BadRequest("Transaction not successful");
+
+        var blockNumber = rc.BlockNumber != null ? (long?)rc.BlockNumber.Value : null;
+        await InsertMissionTxAsync(cfg, mission, null, "Finalized", txHash, blockNumber);
     }
 
     await KickMissionAsync(mission, txHash, "Finalized", cfg, hub);
