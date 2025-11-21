@@ -6,27 +6,27 @@ using Nethereum.Contracts;
 namespace B6.Contracts
 {
     [Function("getMissionData", typeof(MissionDataWrapper))]
-    public class GetMissionDataFunction : FunctionMessage { }
+    public class GetMissionDataFunction         : FunctionMessage { }
 
     [Function("refundPlayers")]
-    public class RefundPlayersFunction  : FunctionMessage { }
+    public class RefundPlayersFunction          : FunctionMessage { }
 
     [FunctionOutput]
-    public class MissionDataWrapper : IFunctionOutputDTO {
+    public class MissionDataWrapper             : IFunctionOutputDTO {
         // getMissionData returns a single tuple
         [Parameter("tuple", "", 1)]
         public MissionDataTuple Data { get; set; } = new();
     }
 
     [FunctionOutput]
-    public class PlayerWin : IFunctionOutputDTO {
+    public class PlayerWin                      : IFunctionOutputDTO {
         [Parameter("address", "player",    1)] public string     Player { get; set; } = string.Empty;
         [Parameter("uint256", "amountWon", 2)] public BigInteger Amount { get; set; }
     }
 
     // Player tuple matching the Solidity struct Players { address player; uint256 enrolledTS; uint256 amountWon; uint256 wonTS; bool refunded; bool refundFailed; uint256 refundTS; }
     [FunctionOutput]
-    public class PlayerTuple : IFunctionOutputDTO {
+    public class PlayerTuple                    : IFunctionOutputDTO {
         [Parameter("address","player",       1)] public string     Player        { get; set; } = string.Empty;
         [Parameter("uint256","enrolledTS",   2)] public BigInteger EnrolledTS    { get; set; }
         [Parameter("uint256","amountWon",    3)] public BigInteger AmountWon     { get; set; }
@@ -37,7 +37,7 @@ namespace B6.Contracts
     }
 
     [FunctionOutput]
-    public class MissionDataTuple : IFunctionOutputDTO {
+    public class MissionDataTuple               : IFunctionOutputDTO {
         [Parameter("uint8",   "status",                 1)] public byte       Status                 { get; set; }
         [Parameter("uint256", "missionCreated",         2)] public BigInteger MissionCreated         { get; set; }
         [Parameter("string",  "name",                   3)] public string     Name                   { get; set; } = string.Empty;
@@ -74,7 +74,7 @@ namespace B6.Contracts
 
     // ───────── Events: Factory ─────────
     [Event("MissionStatusUpdated")]
-    public class MissionStatusUpdatedEventDTO : IEventDTO {
+    public class MissionStatusUpdatedEventDTO   : IEventDTO {
         [Parameter("address", "mission",     1, true)]  public string     Mission     { get; set; } = string.Empty;
         [Parameter("uint8",   "fromStatus",  2, true)]  public byte       FromStatus  { get; set; }
         [Parameter("uint8",   "toStatus",    3, true)]  public byte       ToStatus    { get; set; }
@@ -82,7 +82,7 @@ namespace B6.Contracts
     }
 
     [Event("MissionFinalized")]
-    public class MissionFinalizedEventDTO : IEventDTO {
+    public class MissionFinalizedEventDTO       : IEventDTO {
         [Parameter("address", "mission",     1, true)]  public string     Mission     { get; set; } = string.Empty;
         [Parameter("uint8",   "finalStatus", 2, true)]  public byte       FinalStatus { get; set; }
         [Parameter("uint256", "timestamp",   3, false)] public BigInteger Timestamp   { get; set; }
@@ -90,21 +90,21 @@ namespace B6.Contracts
 
     // ───────── Events: Mission ─────────
     [Event("MissionStatusChanged")]
-    public class MissionStatusChangedEventDTO : IEventDTO {
+    public class MissionStatusChangedEventDTO   : IEventDTO {
         [Parameter("uint8",   "previousStatus", 1, true)]  public byte       PreviousStatus { get; set; }
         [Parameter("uint8",   "newStatus",      2, true)]  public byte       NewStatus      { get; set; }
         [Parameter("uint256", "timestamp",      3, false)] public BigInteger Timestamp      { get; set; }
     }
 
     [Event("PlayerEnrolled")]
-    public class PlayerEnrolledEventDTO : IEventDTO {
+    public class PlayerEnrolledEventDTO         : IEventDTO {
         [Parameter("address", "player",       1, true)]  public string     Player       { get; set; } = string.Empty;
         [Parameter("uint256", "amount",       2, false)] public BigInteger Amount       { get; set; }
         [Parameter("uint256", "totalPlayers", 3, false)] public BigInteger TotalPlayers { get; set; }
     }
 
     [Event("RoundCalled")]
-    public class RoundCalledEventDTO : IEventDTO {
+    public class RoundCalledEventDTO            : IEventDTO {
         // event RoundCalled(address indexed player, uint8 indexed roundNumber, uint256 payout, uint256 croRemaining);
         [Parameter("address", "player",       1, true)]   public string     Player        { get; set; } = string.Empty;
         [Parameter("uint8",   "roundNumber",  2, true)]   public byte       RoundNumber   { get; set; }
@@ -113,13 +113,13 @@ namespace B6.Contracts
     }
 
     [Event("PlayerRefunded")]
-    public class PlayerRefundedEventDTO : IEventDTO {
+    public class PlayerRefundedEventDTO         : IEventDTO {
         [Parameter("address", "player", 1, true)]         public string     Player { get; set; } = string.Empty;
         [Parameter("uint256", "amount", 2, false)]        public BigInteger Amount { get; set; }
     }
 
     [Event("MissionRefunded")]
-    public class MissionRefundedEventDTO : IEventDTO {
+    public class MissionRefundedEventDTO        : IEventDTO {
         // fixed: address[] is NOT indexed
         [Parameter("uint256",  "nrOfPlayers", 1, true)]     public BigInteger   NrOfPlayers { get; set; }
         [Parameter("uint256",  "amount",      2, true)]     public BigInteger   Amount      { get; set; }
@@ -128,7 +128,7 @@ namespace B6.Contracts
     }
 
     [Event("MissionCreated")]
-    public class MissionCreatedEventDTO : IEventDTO {
+    public class MissionCreatedEventDTO         : IEventDTO {
         [Parameter("address", "mission",               1, true )] public string     Mission                 { get; set; } = string.Empty;
         [Parameter("string",  "name",                  2, false)] public string     Name                    { get; set; } = string.Empty;
         [Parameter("uint8",   "missionType",           3, false)] public byte       MissionType             { get; set; }

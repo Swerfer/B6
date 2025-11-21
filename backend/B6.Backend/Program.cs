@@ -4,7 +4,6 @@ using Azure.Security.KeyVault.Secrets;
 using B6.Backend;
 using B6.Backend.Hubs;
 using B6.Contracts; 
-using B6.Backend.Services;   // PushFanout & NotificationScheduler (new)
 using Microsoft.AspNetCore.SignalR;                       
 using Microsoft.Extensions.Logging.EventLog;
 using Nethereum.Web3;
@@ -18,7 +17,6 @@ using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using WebPush;               // Web Push VAPID support (new)
 
 // The base uri is https://b6missions.com/api It is set to 'api' in ISS server.
 
@@ -61,19 +59,6 @@ builder.Logging.ClearProviders();
 builder.Logging.SetMinimumLevel(LogLevel.Information);
 builder.Logging.AddConsole();
 
-// Web Push VAPID keys
-builder.Services.AddSingleton(sp =>{
-    var cfg = sp.GetRequiredService<IConfiguration>();
-    var subject = cfg["WebPush:Subject"]    ?? "mailto:ops@b6missions.com";
-    var pub     = cfg["WebPush:PublicKey"]  ?? throw new InvalidOperationException("Missing WebPush:PublicKey");
-    var priv    = cfg["WebPush:PrivateKey"] ?? throw new InvalidOperationException("Missing WebPush:PrivateKey");
-    return new VapidDetails(subject, pub, priv);
-});
-
-// Notification services
-builder.Services.AddSingleton<PushFanout>();
-builder.Services.AddHostedService<NotificationScheduler>();
-
 var app = builder.Build();
 
 app.UseCors("AllowFrontend");
@@ -114,7 +99,7 @@ static async Task   KickMissionAsync(string mission, string? txHash, IConfigurat
             await cmd2.ExecuteNonQueryAsync();
         }
 
-        await hub.Clients.Group(mission).SendAsync("MissionUpdated", mission);
+        // Let the indexer handle the kick and push MissionUpdated once the snapshot is refreshed.
     }
     catch (Exception ex)
     {
@@ -216,17 +201,6 @@ app.MapGet("/secrets",                  async (HttpRequest req, IConfiguration c
     }
 
     return Results.Ok(dict);
-});
-
-// Expose VAPID public key to the frontend
-app.MapGet("/push/vapid-public-key",          (IConfiguration cfg) => // get VAPID public key
-    Results.Text(cfg["WebPush:PublicKey"] ?? "", "text/plain")
-);
-
-// Save/refresh a browser's push subscription
-app.MapPost("/push/subscribe",          async (PushSubscribeDto dto, PushFanout fanout) => { // save push subscription
-    await fanout.UpsertSubscriptionAsync(dto);
-    return Results.Ok(new { saved = true });
 });
 
 /***********************
@@ -952,32 +926,6 @@ app.MapGet("/debug/push/{addr}",        async (string addr, IHubContext<GameHub>
     return Results.Ok(new { pushed = g });
 });
 
-app.MapGet("/debug/push-subs/{wallet}",                                     async (string wallet,                  PushFanout fan) => { // inspect push subscriptions for a wallet
-    // intentionally minimal output so we can see if the server has anything to send to
-    // uses the same DB read PushFanout uses
-    var method = typeof(B6.Backend.Services.PushFanout).GetMethod("GetType"); // no-op to keep compiler happy with DI
-    // We don't expose internals; just trigger a verbose send with no send:
-    var (count, _) = await fan.DebugPushVerboseAsync(wallet);
-    return Results.Ok(new { wallet = wallet.ToLowerInvariant(), subscriptionCount = count });
-});
-
-// Debug: prune push subscriptions for a wallet.
-app.MapDelete("/debug/push-subs/{wallet}",                                  async (string wallet, HttpRequest req, PushFanout fan) => { // prune push subscriptions for a wallet
-    var keep = req.Query["keep"].ToString();
-    var removed = await fan.PruneSubsAsync(wallet, string.IsNullOrWhiteSpace(keep) ? null : keep);
-    return Results.Ok(new { wallet = wallet.ToLowerInvariant(), kept = string.IsNullOrWhiteSpace(keep) ? null : keep, removed });
-});
-
-app.MapMethods("/debug/push-web/{wallet}",        new[] { "GET", "POST" },  async (string wallet,                  PushFanout fan) => { // push test payload to wallet subscriptions
-    var (count, attempts) = await fan.DebugPushVerboseAsync(wallet);
-    return Results.Ok(new { wallet = wallet.ToLowerInvariant(), subscriptionCount = count, attempts });
-});
-
-app.MapMethods("/debug/push-web-empty/{wallet}",  new[] { "GET", "POST" },  async (string wallet,                  PushFanout fan) => { // push test EMPTY payload to wallet subscriptions
-    var (count, attempts) = await fan.DebugPushVerboseAsync(wallet, noPayload: true);
-    return Results.Ok(new { wallet = wallet.ToLowerInvariant(), subscriptionCount = count, attempts });
-});
-
 // Inspect environment paths and process identity
 app.MapGet("/debug/env",                      (IHostEnvironment env) => { // inspect environment info
     return Results.Ok(new {
@@ -1037,9 +985,9 @@ var enrollPingThrottle  = new System.Collections.Concurrent.ConcurrentDictionary
 var bankPingThrottle    = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 var finalizePingThrottle= new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
-app.MapPost("/events/created",          async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                      ) => { // mission created event
-    string mission = null;
-    string txHash  = null; // optional – if you want to verify like /events/banked
+app.MapPost("/events/created",          async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission created event
+    string? mission = null;
+    string? txHash  = null; // optional – if you want to verify like /events/banked
 
     try
     {
@@ -1083,7 +1031,7 @@ app.MapPost("/events/created",          async (HttpRequest req, IConfiguration c
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                      ) => { // mission enrolled event
+app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission enrolled event
     string mission = null;
     string player  = null;
     string txHash  = null; // optional – verify if you want
@@ -1118,7 +1066,7 @@ app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration c
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                      ) => { // mission banked event
+app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission banked event
     string mission = null;
     string txHash  = null;
 
@@ -1169,7 +1117,7 @@ app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration c
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/events/finalized",        async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                      ) => { // mission banked event
+app.MapPost("/events/finalized",        async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission banked event
     string mission = null;
     string txHash  = null; // optional
 
@@ -1212,31 +1160,33 @@ app.MapPost("/events/finalized",        async (HttpRequest req, IConfiguration c
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/push/mission",            async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushMissionDto body,  PushFanout fan) => { // mission updated event
+app.MapPost("/push/mission",            async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushMissionDto body   ) => { // mission updated event
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
-    var g = (body.Mission ?? "").ToLowerInvariant();
-    await hub.Clients.Group(g).SendAsync("MissionUpdated", g);
-    await fan.OnMissionUpdatedAsync(g); // schedule -1m warning, etc.
+    var g      = (body.Mission ?? "").ToLowerInvariant();
+    var reason = body.Reason ?? string.Empty;
+    var txHash = body.TxHash;
+
+    // Frontend handler kan (mission, reason, txHash) aannemen; extra argumenten worden in JS gewoon genegeerd
+    // als de callback maar twee parameters heeft.
+    await hub.Clients.Group(g).SendAsync("MissionUpdated", g, reason, txHash);
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/push/status",             async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto  body,  PushFanout fan) => { // status changed event
+app.MapPost("/push/status",             async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto  body   ) => { // status changed event
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
     var g = (body.Mission ?? "").ToLowerInvariant();
     await hub.Clients.Group(g).SendAsync("StatusChanged", g, body.NewStatus);
-    await fan.OnStatusChangedAsync(g, body.NewStatus); // schedule -5m prestart
     return Results.Ok(new { pushed = true });
 });
 
-app.MapPost("/push/round",              async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto   body,  PushFanout fan) => { // round result event
+app.MapPost("/push/round",              async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto   body   ) => { // round result event
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
     var g = (body.Mission ?? "").ToLowerInvariant();
     await hub.Clients.Group(g).SendAsync("RoundResult", g, body.Round, body.Winner, body.AmountWei);
     await hub.Clients.Group(g).SendAsync("MissionUpdated", g);
-    await fan.OnRoundAsync(g, body.Round, body.Winner, body.AmountWei); // inactive-only banked + schedule -10s cooldown
     return Results.Ok(new { pushed = true });
 });
 

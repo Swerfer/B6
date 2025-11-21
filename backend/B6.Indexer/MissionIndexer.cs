@@ -538,7 +538,7 @@ namespace B6.Indexer
             // Push only when meaningful deltas exist
             if (changes.HasMeaningfulChange)
             {
-                await NotifyMissionUpdatedAsync(mission, token);
+                await NotifyMissionUpdatedAsync(mission, reason: null, txHash: null, ct: token);
 
                 if (changes.StatusTransition != null)
                 {
@@ -1045,14 +1045,11 @@ namespace B6.Indexer
             // Past mission_end → check contract snapshot
             try
             {
-                var wrap = await RunRpc(async w =>
-                {
-                    var handler = w.Eth.GetContractQueryHandler<GetMissionDataFunction>();
-                    return await handler
-                        .QueryDeserializingToObjectAsync<GetMissionDataFunction, GetMissionDataOutputDTO>(
-                            mission,
-                            new GetMissionDataFunction());
-                }, "Tx.getMissionData,ShouldFinalize");
+                var wrap = await RunRpc(
+                    w => w.Eth.GetContractQueryHandler<B6.Contracts.GetMissionDataFunction>()
+                            .QueryDeserializingToObjectAsync<B6.Contracts.MissionDataWrapper>(
+                                new B6.Contracts.GetMissionDataFunction(), mission, null),
+                    "Call.getMissionData,ShouldFinalize");
 
                 if (wrap == null || wrap.Data == null) return false;
 
@@ -1079,6 +1076,7 @@ namespace B6.Indexer
                 _log.LogDebug(ex, "ShouldForceFinalizeAsync() snapshot failed for {mission}", mission);
                 return false;
             }
+
         }
 
         /// <summary>
@@ -1182,19 +1180,36 @@ namespace B6.Indexer
 
 // #region Push notifications
 
+// #region Push notifications
+
+// #region Push notifications
+
         /// <summary>
         /// Sends a push/mission HTTP notification for the given mission to the
-        /// external push API, if push configuration is present.
+        /// external push API, if push configuration is present, including an
+        /// optional textual reason and optional transaction hash.
         /// </summary>
-        private async Task                              NotifyMissionUpdatedAsync           (string mission, CancellationToken ct = default) {
+        private async Task                              NotifyMissionUpdatedAsync           (string mission, string? reason, string? txHash, CancellationToken ct = default) {
             if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
+
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/mission");
-            req.Content = JsonContent.Create(new { Mission = mission });
+            var payload = new {
+                Mission = mission,
+                Reason  = reason,
+                TxHash  = txHash
+            };
+            req.Content = JsonContent.Create(payload);
             req.Headers.Add("X-Push-Key", _pushKey);
+
             try
             {
                 var resp = await _http.SendAsync(req, ct);
-                _log.LogInformation((int)IdxEvt.PushMission, "push/mission {mission} -> {code}", mission, (int)resp.StatusCode);
+                _log.LogInformation((int)IdxEvt.PushMission,
+                    "push/mission {mission} (reason={reason}, tx={tx}) -> {code}",
+                    mission,
+                    reason ?? "<none>",
+                    txHash ?? "<none>",
+                    (int)resp.StatusCode);
             }
             catch (Exception ex)
             {
@@ -1513,7 +1528,7 @@ namespace B6.Indexer
                                 updated_at = now();", conn);
 
                         up.Parameters.AddWithValue("d", today);
-                        up.Parameters.AddWithValue("k", key);
+                        up.Parameters.AddWithValue("k", key ?? string.Empty);
                         await up.ExecuteNonQueryAsync();
                     }
                     catch { /* best-effort only */ }
@@ -1747,7 +1762,7 @@ namespace B6.Indexer
                         }
                     }
 
-                    await NotifyMissionUpdatedAsync(mission, token);
+                    await NotifyMissionUpdatedAsync(mission, reason: null, txHash: null, ct: token);
                 }
                 catch (Exception ex)
                 {
@@ -2128,7 +2143,7 @@ namespace B6.Indexer
             // Best-effort push:
             // The frontend will reload the mission via the API and can derive
             // the cooldown state purely from timestamps (no extra chain calls).
-            await NotifyMissionUpdatedAsync(address, token);
+            await NotifyMissionUpdatedAsync(address, reason: null, txHash: null, ct: token);
         }
 
         /// <summary>
@@ -2234,7 +2249,7 @@ namespace B6.Indexer
 
                 // Best effort: expliciet een push doen, ook al kan RefreshMissionSnapshotAsync
                 // al een push veroorzaakt hebben bij status/round-wijzigingen.
-                await NotifyMissionUpdatedAsync(address, token);
+                await NotifyMissionUpdatedAsync(address, reason: null, txHash: null, ct: token);
             }
 
             // Voor andere statussen (bijv. nog Paused of een kortdurende chain-lag):
@@ -2345,7 +2360,7 @@ namespace B6.Indexer
                 }
 
                 // Always notify the frontend so it can render the final Failed + refunded state.
-                await NotifyMissionUpdatedAsync(address, token);
+                await NotifyMissionUpdatedAsync(address, "Mission ended time based Failed", null, token);
                 return;
             }
 
@@ -2372,7 +2387,7 @@ namespace B6.Indexer
                 }
 
                 // Always notify the frontend so it can render the final PartlySuccess state.
-                await NotifyMissionUpdatedAsync(address, token);
+                await NotifyMissionUpdatedAsync(address, "Mission ended time based PartlySuccess", null, token);
                 return;
             }
 
@@ -2384,7 +2399,7 @@ namespace B6.Indexer
                 _log.LogInformation("MissionEnd: Success detected for {mission} (finalized={finalized}, allRefunded={allRefunded})",
                     address, finalized, allRefunded);
 
-                await NotifyMissionUpdatedAsync(address, token);
+                await NotifyMissionUpdatedAsync(address, "Mission ended last round banked",null, token);
                 return;
             }
 
