@@ -143,7 +143,7 @@ namespace B6.Indexer
         private int                                     _newMissionsPollCounter = 0;
 
         private volatile bool                           _kickRequested      = false;                                        // set by listener
-        private readonly ConcurrentQueue<string>        _kickMissions       = new();                                        // mission addresses to refresh
+        private readonly ConcurrentQueue<KickMission>   _kickMissions       = new();                                        // mission addresses to process kicks for 
         private ulong                                   _factoryLastSeq     = 0;
 
         /// <summary>
@@ -236,6 +236,16 @@ namespace B6.Indexer
             /// </summary>
             public long? LastCooldownStartPauseTimestamp { get; set; }
         }
+
+        /// <summary>
+        /// Small DTO for queued kick missions, including the originating tx hash (if any).
+        /// </summary>
+        private sealed class KickMission {
+            public string  Mission { get; init; } = string.Empty;
+            public string? TxHash  { get; init; }
+        }
+
+        // --------------------------------------------------------------------------------------------------------------
 
         // --------------------------------------------------------------------------------------------------------------
 
@@ -493,12 +503,11 @@ namespace B6.Indexer
                 {
                     try
                     {
-                        var mission = (e.Payload ?? string.Empty).ToLowerInvariant();
-                        if (!string.IsNullOrWhiteSpace(mission))
-                            _kickMissions.Enqueue(mission);
-
+                        // We no longer rely on the NOTIFY payload for the mission address;
+                        // instead we read from the indexer_kicks table so we also get tx_hash.
                         _kickRequested = true;
-                        // Optional: also sweep pending kick rows to be safe
+
+                        // Sweep pending kick rows into the in-memory queue.
                         await ProcessPendingKicksAsync(CancellationToken.None);
                     }
                     catch { /* swallow */ }
@@ -1180,10 +1189,6 @@ namespace B6.Indexer
 
 // #region Push notifications
 
-// #region Push notifications
-
-// #region Push notifications
-
         /// <summary>
         /// Sends a push/mission HTTP notification for the given mission to the
         /// external push API, if push configuration is present, including an
@@ -1712,7 +1717,7 @@ namespace B6.Indexer
                 await conn.OpenAsync(token);
 
                 // Fetch and delete pending kicks (best-effort dedupe)
-                var kicks = new List<string>();
+                var kicks = new List<KickMission>();
                 await using (var cmd = new Npgsql.NpgsqlCommand(@"
                     delete from indexer_kicks
                     where id in (
@@ -1720,15 +1725,31 @@ namespace B6.Indexer
                         order by id
                         limit 200
                     )
-                    returning mission_address;", conn))
+                    returning mission_address, tx_hash;", conn))
                 await using (var rd = await cmd.ExecuteReaderAsync(token))
                 {
                     while (await rd.ReadAsync(token))
-                        kicks.Add((rd.GetString(0) ?? string.Empty).ToLowerInvariant());
+                    {
+                        // mission_address is required; normalize to lower-case
+                        var mission = (rd.IsDBNull(0) ? string.Empty : rd.GetString(0) ?? string.Empty)
+                            .ToLowerInvariant();
+
+                        // tx_hash is optional (can be null)
+                        string? txHash = rd.IsDBNull(1) ? null : rd.GetString(1);
+
+                        kicks.Add(new KickMission
+                        {
+                            Mission = mission,
+                            TxHash  = txHash
+                        });
+                    }
                 }
 
-                foreach (var m in kicks)
-                    _kickMissions.Enqueue(m);
+                foreach (var kick in kicks)
+                {
+                    if (!string.IsNullOrWhiteSpace(kick.Mission))
+                        _kickMissions.Enqueue(kick);
+                }
 
                 if (kicks.Count > 0)
                     _kickRequested = true;
@@ -1742,10 +1763,15 @@ namespace B6.Indexer
         /// <summary>
         /// Processes the kick queue, refreshing the state of each mission.
         /// </summary>
+        /// <summary>
+        /// Processes the kick queue, refreshing the state of each mission.
+        /// </summary>
         private async Task                              ProcessKickQueueAsync               (CancellationToken token) {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            while (_kickMissions.TryDequeue(out var mission))
+
+            while (_kickMissions.TryDequeue(out var kick))
             {
+                var mission = kick.Mission;
                 if (string.IsNullOrWhiteSpace(mission)) continue;
                 if (!seen.Add(mission)) continue;
 
@@ -1762,6 +1788,8 @@ namespace B6.Indexer
                         }
                     }
 
+                    // Step 1: we still push with txHash = null.
+                    // In the next step we will start using kick.TxHash here.
                     await NotifyMissionUpdatedAsync(mission, reason: null, txHash: null, ct: token);
                 }
                 catch (Exception ex)
