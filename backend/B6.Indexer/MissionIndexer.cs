@@ -238,11 +238,13 @@ namespace B6.Indexer
         }
 
         /// <summary>
-        /// Small DTO for queued kick missions, including the originating tx hash (if any).
+        /// Small DTO for queued kick missions, including the originating tx hash (if any)
+        /// and the optional frontend event type (Created/Enrolled/Banked/Finalized/...).
         /// </summary>
         private sealed class KickMission {
-            public string  Mission { get; init; } = string.Empty;
-            public string? TxHash  { get; init; }
+            public string  Mission   { get; init; } = string.Empty;
+            public string? TxHash    { get; init; }
+            public string? EventType { get; init; }
         }
 
         // --------------------------------------------------------------------------------------------------------------
@@ -1711,6 +1713,7 @@ namespace B6.Indexer
         /// <summary>
         /// Processes pending kicks from the indexer_kicks table,
         /// moving them into the in-memory kick queue for processing.
+        /// Also captures the optional frontend event type for each kick.
         /// </summary>
         private async Task                              ProcessPendingKicksAsync            (CancellationToken token) {
             try
@@ -1727,7 +1730,7 @@ namespace B6.Indexer
                         order by id
                         limit 200
                     )
-                    returning mission_address, tx_hash;", conn))
+                    returning mission_address, tx_hash, event_type;", conn))
                 await using (var rd = await cmd.ExecuteReaderAsync(token))
                 {
                     while (await rd.ReadAsync(token))
@@ -1739,10 +1742,14 @@ namespace B6.Indexer
                         // tx_hash is optional (can be null)
                         string? txHash = rd.IsDBNull(1) ? null : rd.GetString(1);
 
+                        // event_type is optional (can be null)
+                        string? eventType = rd.IsDBNull(2) ? null : rd.GetString(2);
+
                         kicks.Add(new KickMission
                         {
-                            Mission = mission,
-                            TxHash  = txHash
+                            Mission   = mission,
+                            TxHash    = txHash,
+                            EventType = eventType
                         });
                     }
                 }

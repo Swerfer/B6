@@ -77,7 +77,7 @@ static string       GetRequired(IConfiguration cfg, string key){
     return v;
 }
 
-static async Task   KickMissionAsync(string mission, string? txHash, IConfiguration cfg, IHubContext<GameHub> hub){
+static async Task   KickMissionAsync(string mission, string? txHash, string? eventType, IConfiguration cfg, IHubContext<GameHub> hub){
     try
     {
         var cs = cfg.GetConnectionString("Db");
@@ -85,11 +85,12 @@ static async Task   KickMissionAsync(string mission, string? txHash, IConfigurat
         await conn.OpenAsync();
 
         await using (var cmd = new Npgsql.NpgsqlCommand(@"
-            insert into indexer_kicks (mission_address, tx_hash)
-            values (@m, @h);", conn))
+            insert into indexer_kicks (mission_address, tx_hash, event_type)
+            values (@m, @h, @e);", conn))
         {
             cmd.Parameters.AddWithValue("m", mission);
-            cmd.Parameters.AddWithValue("h", (object?)txHash ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("h", (object?)txHash    ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("e", (object?)eventType ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync();
         }
 
@@ -1013,20 +1014,17 @@ app.MapPost("/events/created",          async (HttpRequest req, IConfiguration c
         return Results.Ok(new { pushed = false, reason = "throttled" });
     createdPingThrottle[mission] = now;
 
-    // Optional: verify tx (skip if txHash not provided)
+    // Optional: verify tx if provided
     if (!string.IsNullOrWhiteSpace(txHash))
     {
-        var rpc     = GetRequired(cfg, "Cronos:Rpc");
+        var rpc  = GetRequired(cfg, "Cronos:Rpc");
         var web3 = new Nethereum.Web3.Web3(rpc);
-
-        var tx = await web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(txHash);
-        if (tx == null) return Results.BadRequest("Transaction not found");
-        var rc = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+        var rc   = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
         if (rc == null || rc.Status == null || rc.Status.Value != 1)
             return Results.BadRequest("Transaction not successful");
     }
 
-    await KickMissionAsync(mission, txHash, cfg, hub);
+    await KickMissionAsync(mission, txHash, "Created", cfg, hub);
 
     return Results.Ok(new { pushed = true });
 });
@@ -1061,7 +1059,7 @@ app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration c
         return Results.Ok(new { pushed = false, reason = "throttled" });
     enrollPingThrottle[mission] = now;
 
-    await KickMissionAsync(mission, txHash, cfg, hub);
+    await KickMissionAsync(mission, txHash, "Enrolled", cfg, hub);
 
     return Results.Ok(new { pushed = true });
 });
@@ -1110,7 +1108,7 @@ app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration c
 
     Console.WriteLine($"[API] /events/banked ACCEPT mission={mission} tx={txHash} {DateTime.UtcNow:o}");
 
-    await KickMissionAsync(mission, txHash, cfg, hub);
+    await KickMissionAsync(mission, txHash, "Banked", cfg, hub);
 
     Console.WriteLine($"[API] /events/banked DONE KickMissionAsync mission={mission} {DateTime.UtcNow:o}");
 
@@ -1155,7 +1153,7 @@ app.MapPost("/events/finalized",        async (HttpRequest req, IConfiguration c
             return Results.BadRequest("Transaction not successful");
     }
 
-    await KickMissionAsync(mission, txHash, cfg, hub);
+    await KickMissionAsync(mission, txHash, "Finalized", cfg, hub);
 
     return Results.Ok(new { pushed = true });
 });
