@@ -547,7 +547,9 @@ namespace B6.Indexer
             // Push only when meaningful deltas exist
             if (changes.HasMeaningfulChange)
             {
-                await NotifyMissionUpdatedAsync(mission, reason: null, txHash: null, ct: token);
+                // Generic snapshot-driven change (factory poll, time-based refresh, etc.)
+                // Marked as CoreLoop so the frontend can distinguish from kick-based updates.
+                await NotifyMissionUpdatedAsync(mission, reason: "SnapshotChanged.CoreLoop", txHash: null, ct: token);
 
                 if (changes.StatusTransition != null)
                 {
@@ -1763,9 +1765,6 @@ namespace B6.Indexer
         /// <summary>
         /// Processes the kick queue, refreshing the state of each mission.
         /// </summary>
-        /// <summary>
-        /// Processes the kick queue, refreshing the state of each mission.
-        /// </summary>
         private async Task                              ProcessKickQueueAsync               (CancellationToken token) {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -1788,9 +1787,15 @@ namespace B6.Indexer
                         }
                     }
 
-                    // Step 1: we still push with txHash = null.
-                    // In the next step we will start using kick.TxHash here.
-                    await NotifyMissionUpdatedAsync(mission, reason: null, txHash: null, ct: token);
+                    // Kick-based refresh: include the originating tx hash and a refined reason for the frontend.
+                    // This indicates that the refresh was triggered by a frontend event (/events/* → KickMissionAsync).
+                    await NotifyMissionUpdatedAsync(
+                        mission,
+                        reason: "Kick.FrontendEvent",
+                        txHash: kick.TxHash,
+                        ct: token
+                    );
+
                 }
                 catch (Exception ex)
                 {
@@ -2171,7 +2176,7 @@ namespace B6.Indexer
             // Best-effort push:
             // The frontend will reload the mission via the API and can derive
             // the cooldown state purely from timestamps (no extra chain calls).
-            await NotifyMissionUpdatedAsync(address, reason: null, txHash: null, ct: token);
+            await NotifyMissionUpdatedAsync(address, reason: "Cooldown.Start", txHash: null, ct: token);
         }
 
         /// <summary>
@@ -2251,7 +2256,7 @@ namespace B6.Indexer
             {
                 await conn.OpenAsync(token);
 
-                await using var cmd = new NpgsqlCommand(@"
+                await using var cmd = new Npgsql.NpgsqlCommand(@"
                     select status
                     from missions
                     where mission_address = @a;", conn);
@@ -2277,7 +2282,7 @@ namespace B6.Indexer
 
                 // Best effort: expliciet een push doen, ook al kan RefreshMissionSnapshotAsync
                 // al een push veroorzaakt hebben bij status/round-wijzigingen.
-                await NotifyMissionUpdatedAsync(address, reason: null, txHash: null, ct: token);
+                await NotifyMissionUpdatedAsync(address, reason: "Cooldown.End", txHash: null, ct: token);
             }
 
             // Voor andere statussen (bijv. nog Paused of een kortdurende chain-lag):
@@ -2369,7 +2374,7 @@ namespace B6.Indexer
             {
                 // Mission ended in Failed state (e.g. nobody banked).
                 // We must trigger refundPlayers() from the indexer.
-                _log.LogInformation("MissionEnd: Failed detected for {mission} (finalized={finalized}, allRefunded={allRefunded})",
+                _log.LogInformation("MissionEnd: Failed de...r {mission} (finalized={finalized}, allRefunded={allRefunded})",
                     address, finalized, allRefunded);
 
                 var ok = await AttemptRefundAsync(address, token);
@@ -2388,7 +2393,8 @@ namespace B6.Indexer
                 }
 
                 // Always notify the frontend so it can render the final Failed + refunded state.
-                await NotifyMissionUpdatedAsync(address, "Mission ended time based Failed", null, token);
+                // Reason encodes that the mission ended in Failed state and refunds were (attempted) time-based.
+                await NotifyMissionUpdatedAsync(address, "MissionEnd.Failed.RefundTriggered", null, token);
                 return;
             }
 
@@ -2415,7 +2421,7 @@ namespace B6.Indexer
                 }
 
                 // Always notify the frontend so it can render the final PartlySuccess state.
-                await NotifyMissionUpdatedAsync(address, "Mission ended time based PartlySuccess", null, token);
+                await NotifyMissionUpdatedAsync(address, "MissionEnd.PartlySuccess.FinalizeTriggered", null, token);
                 return;
             }
 
@@ -2427,7 +2433,7 @@ namespace B6.Indexer
                 _log.LogInformation("MissionEnd: Success detected for {mission} (finalized={finalized}, allRefunded={allRefunded})",
                     address, finalized, allRefunded);
 
-                await NotifyMissionUpdatedAsync(address, "Mission ended last round banked",null, token);
+                await NotifyMissionUpdatedAsync(address, "MissionEnd.Success.AllRoundsBanked", null, token);
                 return;
             }
 
