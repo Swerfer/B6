@@ -1198,14 +1198,15 @@ namespace B6.Indexer
         /// external push API, if push configuration is present, including an
         /// optional textual reason and optional transaction hash.
         /// </summary>
-        private async Task                              NotifyMissionUpdatedAsync           (string mission, string? reason, string? txHash, CancellationToken ct = default) {
+        private async Task                              NotifyMissionUpdatedAsync           (string mission, string? reason, string? txHash, string? eventType = null, CancellationToken ct = default) {
             if (string.IsNullOrEmpty(_pushBase) || string.IsNullOrEmpty(_pushKey)) return;
 
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_pushBase.TrimEnd('/')}/push/mission");
             var payload = new {
-                Mission = mission,
-                Reason  = reason,
-                TxHash  = txHash
+                Mission   = mission,
+                Reason    = reason,
+                TxHash    = txHash,
+                EventType = eventType
             };
             req.Content = JsonContent.Create(payload);
             req.Headers.Add("X-Push-Key", _pushKey);
@@ -1214,10 +1215,11 @@ namespace B6.Indexer
             {
                 var resp = await _http.SendAsync(req, ct);
                 _log.LogInformation((int)IdxEvt.PushMission,
-                    "push/mission {mission} (reason={reason}, tx={tx}) -> {code}",
+                    "push/mission {mission} (reason={reason}, tx={tx}, event={evt}) -> {code}",
                     mission,
-                    reason ?? "<none>",
-                    txHash ?? "<none>",
+                    reason    ?? "<none>",
+                    txHash    ?? "<none>",
+                    eventType ?? "<none>",
                     (int)resp.StatusCode);
             }
             catch (Exception ex)
@@ -1772,6 +1774,9 @@ namespace B6.Indexer
         /// <summary>
         /// Processes the kick queue, refreshing the state of each mission.
         /// </summary>
+        /// <summary>
+        /// Processes the kick queue, refreshing the state of each mission.
+        /// </summary>
         private async Task                              ProcessKickQueueAsync               (CancellationToken token) {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -1794,15 +1799,29 @@ namespace B6.Indexer
                         }
                     }
 
-                    // Kick-based refresh: include the originating tx hash and a refined reason for the frontend.
-                    // This indicates that the refresh was triggered by a frontend event (/events/* → KickMissionAsync).
+                    // Determine a more specific reason based on the originating frontend event type.
+                    string? eventType = string.IsNullOrWhiteSpace(kick.EventType) ? null : kick.EventType;
+
+                    string reason = eventType switch
+                    {
+                        "Created"   => "Kick.Created",
+                        "Enrolled"  => "Kick.Enrolled",
+                        "Banked"    => "Kick.Banked",
+                        "Finalized" => "Kick.Finalized",
+                        null        => "Kick.FrontendEvent",
+                        ""          => "Kick.FrontendEvent",
+                        _           => $"Kick.{eventType}"
+                    };
+
+                    // Kick-based refresh: include the originating tx hash + explicit event type.
+                    // This indicates that the refresh was triggered by a frontend /events/* call.
                     await NotifyMissionUpdatedAsync(
                         mission,
-                        reason: "Kick.FrontendEvent",
-                        txHash: kick.TxHash,
-                        ct: token
+                        reason:    reason,
+                        txHash:    kick.TxHash,
+                        eventType: eventType,
+                        ct:        token
                     );
-
                 }
                 catch (Exception ex)
                 {
@@ -2401,7 +2420,7 @@ namespace B6.Indexer
 
                 // Always notify the frontend so it can render the final Failed + refunded state.
                 // Reason encodes that the mission ended in Failed state and refunds were (attempted) time-based.
-                await NotifyMissionUpdatedAsync(address, "MissionEnd.Failed.RefundTriggered", null, token);
+                await NotifyMissionUpdatedAsync(address, "MissionEnd.Failed.RefundTriggered", null, ct: token);
                 return;
             }
 
@@ -2428,7 +2447,7 @@ namespace B6.Indexer
                 }
 
                 // Always notify the frontend so it can render the final PartlySuccess state.
-                await NotifyMissionUpdatedAsync(address, "MissionEnd.PartlySuccess.FinalizeTriggered", null, token);
+                await NotifyMissionUpdatedAsync(address, "MissionEnd.PartlySuccess.FinalizeTriggered", null, ct: token);
                 return;
             }
 
@@ -2440,7 +2459,7 @@ namespace B6.Indexer
                 _log.LogInformation("MissionEnd: Success detected for {mission} (finalized={finalized}, allRefunded={allRefunded})",
                     address, finalized, allRefunded);
 
-                await NotifyMissionUpdatedAsync(address, "MissionEnd.Success.AllRoundsBanked", null, token);
+                await NotifyMissionUpdatedAsync(address, "MissionEnd.Success.AllRoundsBanked", null, ct: token);
                 return;
             }
 

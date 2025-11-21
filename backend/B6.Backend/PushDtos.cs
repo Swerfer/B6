@@ -2,9 +2,10 @@ namespace B6.Backend;
 
 public sealed class PushMissionDto
 {
-    public string  Mission  { get; set; } = string.Empty;
-    public string? Reason   { get; set; }
-    public string? TxHash   { get; set; }
+    public string  Mission   { get; set; } = string.Empty;
+    public string? Reason    { get; set; }
+    public string? TxHash    { get; set; }
+    public string? EventType { get; set; }
 }
 
 public sealed class PushStatusDto

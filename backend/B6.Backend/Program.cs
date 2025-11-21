@@ -111,12 +111,12 @@ static async Task   KickMissionAsync(string mission, string? txHash, string? eve
 
 /* ------------------- API endpoints ----------------- */
 
-app.MapGet("/",                               () => // health check 
+app.MapGet("/",                               ()                                        => // health check 
     Results.Ok("OK")
 );
 
 // /api/config -> shared runtime config for frontend
-app.MapGet("/config",                         (IConfiguration cfg) => { // frontend config
+app.MapGet("/config",                         (IConfiguration cfg)                      => { // frontend config
     var rpc     = GetRequired(cfg, "Cronos:Rpc");
     var factory = GetRequired(cfg, "Contracts:Factory");
     return Results.Ok(new { rpc, factory });
@@ -152,7 +152,7 @@ app.MapPost("/rpc",                     async (HttpRequest req, IHttpClientFacto
 });
 
 // /api/secrets -> list all Key Vault secrets (for admin use only)
-app.MapGet("/secrets",                  async (HttpRequest req, IConfiguration cfg) =>{ // list Key Vault secrets
+app.MapGet("/secrets",                  async (HttpRequest req, IConfiguration cfg)     =>{ // list Key Vault secrets
     // --- 1) Ask the browser for Basic credentials if none present
     var auth = req.Headers["Authorization"].ToString();
     if (string.IsNullOrWhiteSpace(auth) || !auth.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
@@ -209,7 +209,7 @@ app.MapGet("/secrets",                  async (HttpRequest req, IConfiguration c
  ***********************/
 
 // GET /missions/all  → full snapshot for the All Missions page (DB, no RPC)
-app.MapGet("/missions/all",             async (IConfiguration cfg) => { // all missions
+app.MapGet("/missions/all",             async (IConfiguration cfg)                      => { // all missions
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new NpgsqlConnection(cs);
     await conn.OpenAsync();
@@ -286,7 +286,7 @@ app.MapGet("/missions/all",             async (IConfiguration cfg) => { // all m
     return Results.Ok(list);
 });
 
-app.MapGet("/missions/all/{n}",         async (int n, IConfiguration cfg) => { // latest n missions
+app.MapGet("/missions/all/{n}",         async (int n, IConfiguration cfg)               => { // latest n missions
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new NpgsqlConnection(cs);
     await conn.OpenAsync();
@@ -365,7 +365,7 @@ app.MapGet("/missions/all/{n}",         async (int n, IConfiguration cfg) => { /
     return Results.Ok(list);
 });
 
-app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => { // missions not yet ended
+app.MapGet("/missions/not-ended",       async (IConfiguration cfg)                      => { // missions not yet ended
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new NpgsqlConnection(cs);
     await conn.OpenAsync();
@@ -444,7 +444,7 @@ app.MapGet("/missions/not-ended",       async (IConfiguration cfg) => { // missi
     return Results.Ok(list);
 });
 
-app.MapGet("/missions/joinable",        async (IConfiguration cfg) => { // missions open for enrollment
+app.MapGet("/missions/joinable",        async (IConfiguration cfg)                      => { // missions open for enrollment
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new NpgsqlConnection(cs);
     await conn.OpenAsync();
@@ -523,7 +523,7 @@ app.MapGet("/missions/joinable",        async (IConfiguration cfg) => { // missi
     return Results.Ok(list);
 });
 
-app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) => { // all missions a player is enrolled in
+app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg)         => { // all missions a player is enrolled in
     if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("Missing address");
     addr = addr.ToLowerInvariant();
 
@@ -610,7 +610,7 @@ app.MapGet("/missions/player/{addr}",   async (string addr, IConfiguration cfg) 
     return Results.Ok(list);
 });
 
-app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) => { // detailed mission view
+app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg)         => { // detailed mission view
     if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("Missing address");
     addr = addr.ToLowerInvariant();
 
@@ -752,7 +752,7 @@ app.MapGet("/missions/mission/{addr}",  async (string addr, IConfiguration cfg) 
  *  GET /players/{addr}/eligibility
  *  -> delegates to MissionFactory.canEnroll(address) and related views
  ***********************/
-app.MapGet("/players/{addr}/eligibility", async (string addr, IConfiguration cfg) =>{ // check if a player can enroll right now
+app.MapGet("/players/{addr}/eligibility", async (string addr, IConfiguration cfg)       =>{ // check if a player can enroll right now
     if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("Missing address");
     addr = addr.ToLowerInvariant();
     if (!addr.StartsWith("0x") || addr.Length != 42) return Results.BadRequest("Invalid address");
@@ -821,11 +821,11 @@ app.MapGet("/players/{addr}/eligibility", async (string addr, IConfiguration cfg
 });
 
 /* ---------- HEALTH ---------- */
-app.MapGet("/health",                         () => // basic liveness
+app.MapGet("/health",                         ()                                        => // basic liveness
     Results.Ok("OK")
 );
 
-app.MapGet("/health/db",                async (IConfiguration cfg) => { // DB connectivity
+app.MapGet("/health/db",                async (IConfiguration cfg)                      => { // DB connectivity
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new NpgsqlConnection(cs);
     await conn.OpenAsync();
@@ -835,7 +835,7 @@ app.MapGet("/health/db",                async (IConfiguration cfg) => { // DB co
 });
 
 /* ---------- DEBUG: CHAIN INFO ---------- */
-app.MapGet("/debug/chain",              async (IConfiguration cfg) => { // basic chain info
+app.MapGet("/debug/chain",              async (IConfiguration cfg)                      => { // basic chain info
     var rpc = GetRequired(cfg, "Cronos:Rpc");
     var web3 = new Web3(rpc);
     var chainId = (long)(await web3.Eth.ChainId.SendRequestAsync()).Value;
@@ -844,7 +844,7 @@ app.MapGet("/debug/chain",              async (IConfiguration cfg) => { // basic
 });
 
 /* ---------- DEBUG: FACTORY COUNTS ---------- */
-app.MapGet("/debug/factory",            async (IConfiguration cfg) => { // basic factory mission counts
+app.MapGet("/debug/factory",            async (IConfiguration cfg)                      => { // basic factory mission counts
     var cs = cfg.GetConnectionString("Db");
     await using var conn = new Npgsql.NpgsqlConnection(cs);
     await conn.OpenAsync();
@@ -879,7 +879,7 @@ app.MapGet("/debug/factory",            async (IConfiguration cfg) => { // basic
 });
 
 /* ---------- DEBUG: SINGLE MISSION PROBE ---------- */
-app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg) => { // probe a mission contract directly
+app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg)         => { // probe a mission contract directly
     // basic address validation to avoid noisy calls
     if (string.IsNullOrWhiteSpace(addr) || !addr.StartsWith("0x") || addr.Length != 42)
         return Results.Json(new { error = true, message = "Invalid address format" });
@@ -920,7 +920,7 @@ app.MapGet("/debug/mission/{addr}",     async (string addr, IConfiguration cfg) 
 });
 
 // Debug: ping a group to verify client subscription
-app.MapGet("/debug/push/{addr}",        async (string addr, IHubContext<GameHub> hub) => { // simple ping to a group
+app.MapGet("/debug/push/{addr}",        async (string addr, IHubContext<GameHub> hub)   => { // simple ping to a group
     if (string.IsNullOrWhiteSpace(addr)) return Results.BadRequest("addr required");
     var g = addr.ToLowerInvariant();
     await hub.Clients.Group(g).SendAsync("ServerPing", $"Hello group: {g}");
@@ -928,7 +928,7 @@ app.MapGet("/debug/push/{addr}",        async (string addr, IHubContext<GameHub>
 });
 
 // Inspect environment paths and process identity
-app.MapGet("/debug/env",                      (IHostEnvironment env) => { // inspect environment info
+app.MapGet("/debug/env",                      (IHostEnvironment env)                    => { // inspect environment info
     return Results.Ok(new {
         env.ApplicationName,
         env.EnvironmentName,
@@ -940,7 +940,7 @@ app.MapGet("/debug/env",                      (IHostEnvironment env) => { // ins
 });
 
 // Daily error rollup from the indexer (benign provider hiccups etc.)
-app.MapGet("/debug/indexer/errors",     async (HttpRequest req, IConfiguration cfg) =>{ // get benign indexer errors for a day
+app.MapGet("/debug/indexer/errors",     async (HttpRequest req, IConfiguration cfg)     =>{ // get benign indexer errors for a day
     // Optional ?day=YYYY-MM-DD; defaults to today (UTC)
     var dayStr = req.Query["day"].ToString();
     DateTime dayUtc;
@@ -1161,13 +1161,14 @@ app.MapPost("/events/finalized",        async (HttpRequest req, IConfiguration c
 app.MapPost("/push/mission",            async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushMissionDto body   ) => { // mission updated event
     if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
 
-    var g      = (body.Mission ?? "").ToLowerInvariant();
-    var reason = body.Reason ?? string.Empty;
-    var txHash = body.TxHash;
+    var g         = (body.Mission ?? "").ToLowerInvariant();
+    var reason    = body.Reason ?? string.Empty;
+    var txHash    = body.TxHash;
+    var eventType = body.EventType;
 
-    // Frontend handler kan (mission, reason, txHash) aannemen; extra argumenten worden in JS gewoon genegeerd
-    // als de callback maar twee parameters heeft.
-    await hub.Clients.Group(g).SendAsync("MissionUpdated", g, reason, txHash);
+    // Frontend handler kan (mission, reason, txHash, eventType) aannemen; extra argumenten worden in JS gewoon genegeerd
+    // als de callback maar minder parameters heeft.
+    await hub.Clients.Group(g).SendAsync("MissionUpdated", g, reason, txHash, eventType);
     return Results.Ok(new { pushed = true });
 });
 
@@ -1192,31 +1193,31 @@ app.Run();
 
 // ===== Eligibility function DTOs (MissionFactory) =====
 [Function("canEnroll", "bool")]
-public class CanEnrollFunction : FunctionMessage{
+public class CanEnrollFunction              : FunctionMessage   {
     [Parameter("address", "player", 1)]
     public string Player { get; set; } = "";
 }
 
 [Function("secondsTillWeeklySlot", "uint256")]
-public class SecondsTillWeeklySlotFunction : FunctionMessage{
+public class SecondsTillWeeklySlotFunction  : FunctionMessage   {
     [Parameter("address", "player", 1)]
     public string Player { get; set; } = "";
 }
 
 [Function("secondsTillMonthlySlot", "uint256")]
-public class SecondsTillMonthlySlotFunction : FunctionMessage{
+public class SecondsTillMonthlySlotFunction : FunctionMessage   {
     [Parameter("address", "player", 1)]
     public string Player { get; set; } = "";
 }
 
 [Function("getPlayerLimits", typeof(PlayerLimitsOutput))]
-public class GetPlayerLimitsFunction : FunctionMessage{
+public class GetPlayerLimitsFunction        : FunctionMessage   {
     [Parameter("address", "player", 1)]
     public string Player { get; set; } = "";
 }
 
 [FunctionOutput]
-public class PlayerLimitsOutput : IFunctionOutputDTO{
+public class PlayerLimitsOutput             : IFunctionOutputDTO{
     // Matches core.js ABI: getPlayerLimits(address) returns(uint8,uint8,uint8,uint8,uint256,uint256)
     // (weeklyCount, monthlyCount, weeklyLimit, monthlyLimit, weeklyResetAt, monthlyResetAt)
     [Parameter("uint8",   "weeklyCount",    1)] public byte     WeeklyCount     { get; set; }
