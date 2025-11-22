@@ -1464,7 +1464,7 @@ async function  startHub() { // SignalR HUB via shared hub.js
               // Stage open: herlaad missie uit DB zodat cooldown-eindtijd & CRO-counter kloppen.
               await refreshOpenStageFromServer(2);
             } else {
-              // Detail view: hou mission detail in sync met de laatste snapshot.
+              // Detail view: herlaad missie-snapshot.
               const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
               renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
             }
@@ -1475,19 +1475,14 @@ async function  startHub() { // SignalR HUB via shared hub.js
         }
 
         try {
-          const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
+          const gameMain = document.getElementById('gameMain');
 
+          // standaard pad: mission detail/stage opnieuw syncen met DB
+          const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
           const apiStatus = Number(m.status);
           const curStatus = Number(stageCurrentStatus ?? -1);
 
-          if (apiStatus === 1) {
-            try {
-              buildStageLowerHudForStatus(m);
-            } catch {}
-          }
-
           if (apiStatus < curStatus) {
-
             console.debug("[MissionUpdated] stale status from API; ignoring", apiStatus, "<", curStatus);
             refreshOpenStageFromServer(1);
             return;
@@ -1520,6 +1515,15 @@ async function  startHub() { // SignalR HUB via shared hub.js
           }
         } catch (err) {
           console.log("startHub MissionUpdated error: " + err)
+        }
+      }
+
+      // Auto-refresh mission overview when no mission is open
+      if (!currentMissionAddr && lastListShownId === "allMissionsSection") {
+        try {
+          await fetchAndRenderAllMissions();
+        } catch (err) {
+          console.log("startHub MissionUpdated overview refresh error: " + err);
         }
       }
     },
@@ -2322,26 +2326,24 @@ const HUD = {
 
 // Helper used by pill library (single source)
 function        playersAllStatsParts(m){
-  const fromApi = Number(
-    m?.enrolled_players ??
-    (Array.isArray(m?.enrollments) ? m.enrollments.length : 0)
-  );
+  const enrolled = Number(m?.enrolled_players ?? (Array.isArray(m?.enrollments) ? m.enrollments.length : 0));
 
   return {
-    joined:      fromApi, // altijd puur uit DB/indexer
-    joinedOrOpt: fromApi, // geen optimistic variant meer
+    min:         Number(m?.enrollment_min_players ?? 0),
+    joined:      enrolled, // altijd puur uit DB/indexer
+    max:         Number(m?.enrollment_max_players ?? 0),
+    color:       (enrolled < (Number(m?.enrollment_min_players ?? 0))) ? "#ff5555" : "#55ff55",
   };
 }
 
 // Pill data:
 
 const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
-  missionType:    { label: "Mission Type",     value: m => missionTypeName[Number(m?.mission_type ?? 0)] },
-  joinFrom:       { label: "Join from",        value: m => m?.enrollment_start ? formatLocalDateTime(m.enrollment_start) : "—" },
-  joinUntil:      { label: "Join until",       value: m => m?.enrollment_end ? formatLocalDateTime(m.enrollment_end) : "—" },
-  missionStartAt: { label: "Start At",         value: m => m?.mission_start    ? formatLocalDateTime(m.mission_start)    : "—" },
-  duration:       { label: "Duration",         value: m => (m?.mission_start && m?.mission_end)
-                                                 ? formatDurationShort(Number(m.mission_end) - Number(m.mission_start)) : "—" },
+  missionType:    { label: "Mission Type",     value: m =>  missionTypeName[Number(m?.mission_type ?? 0)] },
+  joinFrom:       { label: "Join from",        value: m =>  m?.enrollment_start                   ? formatLocalDateTime(m.enrollment_start) : "—" },
+  joinUntil:      { label: "Join until",       value: m =>  m?.enrollment_end                     ? formatLocalDateTime(m.enrollment_end) : "—" },
+  missionStartAt: { label: "Start At",         value: m =>  m?.mission_start                      ? formatLocalDateTime(m.mission_start)    : "—" },
+  duration:       { label: "Duration",         value: m => (m?.mission_start && m?.mission_end)   ? formatDurationShort(Number(m.mission_end) - Number(m.mission_start)) : "—" },
   fee:            { label: "Mission Fee",      value: m => (m && m.enrollment_amount_wei != null) ? `${weiToCro(m.enrollment_amount_wei, 2)} CRO` : "—" },
   poolStart:      { label: "Pool (start)",     value: m => (m && m.cro_start_wei    != null)      ? `${weiToCro(m.cro_start_wei, 2)} CRO`    : "—" },
   // game.js — PILL_LIBRARY

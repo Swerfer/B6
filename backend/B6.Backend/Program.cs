@@ -1232,7 +1232,14 @@ app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration c
 
     if (!string.IsNullOrWhiteSpace(txHash))
     {
-        await InsertMissionTxAsync(cfg, mission, player, "Enrolled", txHash, null);
+        var rpc  = GetRequired(cfg, "Cronos:Rpc");
+        var web3 = new Nethereum.Web3.Web3(rpc);
+        var rc   = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+        if (rc == null || rc.Status == null || rc.Status.Value != 1)
+            return Results.BadRequest("Transaction not successful");
+
+        var blockNumber = rc.BlockNumber != null ? (long?)rc.BlockNumber.Value : null;
+        await InsertMissionTxAsync(cfg, mission, player, "Enrolled", txHash, blockNumber);
     }
 
     await KickMissionAsync(mission, txHash, "Enrolled", cfg, hub);

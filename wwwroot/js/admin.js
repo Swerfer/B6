@@ -1209,6 +1209,29 @@ form?.addEventListener("submit", async e => {
 
     showAlert("Mission created successfully!", "success");
 
+    // Wait until the new mission appears in the DB (indexer has processed the kick)
+    if (missionLc) {
+      try {
+        const target      = missionLc;
+        const maxAttempts = 10;
+        const delayMs     = 1000;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          const res  = await fetch("/api/missions/all", { cache: "no-store" });
+          const list = res.ok ? await res.json() : [];
+
+          if (Array.isArray(list) &&
+              list.some(m => (m.mission_address || "").toLowerCase() === target)) {
+            break; // mission is now visible in the DB
+          }
+
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+      } catch {
+        // non-fatal: admin can still refresh manually if needed
+      }
+    }
+
     // 1) Missions uit de database opnieuw laden
     await loadMissions();
 
