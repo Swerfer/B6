@@ -179,6 +179,7 @@ namespace B6.Indexer
                                                         RefundSkipped       = 21003,
                                                         RefundPlayers       = 21004,
                                                         ForceFinalizeMission= 31001,
+                                                        KickDequeue         = 41001,
         }
 // #endregion
 
@@ -505,6 +506,9 @@ namespace B6.Indexer
                 {
                     try
                     {
+                        _log.LogInformation("[KickListener] NOTIFY received on channel {channel} payload=\"{payload}\" at {utc}",
+                            e.Channel, e.Payload, DateTime.UtcNow);
+
                         // We no longer rely on the NOTIFY payload for the mission address;
                         // instead we read from the indexer_kicks table so we also get tx_hash.
                         _kickRequested = true;
@@ -1821,14 +1825,20 @@ namespace B6.Indexer
                     }
                 }
 
-                foreach (var kick in kicks)
-                {
-                    if (!string.IsNullOrWhiteSpace(kick.Mission))
-                        _kickMissions.Enqueue(kick);
-                }
-
                 if (kicks.Count > 0)
+                {
+                    foreach (var kick in kicks)
+                    {
+                        if (!string.IsNullOrWhiteSpace(kick.Mission))
+                            _kickMissions.Enqueue(kick);
+                    }
+
                     _kickRequested = true;
+
+                    var firstMission = kicks[0].Mission ?? "";
+                    _log.LogInformation("[KickQueue] ProcessPendingKicksAsync enqueued {count} kicks (first mission={mission}) at {utc}",
+                        kicks.Count, firstMission, DateTime.UtcNow);
+                }
             }
             catch (Exception ex)
             {
@@ -1836,9 +1846,6 @@ namespace B6.Indexer
             }
         }
 
-        /// <summary>
-        /// Processes the kick queue, refreshing the state of each mission.
-        /// </summary>
         /// <summary>
         /// Processes the kick queue, refreshing the state of each mission.
         /// </summary>
@@ -1853,6 +1860,13 @@ namespace B6.Indexer
 
                 try
                 {
+                    _log.LogInformation((int)IdxEvt.KickDequeue,
+                        "[KickQueue] Dequeue mission={mission} event={eventType} tx={txHash} at {utc}",
+                        mission,
+                        string.IsNullOrWhiteSpace(kick.EventType) ? "-" : kick.EventType,
+                        kick.TxHash ?? "-",
+                        DateTime.UtcNow);
+
                     // Try a few times so the chain state (round/pool) is visible after bank.
                     const int maxAttempts = 3;
                     for (int attempt = 0; attempt < maxAttempts; attempt++)

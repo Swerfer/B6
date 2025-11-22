@@ -92,12 +92,16 @@ static async Task   KickMissionAsync(string mission, string? txHash, string? eve
             cmd.Parameters.AddWithValue("h", (object?)txHash    ?? DBNull.Value);
             cmd.Parameters.AddWithValue("e", (object?)eventType ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync();
+
+            Console.WriteLine($"[API] indexer_kicks INSERT mission={mission} event={eventType ?? "-"} tx={txHash ?? "-"} {DateTime.UtcNow:o}");
         }
 
         await using (var cmd2 = new Npgsql.NpgsqlCommand("NOTIFY b6_indexer_kick, @payload;", conn))
         {
             cmd2.Parameters.AddWithValue("payload", mission);
             await cmd2.ExecuteNonQueryAsync();
+
+            Console.WriteLine($"[API] NOTIFY b6_indexer_kick mission={mission} {DateTime.UtcNow:o}");
         }
 
         // Let the indexer handle the kick and push MissionUpdated once the snapshot is refreshed.
@@ -131,6 +135,8 @@ static async Task   InsertMissionTxAsync(IConfiguration cfg, string mission, str
             cmd.Parameters.AddWithValue("b", (object?)blockNumber ?? DBNull.Value);
 
             await cmd.ExecuteNonQueryAsync();
+
+            Console.WriteLine($"[API] mission_tx INSERT mission={mission} player={player ?? "-"} event={eventType} tx={txHash} block={blockNumber?.ToString() ?? "-"} {DateTime.UtcNow:o}");
         }
     }
     catch (Exception ex)
@@ -1153,13 +1159,13 @@ var bankPingThrottle    = new System.Collections.Concurrent.ConcurrentDictionary
 var finalizePingThrottle= new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
 // POST /events/created  → mission created event
-app.MapPost("/events/created",          async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission created event
+app.MapPost("/events/created", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                 ) =>{ // mission created event
     string? mission = null;
-    string? txHash  = null; // optional – if you want to verify like /events/banked
+    string? txHash  = null; // optional
 
     try
     {
-        using var doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
+        using var doc = await JsonDocument.ParseAsync(req.Body);
         var root = doc.RootElement;
 
         mission = root.TryGetProperty("mission", out var m) ? m.GetString() : null;
@@ -1179,35 +1185,57 @@ app.MapPost("/events/created",          async (HttpRequest req, IConfiguration c
     var now = DateTime.UtcNow;
     if (createdPingThrottle.TryGetValue(mission, out var prev) && (now - prev) < TimeSpan.FromSeconds(2))
         return Results.Ok(new { pushed = false, reason = "throttled" });
+
     createdPingThrottle[mission] = now;
 
-    // Optional: verify tx if provided
     if (!string.IsNullOrWhiteSpace(txHash))
     {
-        var rpc  = GetRequired(cfg, "Cronos:Rpc");
-        var web3 = new Nethereum.Web3.Web3(rpc);
-        var rc   = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
-        if (rc == null || rc.Status == null || rc.Status.Value != 1)
-            return Results.BadRequest("Transaction not successful");
+        try
+        {
+            long? blockNumber = null;
 
-        var blockNumber = rc.BlockNumber != null ? (long?)rc.BlockNumber.Value : null;
-        await InsertMissionTxAsync(cfg, mission, null, "Created", txHash, blockNumber);
+            try
+            {
+                var rpc  = GetRequired(cfg, "Cronos:Rpc");
+                var web3 = new Nethereum.Web3.Web3(rpc);
+                var rc   = await web3.Eth.Transactions
+                    .GetTransactionReceipt
+                    .SendRequestAsync(txHash);
+
+                if (rc != null && rc.Status != null && rc.Status.Value == 1 && rc.BlockNumber != null)
+                    blockNumber = (long)rc.BlockNumber.Value;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[API] /events/created WARN receipt lookup failed mission={mission} tx={txHash}: {ex.Message}");
+            }
+
+            await InsertMissionTxAsync(cfg, mission, null, "Created", txHash, blockNumber);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[API] /events/created WARN mission_tx insert failed mission={mission} tx={txHash}: {ex.Message}");
+        }
     }
 
+    Console.WriteLine($"[API] /events/created ACCEPT mission={mission} tx={txHash ?? "-"} {DateTime.UtcNow:o}");
+
     await KickMissionAsync(mission, txHash, "Created", cfg, hub);
+
+    Console.WriteLine($"[API] /events/created DONE KickMissionAsync mission={mission} {DateTime.UtcNow:o}");
 
     return Results.Ok(new { pushed = true });
 });
 
-// POST /events/enrolled  → mission enrolled event
-app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission enrolled event
-    string mission = null;
-    string player  = null;
-    string txHash  = null; // optional – verify if you want
+// POST /events/enrolled  → player enrolled event
+app.MapPost("/events/enrolled", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                ) =>{ // player enrolled event
+    string? mission = null;
+    string? player  = null;
+    string? txHash  = null; // optional
 
     try
     {
-        using var doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
+        using var doc = await JsonDocument.ParseAsync(req.Body);
         var root = doc.RootElement;
 
         mission = root.TryGetProperty("mission", out var m) ? m.GetString() : null;
@@ -1228,33 +1256,58 @@ app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration c
     var now = DateTime.UtcNow;
     if (enrollPingThrottle.TryGetValue(mission, out var prev) && (now - prev) < TimeSpan.FromSeconds(2))
         return Results.Ok(new { pushed = false, reason = "throttled" });
+
     enrollPingThrottle[mission] = now;
 
+    // Best-effort logging of tx → mission_tx (never break the push)
     if (!string.IsNullOrWhiteSpace(txHash))
     {
-        var rpc  = GetRequired(cfg, "Cronos:Rpc");
-        var web3 = new Nethereum.Web3.Web3(rpc);
-        var rc   = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
-        if (rc == null || rc.Status == null || rc.Status.Value != 1)
-            return Results.BadRequest("Transaction not successful");
+        try
+        {
+            long? blockNumber = null;
 
-        var blockNumber = rc.BlockNumber != null ? (long?)rc.BlockNumber.Value : null;
-        await InsertMissionTxAsync(cfg, mission, player, "Enrolled", txHash, blockNumber);
+            // Optional: try to fetch blockNumber from the receipt
+            try
+            {
+                var rpc  = GetRequired(cfg, "Cronos:Rpc");
+                var web3 = new Nethereum.Web3.Web3(rpc);
+                var rc   = await web3.Eth.Transactions
+                    .GetTransactionReceipt
+                    .SendRequestAsync(txHash);
+
+                if (rc != null && rc.Status != null && rc.Status.Value == 1 && rc.BlockNumber != null)
+                    blockNumber = (long)rc.BlockNumber.Value;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[API] /events/enrolled WARN receipt lookup failed mission={mission} tx={txHash}: {ex.Message}");
+            }
+
+            await InsertMissionTxAsync(cfg, mission, player, "Enrolled", txHash, blockNumber);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[API] /events/enrolled WARN mission_tx insert failed mission={mission} player={player ?? "-"} tx={txHash}: {ex.Message}");
+        }
     }
 
+    Console.WriteLine($"[API] /events/enrolled ACCEPT mission={mission} player={player ?? "-"} tx={txHash ?? "-"} {DateTime.UtcNow:o}");
+
     await KickMissionAsync(mission, txHash, "Enrolled", cfg, hub);
+
+    Console.WriteLine($"[API] /events/enrolled DONE KickMissionAsync mission={mission} {DateTime.UtcNow:o}");
 
     return Results.Ok(new { pushed = true });
 });
 
 // POST /events/banked  → mission banked event
-app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission banked event
-    string mission = null;
-    string txHash  = null;
+app.MapPost("/events/banked", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                                  ) => { // mission banked event    
+    string? mission = null;
+    string? txHash  = null;
 
     try
     {
-        using var doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
+        using var doc = await JsonDocument.ParseAsync(req.Body);
         var root = doc.RootElement;
 
         mission = root.TryGetProperty("mission", out var m) ? m.GetString() : null;
@@ -1274,24 +1327,35 @@ app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration c
     var now = DateTime.UtcNow;
     if (bankPingThrottle.TryGetValue(mission, out var prev) && (now - prev) < TimeSpan.FromSeconds(2))
         return Results.Ok(new { pushed = false, reason = "throttled" });
+
     bankPingThrottle[mission] = now;
 
-    var rpc     = GetRequired(cfg, "Cronos:Rpc");
-    var web3 = new Nethereum.Web3.Web3(rpc);
+    try
+    {
+        long? blockNumber = null;
 
-    // Verify the tx exists, is to this mission, and succeeded
-    var tx = await web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(txHash);
-    if (tx == null) return Results.BadRequest("Transaction not found");
+        try
+        {
+            var rpc  = GetRequired(cfg, "Cronos:Rpc");
+            var web3 = new Nethereum.Web3.Web3(rpc);
+            var rc   = await web3.Eth.Transactions
+                .GetTransactionReceipt
+                .SendRequestAsync(txHash);
 
-    var txTo = (tx.To ?? string.Empty).ToLowerInvariant();
-    if (txTo != mission) return Results.BadRequest("Transaction target mismatch");
+            if (rc != null && rc.Status != null && rc.Status.Value == 1 && rc.BlockNumber != null)
+                blockNumber = (long)rc.BlockNumber.Value;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[API] /events/banked WARN receipt lookup failed mission={mission} tx={txHash}: {ex.Message}");
+        }
 
-    var rc = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
-    if (rc == null || rc.Status == null || rc.Status.Value != 1)
-        return Results.BadRequest("Transaction not successful");
-
-    var blockNumber = rc.BlockNumber != null ? (long?)rc.BlockNumber.Value : null;
-    await InsertMissionTxAsync(cfg, mission, null, "Banked", txHash, blockNumber);
+        await InsertMissionTxAsync(cfg, mission, null, "Banked", txHash, blockNumber);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[API] /events/banked WARN mission_tx insert failed mission={mission} tx={txHash}: {ex.Message}");
+    }
 
     Console.WriteLine($"[API] /events/banked ACCEPT mission={mission} tx={txHash} {DateTime.UtcNow:o}");
 
@@ -1303,13 +1367,13 @@ app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration c
 });
 
 // POST /events/finalized  → mission finalized event
-app.MapPost("/events/finalized",        async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission banked event
-    string mission = null;
-    string txHash  = null; // optional
+app.MapPost("/events/finalized", async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                               ) => { // mission finalized event
+    string? mission = null;
+    string? txHash  = null; // optional
 
     try
     {
-        using var doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
+        using var doc = await JsonDocument.ParseAsync(req.Body);
         var root = doc.RootElement;
 
         mission = root.TryGetProperty("mission", out var m) ? m.GetString() : null;
@@ -1329,59 +1393,95 @@ app.MapPost("/events/finalized",        async (HttpRequest req, IConfiguration c
     var now = DateTime.UtcNow;
     if (finalizePingThrottle.TryGetValue(mission, out var prev) && (now - prev) < TimeSpan.FromSeconds(2))
         return Results.Ok(new { pushed = false, reason = "throttled" });
+
     finalizePingThrottle[mission] = now;
 
-    // Optional: verify tx if provided
     if (!string.IsNullOrWhiteSpace(txHash))
     {
-        var rpc  = GetRequired(cfg, "Cronos:Rpc");
-        var web3 = new Nethereum.Web3.Web3(rpc);
-        var rc   = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
-        if (rc == null || rc.Status == null || rc.Status.Value != 1)
-            return Results.BadRequest("Transaction not successful");
+        try
+        {
+            long? blockNumber = null;
 
-        var blockNumber = rc.BlockNumber != null ? (long?)rc.BlockNumber.Value : null;
-        await InsertMissionTxAsync(cfg, mission, null, "Finalized", txHash, blockNumber);
+            try
+            {
+                var rpc  = GetRequired(cfg, "Cronos:Rpc");
+                var web3 = new Nethereum.Web3.Web3(rpc);
+                var rc   = await web3.Eth.Transactions
+                    .GetTransactionReceipt
+                    .SendRequestAsync(txHash);
+
+                if (rc != null && rc.Status != null && rc.Status.Value == 1 && rc.BlockNumber != null)
+                    blockNumber = (long)rc.BlockNumber.Value;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[API] /events/finalized WARN receipt lookup failed mission={mission} tx={txHash}: {ex.Message}");
+            }
+
+            await InsertMissionTxAsync(cfg, mission, null, "Finalized", txHash, blockNumber);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[API] /events/finalized WARN mission_tx insert failed mission={mission} tx={txHash}: {ex.Message}");
+        }
     }
 
+    Console.WriteLine($"[API] /events/finalized ACCEPT mission={mission} tx={txHash ?? "-"} {DateTime.UtcNow:o}");
+
     await KickMissionAsync(mission, txHash, "Finalized", cfg, hub);
+
+    Console.WriteLine($"[API] /events/finalized DONE KickMissionAsync mission={mission} {DateTime.UtcNow:o}");
 
     return Results.Ok(new { pushed = true });
 });
 
 // ===== PUSH ROUTES =====
 
-// POST /push/mission  → mission updated event
-app.MapPost("/push/mission",            async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushMissionDto body   ) => { // mission updated event
-    if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
+// POST /push/mission  → push a mission snapshot to clients
+app.MapPost("/push/mission",     async (string mission, string reason, string? txHash, string? eventType, string key, IHubContext<GameHub> hub) =>{
+    var cfg = app.Services.GetRequiredService<IConfiguration>();
+    var expectedKey = cfg["Push:Key"];
 
-    var g         = (body.Mission ?? "").ToLowerInvariant();
-    var reason    = body.Reason ?? string.Empty;
-    var txHash    = body.TxHash;
-    var eventType = body.EventType;
+    if (expectedKey == null || key != expectedKey)
+        return Results.Unauthorized();
 
-    // Frontend handler kan (mission, reason, txHash, eventType) aannemen; extra argumenten worden in JS gewoon genegeerd
-    // als de callback maar minder parameters heeft.
+    var g = mission.ToLowerInvariant();
+
+    Console.WriteLine($"[API] /push/mission ACCEPT mission={g} reason={reason} event={eventType ?? "-"} tx={txHash ?? "-"} {DateTime.UtcNow:o}");
+
     await hub.Clients.Group(g).SendAsync("MissionUpdated", g, reason, txHash, eventType);
+
     return Results.Ok(new { pushed = true });
 });
 
-// POST /push/status   → mission status changed event
-app.MapPost("/push/status",             async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushStatusDto  body   ) => { // status changed event
-    if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
+// POST /push/status   → push status change to clients
+app.MapPost("/push/status",      async (string mission, int status, string key, IHubContext<GameHub> hub                            ) => {
+    var cfg = app.Services.GetRequiredService<IConfiguration>();
+    var expectedKey = cfg["Push:Key"];
 
-    var g = (body.Mission ?? "").ToLowerInvariant();
-    await hub.Clients.Group(g).SendAsync("StatusChanged", g, body.NewStatus);
+    if (expectedKey == null || key != expectedKey)
+        return Results.Unauthorized();
+
+    var g = mission.ToLowerInvariant();
+    await hub.Clients.Group(g).SendAsync("StatusChanged", g, status);
+
     return Results.Ok(new { pushed = true });
 });
 
-// POST /push/round    → mission round result event
-app.MapPost("/push/round",              async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub, PushRoundDto   body   ) => { // round result event
-    if (req.Headers["X-Push-Key"] != (cfg["Push:Key"] ?? "")) return Results.Unauthorized();
+// POST /push/round    → push round result to clients
+app.MapPost("/push/round",       async (string mission, int round, string winner, string amountWei, string key, IHubContext<GameHub> hub) =>{
+    var cfg = app.Services.GetRequiredService<IConfiguration>();
+    var expectedKey = cfg["Push:Key"];
 
-    var g = (body.Mission ?? "").ToLowerInvariant();
-    await hub.Clients.Group(g).SendAsync("RoundResult", g, body.Round, body.Winner, body.AmountWei);
-    await hub.Clients.Group(g).SendAsync("MissionUpdated", g);
+    if (expectedKey == null || key != expectedKey)
+        return Results.Unauthorized();
+
+    var g = mission.ToLowerInvariant();
+
+    Console.WriteLine($"[API] /push/round ACCEPT mission={g} round={round} winner={winner} amountWei={amountWei} {DateTime.UtcNow:o}");
+
+    await hub.Clients.Group(g).SendAsync("RoundResult", g, round, winner, amountWei);
+
     return Results.Ok(new { pushed = true });
 });
 

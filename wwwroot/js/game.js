@@ -530,6 +530,8 @@ function        showOnlySection(sectionId) {
   const REFRESH_THROTTLE_MS = 5000;
   if (sectionId === "allMissionsSection") {
     disableTemporarily(els.refreshAllBtn, REFRESH_THROTTLE_MS);
+    // Ensure the All Missions list is fresh whenever the user opens it.
+    fetchAndRenderAllMissions().catch(() => {});
   } else if (sectionId === "joinableSection") {
     disableTemporarily(els.refreshJoinableBtn, REFRESH_THROTTLE_MS);
   } else if (sectionId === "myMissionsSection") {
@@ -1518,16 +1520,15 @@ async function  startHub() { // SignalR HUB via shared hub.js
         }
       }
 
-      // Auto-refresh mission overview so Players/Pool stay in sync with pushes
-      if (lastListShownId === "allMissionsSection") {
-        try {
-          await fetchAndRenderAllMissions();
-        } catch (err) {
-          console.log("startHub MissionUpdated overview refresh error: " + err);
-        }
+      // Auto-refresh mission overview so Players/Pool stay in sync with pushes.
+      // We always call this on pushes; the function itself is throttled by
+      // ALL_LIST_COOLDOWN_MS + __allListInflight, so it will not spam the API.
+      try {
+        await fetchAndRenderAllMissions();
+      } catch (err) {
+        console.log("startHub MissionUpdated overview refresh error: " + err);
       }
     },
-
 
     onStatusChanged: async (addr, newStatus) => {
       __lastPushTs = Date.now();
