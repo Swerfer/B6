@@ -1448,6 +1448,52 @@ async function  startHub() { // SignalR HUB via shared hub.js
         // ↓↓↓ invalidate stage snap-cache so the next fetch cannot reuse stale payload
         if (__missionSnapCache.addr === currentMissionAddr) __missionSnapCache.ts = 0;
 
+        // NEW: route special pushes (joins & cooldown) to targeted handlers.
+        // - Kick.Enrolled / eventType "Enrolled" → refresh players & CRO pool from DB
+        // - Cooldown.Start / Cooldown.End       → refresh cooldown window & CRO from DB
+        const r  = String(reason || "");
+        const ev = eventType || null;
+
+        // Player joined (frontend kick → Kick.Enrolled)
+        if (r === "Kick.Enrolled" || ev === "Enrolled") {
+          try {
+            const gameMain = document.getElementById('gameMain');
+            const onStage  = !!(gameMain && gameMain.classList.contains('stage-mode'));
+
+            if (onStage) {
+              // Stage open: refresh stage view from DB (players + CRO pool), geen extra chain-calls.
+              await refreshOpenStageFromServer(2);
+            } else {
+              // Detail view: missie-snapshot uit DB opnieuw renderen.
+              const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
+              renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
+            }
+          } catch (err) {
+            console.log("startHub MissionUpdated Kick.Enrolled error: " + err);
+          }
+          return;
+        }
+
+        // Cooldown start/end (indexer-gestuurd, puur tijd-gebaseerd)
+        if (r === "Cooldown.Start" || r === "Cooldown.End") {
+          try {
+            const gameMain = document.getElementById('gameMain');
+            const onStage  = !!(gameMain && gameMain.classList.contains('stage-mode'));
+
+            if (onStage) {
+              // Stage open: herlaad missie uit DB zodat cooldown-eindtijd & CRO-counter kloppen.
+              await refreshOpenStageFromServer(2);
+            } else {
+              // Detail view: hou mission detail in sync met de laatste snapshot.
+              const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
+              renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
+            }
+          } catch (err) {
+            console.log("startHub MissionUpdated Cooldown error: " + err);
+          }
+          return;
+        }
+
         try {
           const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
 

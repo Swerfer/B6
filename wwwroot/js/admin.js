@@ -1207,21 +1207,34 @@ form?.addEventListener("submit", async e => {
       postKickCreated({ mission: missionLc, txHash: tx.hash }).catch(() => { /* non-fatal */ });
     }
 
-    showAlert("Mission created successfully!","success");
+    showAlert("Mission created successfully!", "success");
+
+    // 1) Missions uit de database opnieuw laden
     await loadMissions();
+
+    // 2) Automatisch terug naar het missieoverzicht schakelen
+    adminSections.forEach(sec => {
+      if (sec.id === "missionsSection") {
+        sec.classList.remove("hidden");
+      } else {
+        sec.classList.add("hidden");
+      }
+    });
+
+    // 3) Formulier opruimen voor een eventuele volgende mission
     form.reset();
 
-  } catch (err){
+  } catch (err) {
 
-      /* ---------- extract a meaningful revert reason ---------- */
-      let msg = decodeError(err);
+    /* ---------- extract a meaningful revert reason ---------- */
+    let msg = decodeError(err);
 
-      if (!msg) msg = err.message || "Transaction failed";
-      showAlert(msg, "error");
+    if (!msg) msg = err.message || "Transaction failed";
+    showAlert(msg, "error");
   } finally {
-    setBtnLoading(createBtn,false,"Create Mission",false);                  // always stop
-    updateBtn();                                     // re-validate after reset
-    }
+    setBtnLoading(createBtn, false, "Create Mission", false);  // always stop
+    updateBtn();                                              // re-validate after reset
+  }
 });
 
 // Navigation icon handlers

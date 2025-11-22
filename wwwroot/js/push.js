@@ -3,7 +3,7 @@
 
 const api = (p, opt) => fetch(`/api${p}`, { credentials: "include", ...opt });
 
-function        urlBase64ToUint8Array(base64String) {
+function        urlBase64ToUint8Array (base64String)  {
   const padding = "=".repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
   const rawData = atob(base64);
@@ -12,13 +12,13 @@ function        urlBase64ToUint8Array(base64String) {
   return outputArray;
 }
 
-async function  ensureSw() {
+async function  ensureSw              ()              {
   if (!("serviceWorker" in navigator)) throw new Error("No SW");
   const reg = await navigator.serviceWorker.register("/js/sw.js");
   return reg;
 }
 
-async function  getVapid() {
+async function  getVapid              ()              {
   const r   = await api("/push/vapid-public-key");
   let  txt  = (await r.text()).trim();
   // If backend ever returns JSON string, parse once
@@ -29,7 +29,7 @@ async function  getVapid() {
   return txt.replace(/\s+/g, "");
 }
 
-async function  subscribe(reg) {
+async function  subscribe             (reg)           {
   const vapid = await getVapid();
   const sub = await reg.pushManager.subscribe({
     userVisibleOnly: true,
@@ -38,7 +38,7 @@ async function  subscribe(reg) {
   return sub;
 }
 
-async function  upsert(address, sub) {
+async function  upsert                (address, sub)  {
     // Preserve the exact base64 the browser produces; no extra URL-safe transform here.
     const bytesToB64 = (ab) => {
         const arr = new Uint8Array(ab);
@@ -67,7 +67,7 @@ async function  upsert(address, sub) {
     });
 }
 
-async function  enableGamePush(address) {
+async function  enableGamePush        (address)       {
   try {
     if (!address) return;
     if (!("Notification" in window)) return;
