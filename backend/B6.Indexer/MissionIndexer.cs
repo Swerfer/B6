@@ -2012,7 +2012,7 @@ namespace B6.Indexer
                     mission_rounds_total,
                     round_count
                 from missions
-                where status &lt; @successStatus;", conn);
+                where status < @successStatus;", conn);
 
             cmd.Parameters.AddWithValue("successStatus", (short)Status.Success);
 
