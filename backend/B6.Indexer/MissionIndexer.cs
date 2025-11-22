@@ -1665,13 +1665,16 @@ namespace B6.Indexer
         private async Task                              coreLoop                            (CancellationToken token) {
             var nowUtc = DateTime.UtcNow;
 
-            // 0) Process kicks first (mission-created / enroll-succeeded / bank-succeeded).
-            //    This stays sequential because it updates shared queues and DB state.
-            if (_kickRequested || !_kickMissions.IsEmpty)
+            // 0) Always poll the kick table once per second as a safety net.
+            //    LISTEN/NOTIFY still helps to wake us up quickly, but we no longer
+            //    depend on it for correctness or latency: even if NOTIFY is lost,
+            //    new rows in indexer_kicks will be picked up on the next tick.
+            await ProcessPendingKicksAsync(token);
+
+            if (!_kickMissions.IsEmpty)
             {
                 _kickRequested = false;
-                await ProcessPendingKicksAsync(token);
-                await ProcessKickQueueAsync(token); // refresh snapshots for kicked missions
+                await ProcessKickQueueAsync(token); // refresh snapshots / push for kicked missions
             }
 
             // 1) Periodically poll the factory for new or changed missions.
@@ -1847,7 +1850,10 @@ namespace B6.Indexer
         }
 
         /// <summary>
-        /// Processes the kick queue, refreshing the state of each mission.
+        /// Processes the kick queue, sending immediate push notifications for
+        /// DB-driven events (Created/Enrolled) and performing a short snapshot
+        /// refresh loop only for Banked/Finalized events that depend on
+        /// on-chain round/pool state.
         /// </summary>
         private async Task                              ProcessKickQueueAsync               (CancellationToken token) {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1858,42 +1864,54 @@ namespace B6.Indexer
                 if (string.IsNullOrWhiteSpace(mission)) continue;
                 if (!seen.Add(mission)) continue;
 
+                // Normalize event type once
+                var eventType = string.IsNullOrWhiteSpace(kick.EventType) ? null : kick.EventType;
+
+                var reason = eventType switch
+                {
+                    "Created"   => "Kick.Created",
+                    "Enrolled"  => "Kick.Enrolled",
+                    "Banked"    => "Kick.Banked",
+                    "Finalized" => "Kick.Finalized",
+                    null        => "Kick.FrontendEvent",
+                    ""          => "Kick.FrontendEvent",
+                    _           => $"Kick.{eventType}"
+                };
+
                 try
                 {
                     _log.LogInformation((int)IdxEvt.KickDequeue,
                         "[KickQueue] Dequeue mission={mission} event={eventType} tx={txHash} at {utc}",
                         mission,
-                        string.IsNullOrWhiteSpace(kick.EventType) ? "-" : kick.EventType,
+                        eventType ?? "-",
                         kick.TxHash ?? "-",
                         DateTime.UtcNow);
 
-                    // Try a few times so the chain state (round/pool) is visible after bank.
-                    const int maxAttempts = 3;
-                    for (int attempt = 0; attempt < maxAttempts; attempt++)
+                    // For Created / Enrolled we assume the backend has already written the
+                    // mission & player state to the database, so we can push immediately
+                    // without an extra RPC roundtrip.
+                    var needsSnapshot =
+                        string.Equals(eventType, "Banked", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(eventType, "Finalized", StringComparison.OrdinalIgnoreCase);
+
+                    if (needsSnapshot)
                     {
-                        await RefreshMissionSnapshotAsync(mission, token);
-                        if (attempt < maxAttempts - 1)
+                        // Short retry loop so that round/pool state is visible after BANK / finalize.
+                        const int maxAttempts = 3;
+                        for (int attempt = 0; attempt < maxAttempts; attempt++)
                         {
-                            try { await Task.Delay(TimeSpan.FromSeconds(1), token); } catch { }
+                            await RefreshMissionSnapshotAsync(mission, token);
+
+                            if (attempt < maxAttempts - 1)
+                            {
+                                try { await Task.Delay(TimeSpan.FromSeconds(1), token); }
+                                catch { /* ignore cancellation here; outer token is honoured via RefreshMissionSnapshotAsync */ }
+                            }
                         }
                     }
 
-                    // Determine a more specific reason based on the originating frontend event type.
-                    string? eventType = string.IsNullOrWhiteSpace(kick.EventType) ? null : kick.EventType;
-
-                    string reason = eventType switch
-                    {
-                        "Created"   => "Kick.Created",
-                        "Enrolled"  => "Kick.Enrolled",
-                        "Banked"    => "Kick.Banked",
-                        "Finalized" => "Kick.Finalized",
-                        null        => "Kick.FrontendEvent",
-                        ""          => "Kick.FrontendEvent",
-                        _           => $"Kick.{eventType}"
-                    };
-
-                    // Kick-based refresh: include the originating tx hash + explicit event type.
-                    // This indicates that the refresh was triggered by a frontend /events/* call.
+                    // Kick-based push: always include tx hash and event type so the frontend
+                    // can attribute the update to a specific transaction / event.
                     await NotifyMissionUpdatedAsync(
                         mission,
                         reason:    reason,

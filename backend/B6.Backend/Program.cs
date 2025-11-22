@@ -77,35 +77,39 @@ static string       GetRequired(IConfiguration cfg, string key){
     return v;
 }
 
-static async Task   KickMissionAsync(string mission, string? txHash, string? eventType, IConfiguration cfg, IHubContext<GameHub> hub){
+// Best-effort kick for MissionIndexer to refresh a mission snapshot quickly
+static async Task KickMissionAsync(string mission, string? txHash, string? eventType, IConfiguration cfg, IHubContext<GameHub> hub) {
     try
     {
-        var cs = cfg.GetConnectionString("Db");
-        await using var conn = new Npgsql.NpgsqlConnection(cs);
+        if (string.IsNullOrWhiteSpace(mission))
+            throw new ArgumentException("mission is required", nameof(mission));
+        if (string.IsNullOrWhiteSpace(eventType))
+            throw new ArgumentException("eventType is required", nameof(eventType));
+        if (string.IsNullOrWhiteSpace(txHash))
+            throw new ArgumentException("txHash is required", nameof(txHash));
+
+        var connString = cfg.GetConnectionString("Db");
+        await using var conn = new Npgsql.NpgsqlConnection(connString);
         await conn.OpenAsync();
 
         await using (var cmd = new Npgsql.NpgsqlCommand(@"
             insert into indexer_kicks (mission_address, tx_hash, event_type)
-            values (@m, @h, @e);", conn))
+            values (@mission, @tx_hash, @event_type);", conn))
         {
-            cmd.Parameters.AddWithValue("m", mission);
-            cmd.Parameters.AddWithValue("h", (object?)txHash    ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("e", (object?)eventType ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("mission", mission);
+            cmd.Parameters.AddWithValue("tx_hash", txHash);
+            cmd.Parameters.AddWithValue("event_type", eventType);
             await cmd.ExecuteNonQueryAsync();
         }
 
-        await using (var cmd2 = new Npgsql.NpgsqlCommand("NOTIFY b6_indexer_kick, @payload;", conn))
-        {
-            cmd2.Parameters.AddWithValue("payload", mission);
-            await cmd2.ExecuteNonQueryAsync();
-        }
-
-        // Let the indexer handle the kick and push MissionUpdated once the snapshot is refreshed.
+        Console.WriteLine(
+            $"[KickQueue] Kick queued mission={mission} type={eventType} tx={txHash} at {DateTime.UtcNow:o}");
     }
     catch (Exception ex)
     {
-        // non-fatal: kick/notify failure shouldn't break response
-        Console.WriteLine($"indexer kick failed for {mission}: {ex.Message}");
+        // Non-fatal: we don't want the API call to fail because of a kick issue
+        Console.WriteLine(
+            $"[KickQueue] Kick FAILED mission={mission} type={eventType} tx={txHash} at {DateTime.UtcNow:o}: {ex}");
     }
 }
 
@@ -1200,57 +1204,107 @@ app.MapPost("/events/created",          async (HttpRequest req, IConfiguration c
 });
 
 // POST /events/enrolled  → mission enrolled event
-app.MapPost("/events/enrolled",         async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission enrolled event
-    string mission = null;
-    string player  = null;
-    string txHash  = null; // optional – verify if you want
+app.MapPost("/events/enrolled", async (HttpRequest request, IConfiguration cfg, IHubContext<GameHub> hub) =>{ // mission enrolled event
+    string? mission   = null;
+    string? player    = null;
+    string? txHash    = null;
+    long?   block     = null;
+    long?   amountWei = null;
 
     try
     {
-        using var doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
-        var root = doc.RootElement;
+        using var doc = await JsonDocument.ParseAsync(request.Body);
+        var root      = doc.RootElement;
 
-        mission = root.TryGetProperty("mission", out var m) ? m.GetString() : null;
-        player  = root.TryGetProperty("player",  out var p) ? p.GetString() : null;
-        txHash  = root.TryGetProperty("txHash",  out var h) ? h.GetString() : null;
+        mission   = root.GetProperty("mission").GetString();
+        player    = root.GetProperty("player").GetString();
+        txHash    = root.GetProperty("txHash").GetString();
+        block     = root.TryGetProperty("blockNumber", out var b) && b.ValueKind is JsonValueKind.Number
+                        ? b.GetInt64()
+                        : null;
+        amountWei = root.TryGetProperty("amountWei", out var a) && a.ValueKind is JsonValueKind.Number
+                        ? a.GetInt64()
+                        : null;
     }
     catch
     {
-        return Results.BadRequest("Invalid JSON");
+        Console.Error.WriteLine($"[Evt.Enrolled] Invalid JSON body at {DateTime.UtcNow:o}");
+        return Results.BadRequest("Invalid JSON body");
     }
 
-    if (string.IsNullOrWhiteSpace(mission))
-        return Results.BadRequest("Missing mission");
-
-    mission = mission.ToLowerInvariant();
-
-    // Throttle per mission: once per ~2s
-    var now = DateTime.UtcNow;
-    if (enrollPingThrottle.TryGetValue(mission, out var prev) && (now - prev) < TimeSpan.FromSeconds(2))
-        return Results.Ok(new { pushed = false, reason = "throttled" });
-    enrollPingThrottle[mission] = now;
-
-    if (!string.IsNullOrWhiteSpace(txHash))
+    if (string.IsNullOrWhiteSpace(mission) ||
+        string.IsNullOrWhiteSpace(player)  ||
+        string.IsNullOrWhiteSpace(txHash))
     {
-        var rpc  = GetRequired(cfg, "Cronos:Rpc");
-        var web3 = new Nethereum.Web3.Web3(rpc);
-        var rc   = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
-        if (rc == null || rc.Status == null || rc.Status.Value != 1)
-            return Results.BadRequest("Transaction not successful");
-
-        var blockNumber = rc.BlockNumber != null ? (long?)rc.BlockNumber.Value : null;
-        await InsertMissionTxAsync(cfg, mission, player, "Enrolled", txHash, blockNumber);
+        Console.Error.WriteLine($"[Evt.Enrolled] Missing mission / player / txHash at {DateTime.UtcNow:o}");
+        return Results.BadRequest("Missing mission / player / txHash");
     }
 
-    await KickMissionAsync(mission, txHash, "Enrolled", cfg, hub);
+    var receivedAt = DateTime.UtcNow;
+    Console.WriteLine(
+        $"[Evt.Enrolled] Received mission={mission} player={player} tx={txHash} block={block?.ToString() ?? "-"} at {receivedAt:o}");
 
-    return Results.Ok(new { pushed = true });
+    try
+    {
+        // 1) Try to verify tx on chain, but do NOT fail if the receipt is not yet available.
+        var rpc  = GetRequired(cfg, "Cronos:Rpc");
+        var web3 = new Web3(rpc);
+
+        Nethereum.RPC.Eth.DTOs.TransactionReceipt? receipt = null;
+        try
+        {
+            receipt = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"[Evt.Enrolled] WARNING: failed to fetch receipt for {txHash} at {DateTime.UtcNow:o}: {ex.Message}");
+        }
+
+        // Only treat an explicit status != 1 as a failure.
+        if (receipt != null && receipt.Status != null && receipt.Status.Value != 1)
+        {
+            Console.Error.WriteLine(
+                $"[Evt.Enrolled] Tx status != 1 mission={mission} tx={txHash} at {DateTime.UtcNow:o}");
+            return Results.BadRequest("Transaction not successful");
+        }
+
+        // If we got a receipt, use its block number; otherwise keep whatever the frontend sent (or null).
+        if (block == null && receipt?.BlockNumber != null)
+            block = (long)receipt.BlockNumber.Value;
+
+        // 2) Save tx in mission_tx (even if receipt was still null).
+        await InsertMissionTxAsync(
+            cfg,
+            mission,
+            player,
+            "Enrolled",
+            txHash,
+            block);
+
+        Console.WriteLine(
+            $"[Evt.Enrolled] MissionTx stored mission={mission} player={player} tx={txHash} block={block?.ToString() ?? "-"} at {DateTime.UtcNow:o}");
+
+        // 3) Enqueue kick for indexer so it refreshes the snapshot immediately.
+        await KickMissionAsync(mission, txHash, "Enrolled", cfg, hub);
+
+        Console.WriteLine(
+            $"[Evt.Enrolled] Kick queued mission={mission} type=Enrolled tx={txHash} at {DateTime.UtcNow:o}");
+
+        return Results.Ok(new { ok = true });
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(
+            $"[Evt.Enrolled] ERROR mission={mission} player={player} tx={txHash} at {DateTime.UtcNow:o}: {ex}");
+        return Results.StatusCode(500);
+    }
 });
 
 // POST /events/banked  → mission banked event
 app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission banked event
-    string mission = null;
-    string txHash  = null;
+    string? mission = null;
+    string? txHash  = null;
 
     try
     {
@@ -1304,8 +1358,8 @@ app.MapPost("/events/banked",           async (HttpRequest req, IConfiguration c
 
 // POST /events/finalized  → mission finalized event
 app.MapPost("/events/finalized",        async (HttpRequest req, IConfiguration cfg, IHubContext<GameHub> hub                        ) => { // mission banked event
-    string mission = null;
-    string txHash  = null; // optional
+    string? mission = null;
+    string? txHash  = null; // optional
 
     try
     {
