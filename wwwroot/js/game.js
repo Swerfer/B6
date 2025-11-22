@@ -1518,8 +1518,8 @@ async function  startHub() { // SignalR HUB via shared hub.js
         }
       }
 
-      // Auto-refresh mission overview when no mission is open
-      if (!currentMissionAddr && lastListShownId === "allMissionsSection") {
+      // Auto-refresh mission overview so Players/Pool stay in sync with pushes
+      if (lastListShownId === "allMissionsSection") {
         try {
           await fetchAndRenderAllMissions();
         } catch (err) {
@@ -1527,6 +1527,7 @@ async function  startHub() { // SignalR HUB via shared hub.js
         }
       }
     },
+
 
     onStatusChanged: async (addr, newStatus) => {
       __lastPushTs = Date.now();
@@ -4068,7 +4069,7 @@ function        renderMissionDetail     ({ mission, enrollments, rounds }){
     </div>
   `;
 
-  // countdowns + updated-at staleness (tick every second)
+  // countdowns (tick every second)
   stopCountdown();
   countdownTimer = setInterval(() => {
     const ids = [
@@ -4080,42 +4081,6 @@ function        renderMissionDetail     ({ mission, enrollments, rounds }){
     for (const [id, ts] of ids) {
       const el = document.getElementById(id);
       if (el) el.textContent = formatCountdown(ts);
-    }
-
-    // UPDATED AGE → mark red + exclamation when > 180s AND no pushes for > 75s
-    const stamp = document.getElementById("updatedAtStamp");
-    const icon  = document.getElementById("updatedAtIcon");
-    if (stamp) {
-      const t = Number(stamp.dataset.updated || 0);
-      const age = Math.floor(Date.now()/1000) - t;
-      const staleAge = age > 180;
-
-      const lastPushAgeMs = Date.now() - (__lastPushTs || 0);
-      const pushQuiet = lastPushAgeMs > 75000; // ~75s without any push
-
-      // Only flag/warn during live states (1=enrolling, 2=arming, 3=active, 4=paused)
-      const liveState = [1, 2, 3, 4].includes(st);
-
-      // Visual staleness only when API looks old AND pushes have been quiet
-      const showStaleMarker = liveState && staleAge && pushQuiet;
-      stamp.classList.toggle("text-error", showStaleMarker);
-      if (icon) icon.style.display = showStaleMarker ? "inline-block" : "none";
-
-      // Modal warning only for live missions
-      const warn = liveState && staleAge && pushQuiet;
-      if (warn && !staleWarningShown) {
-        showAlert("Live data looks quiet for over 2 minutes. Try reloading or check your connection.", "warning");
-        staleWarningShown = true;
-      }
-
-      // If no longer stale (or not live), ensure any warning is cleared
-      if (!warn) {
-        staleWarningShown = false;
-        const alertModal   = document.getElementById("alertModal");
-        const modalOverlay = document.getElementById("modalOverlay");
-        alertModal.classList.add("hidden");
-        modalOverlay.classList.remove("active");
-      }
     }
   }, 1000);
 
