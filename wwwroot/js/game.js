@@ -32,10 +32,6 @@ import {
 } from "./core.js";
 
 import { 
-  enableGamePush 
-} from "./push.js";
-
-import { 
   startHub as startGameHub, 
   setHandlers, 
   joinMissionGroup, 
@@ -127,8 +123,7 @@ let   __myMissionsCache     = [];     // last fetched list (raw objects)
 let   __mySelected          = null;   // null → all; otherwise Set<number> of statuses
 // Realtime:
 let   __lastPushTs          = 0;      // updated on any hub push we care about
-// Optimistic:
-let   optimisticGuard       = { untilMs: 0, players: 0, croNow: "0" };
+
 // Cache:
 const __missionCreatedCache = new Map();
 const JOIN_CACHE_KEY        = "_b6joined";
@@ -152,8 +147,6 @@ const ALL_LIST_COOLDOWN_MS  = 5000;
 let   staleWarningShown     = false;
 let   ctaBusy               = false;
 
-let __pillsHydrateBusy      = false;
-let __pillsHydrateLast      = 0;
 let __pauseUntilSec         = 0;
 let __postCooldownUntilSec  = 0; 
 let __lastPauseTs           = 0;
@@ -414,7 +407,7 @@ function        enrichMissionFromApi(data){
       ? Number(m.enrolled_players)
       : Array.isArray(m.enrollments) ? m.enrollments.length : 0;
 
-    const joined   = BigInt(Math.max(enrolledFromApi, Number(optimisticGuard?.players || 0)));
+    const joined   = BigInt(enrolledFromApi);
     const derived  = initialWei + feeWei * joined;
     const current  = BigInt(String(m.cro_current_wei || m.cro_start_wei || "0"));
 
@@ -815,11 +808,9 @@ function        topWinners(enrollments = [], rounds = [], n = 5){
 function        failureReasonFor(mission){
   if (Number(mission?.status) !== 7) return null;
   const min    = Number(mission?.enrollment_min_players ?? 0);
-  const joined = Math.max(
-    (mission?.enrolled_players != null) ? Number(mission.enrolled_players)
-                                        : (Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0),
-    Number(optimisticGuard?.players || 0)
-  );
+  const joined = (mission?.enrolled_players != null)
+    ? Number(mission.enrolled_players)
+    : (Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0);
   const rounds = Number(mission?.round_count ?? 0);
 
   // Your two failure modes:
@@ -1245,11 +1236,9 @@ function        statusByClock(m, now = Math.floor(Date.now()/1000)) { // Compute
   const ms = Number(m.mission_start    || 0);
   const me = Number(m.mission_end      || 0);
 
-  const cur = Math.max(
-    (m?.enrolled_players != null) ? Number(m.enrolled_players)
-                                  : (Array.isArray(m.enrollments) ? m.enrollments.length : 0),
-    Number(optimisticGuard?.players || 0)
-  );
+  const cur = (m?.enrolled_players != null)
+    ? Number(m.enrolled_players)
+    : (Array.isArray(m.enrollments) ? m.enrollments.length : 0);
 
   const min = Number(m.enrollment_min_players ?? 0);
 
@@ -1398,15 +1387,6 @@ function        unlockScroll(){
   window.scrollTo(0, -top);
 }
 
-// State helpers:
-
-function        resetMissionLocalState() {
-  // Clear cross-mission, “no-regress” caches so pills won’t bleed
-  optimisticGuard    = { untilMs: 0, players: 0, croNow: "0" };
-  __pillsHydrateBusy = false;
-  __pillsHydrateLast = 0;
-}
-
 // #endregion
 
 
@@ -1500,44 +1480,14 @@ async function  startHub() { // SignalR HUB via shared hub.js
           const apiStatus = Number(m.status);
           const curStatus = Number(stageCurrentStatus ?? -1);
 
-          // ⬇️ Spectator optimism during Enrolling: skip +1 for the self-enrolling tab
-          // and derive CRO from (initial + fee * players) to avoid double-adding.
           if (apiStatus === 1) {
             try {
-              const fromApi = (m?.enrolled_players != null)
-                ? Number(m.enrolled_players)
-                : (Array.isArray(m?.enrollments) ? m.enrollments.length : 0);
-
-              const me = (walletAddress || "").toLowerCase();
-              const selfEnrolled = !!(me && joinedCacheHas(currentMissionAddr, me));
-
-              // Only bump when API hasn’t moved yet AND this tab isn’t the joining player.
-              const prevBase = Number(optimisticGuard?.fromPlayers ?? (__lastChainPlayers || 0));
-              const needBump = !selfEnrolled && (fromApi <= prevBase);
-
-              const targetPlayers = Math.max(
-                needBump ? (fromApi + 1) : fromApi,
-                Number(optimisticGuard?.players || 0)
-              );
-
-              // Derive croNow from initial + fee * players (consistent with pill derivation/enrichment)
-              const initialWei = BigInt(String(m.cro_initial_wei || "0"));
-              const feeWei     = BigInt(String(m.enrollment_amount_wei || "0"));
-              const derivedCro = (initialWei + feeWei * BigInt(targetPlayers)).toString();
-
-              optimisticGuard = {
-                untilMs:     Date.now() + 8000,
-                players:     targetPlayers,
-                fromPlayers: fromApi,
-                croNow:      derivedCro
-              };
-
-              // Immediate repaint (no network)
-              try { buildStageLowerHudForStatus(m); } catch {}
+              buildStageLowerHudForStatus(m);
             } catch {}
           }
 
           if (apiStatus < curStatus) {
+
             console.debug("[MissionUpdated] stale status from API; ignoring", apiStatus, "<", curStatus);
             refreshOpenStageFromServer(1);
             return;
@@ -1963,24 +1913,9 @@ async function  refreshOpenStageFromServer(retries = 3, delay = 1600) {
   };
 
   try {
-    const force = (Date.now() < (optimisticGuard?.untilMs || 0)) || (Date.now() - (__lastPushTs || 0) < 8000);
+    const force = (Date.now() - (__lastPushTs || 0) < 8000);
     const data  = await apiMission(currentMissionAddr, force);
     const m = enrichMissionFromApi(data);
-
-    // Merge optimism for a short window so API can't regress the UI
-    // Grow phases (Enrolling/Arming): prefer higher; Active/Paused: prefer lower.
-    if (Date.now() < (optimisticGuard?.untilMs || 0)) {
-      try {
-        const apiCro = BigInt(String(m.cro_current_wei || m.cro_start_wei || "0"));
-        const optCro = BigInt(String(optimisticGuard?.croNow || "0"));
-        const st     = Number(m.status);
-        if (st === 1 || st === 2) {
-          if (optCro > apiCro) m.cro_current_wei = optCro.toString();
-        } else if (st === 3 || st === 4) {
-          if (optCro && optCro < apiCro) m.cro_current_wei = optCro.toString();
-        }
-      } catch {}
-    }
 
     const newStatus = Number(m.status);
     const curStatus = Number(stageCurrentStatus ?? -1);
@@ -2387,19 +2322,15 @@ const HUD = {
 
 // Helper used by pill library (single source)
 function        playersAllStatsParts(m){
-  const min    = Number(m?.enrollment_min_players ?? 0);
-  const fromApi= (m?.enrolled_players != null)
-    ? Number(m.enrolled_players)
-    : Array.isArray(m?.enrollments) ? m.enrollments.length : 0;
+  const fromApi = Number(
+    m?.enrolled_players ??
+    (Array.isArray(m?.enrollments) ? m.enrollments.length : 0)
+  );
 
-    const joined = Math.max(
-      fromApi,
-      (Date.now() < (optimisticGuard?.untilMs || 0)) ? Number(optimisticGuard?.players || 0) : 0
-    );
-
-  const max    = (m?.enrollment_max_players == null) ? "—" : String(m.enrollment_max_players);
-  const color  = joined >= min ? "var(--success)" : "var(--error)";
-  return { min, joined, max, color };
+  return {
+    joined:      fromApi, // altijd puur uit DB/indexer
+    joinedOrOpt: fromApi, // geen optimistic variant meer
+  };
 }
 
 // Pill data:
@@ -2426,8 +2357,7 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
           ? Number(m.enrolled_players)
           : Array.isArray(m?.enrollments) ? m.enrollments.length : 0;
 
-        const optPlayers = (Date.now() < (optimisticGuard?.untilMs || 0)) ? Number(optimisticGuard?.players || 0) : 0;
-        const joined  = BigInt(Math.max(fromApi, optPlayers));
+        const joined  = BigInt(fromApi);
         const derived = initialWei + feeWei * joined;
         const current = BigInt(String(m?.cro_current_wei || "0"));
         return `${weiToCro((current > derived ? current : derived).toString(), 2)} CRO`;
@@ -2436,14 +2366,14 @@ const PILL_LIBRARY = { // Single source of truth for pill behaviors/labels
       return "—";
     }
   },
+
   playersCap:     { label: "Players cap",      value: m => (m?.enrollment_max_players ?? "—") },
   players: { label: "Players", value: m => {
     const fromApi = (m?.enrolled_players != null)
       ? Number(m.enrolled_players)
       : (Array.isArray(m?.enrollments) ? m.enrollments.length : 0);
 
-    const optPlayers = (Date.now() < (optimisticGuard?.untilMs || 0)) ? Number(optimisticGuard?.players || 0) : 0;
-    return Math.max(fromApi, optPlayers);
+    return fromApi;
   }},
   rounds:         { label: "Rounds",           value: m => Number(m?.mission_rounds_total ?? 0) },
   roundsOff: { 
@@ -2521,32 +2451,7 @@ async function  rehydratePillsFromServer(missionOverride = null) {
     buildStageLowerHudForStatus(mSnap);
   } catch (e) {
     console.warn("[pills/rehydrate] failed:", e?.message || e);
-  } finally {
-    __pillsHydrateLast = Date.now();
-    __pillsHydrateBusy = false;
-  }
-}
-
-// Chain/No-regress merge:
-
-function        applyNoRegress(m){
-  try {
-    const st = Number(m?.status);
-    if (st === 1 || st === 2) {
-      const merged   = { ...m };
-      const apiCro   = BigInt(String(m?.cro_current_wei ?? m?.cro_start_wei ?? "0"));
-
-      // During the optimism window, never regress vs optimistic croNow
-      if (Date.now() < (optimisticGuard?.untilMs || 0)) {
-        try {
-          const optCro = BigInt(String(optimisticGuard?.croNow || "0"));
-          if (optCro > apiCro) merged.cro_current_wei = optCro.toString();
-        } catch {}
-      }
-      return merged;
-    }
-  } catch {}
-  return m;
+  } 
 }
 
 // Builder:
@@ -2556,8 +2461,7 @@ function        buildStageLowerHudForStatus(mission){ // Build (and fill) the pi
   if (!host) return;
   while (host.firstChild) host.removeChild(host.firstChild);
 
-  const safe = applyNoRegress(mission);
-  const keys = PILL_SETS[hudStatusFor(safe)] ?? PILL_SETS.default;
+  const keys = PILL_SETS[hudStatusFor(mission)] ?? PILL_SETS.default;
 
   // layout helpers
   const { rectW, rectH, gapX, gapY, xCenter, yFirst, rx, ry,
@@ -2739,58 +2643,21 @@ async function  handleEnrollClick       (mission){
     const val = mission.enrollment_amount_wei ?? "0";
     const tx  = await c.enrollPlayer({ value: val });
 
-    // Kick the indexer as soon as we have the tx hash (UI also de-dupes ~2s)
-    // and mark *locally joined* right away so the push guard detects self-enroll.
+    // Kick the indexer as soon as we have a tx hash
+    // en markeer lokaal dat deze viewer gejoined heeft
     try {
       const me = (await signer.getAddress()).toLowerCase();
       postKickEnrolled({ mission: mission.mission_address, player: me, txHash: tx.hash }).catch(()=>{});
-      joinedCacheAdd(mission.mission_address, me); // ← moved up
+      joinedCacheAdd(mission.mission_address, me);
     } catch {}
 
     mission._joinedByMe = true;                      // in-memory flag for this session
     renderStageCtaForStatus(mission);                // repaint CTA immediately
     showAlert("You joined the mission!", "success");
 
-    // OPTIMISTIC UI UPDATE immediately (before waiting for mining)
-    try {
-      const feeWei = String(mission.enrollment_amount_wei || "0");
-
-      // base before-join count from snapshot fields only
-      const beforeJoined = (mission?.enrolled_players != null)
-        ? Number(mission.enrolled_players)
-        : (Array.isArray(mission?.enrollments) ? mission.enrollments.length : 0);
-
-      // Prefer derived CRO = initial + fee * players to avoid double-adding on top of a fast DB cro_current_wei
-      const derivedCro = (() => {
-        try {
-          const initialWei = BigInt(String(mission.cro_initial_wei || "0"));
-          return (initialWei + BigInt(feeWei) * BigInt(beforeJoined + 1)).toString();
-        } catch {
-          return (BigInt(mission.cro_current_wei || mission.cro_start_wei || "0") + BigInt(feeWei)).toString();
-        }
-      })();
-
-      optimisticGuard = {
-        untilMs: Date.now() + 15000, // 15s guard window
-        players: beforeJoined + 1,
-        croNow:  derivedCro
-      };
-
-      // paint immediately
-      const m2 = { ...mission, cro_current_wei: optimisticGuard.croNow };
-      buildStageLowerHudForStatus(m2);
-      renderStageCtaForStatus(m2);
-
-      // also kick a chain rehydrate to set __lastChainPlayers quickly
-      rehydratePillsFromServer(mission, "joined:post-tx").catch(()=>{});
-    } catch (e) {
-      console.warn("[CTA/JOIN] optimistic paint failed:", e?.message || e);
-    }
-
     await tx.wait();
 
-    // Let indexer catch up, then reconcile (no await, slight delay)
-    // setTimeout(() => { refreshOpenStageFromServer(2).catch(()=>{}); }, 1200);
+    // Laat indexer + DB het echte aantal players + pool bepalen
     refreshOpenStageFromServer(2).catch(()=>{});
   } catch (err) {
     // wallet cancel → warning, no “stuck” UI
@@ -2879,7 +2746,6 @@ async function  handleBankItClick       (mission){
       const prev = BigInt(String(mission.cro_current_wei ?? mission.cro_start_wei ?? "0"));
       croAfter   = (prev - BigInt(String(winWei || "0"))).toString();
     } catch {}
-    optimisticGuard = { untilMs: Date.now() + 15000, players: optimisticGuard.players, croNow: croAfter };
 
     // Also bump round_count locally so “Round” pill stays in sync with pool
     const nextRoundCount = Number(mission.round_count || 0) + 1;
@@ -4079,8 +3945,6 @@ function        renderMissionDetail     ({ mission, enrollments, rounds }){
 
   const statusCls = statusColorClass(st);
 
-  // No-regress: prefer chain-truth for Enrolling/Arming
-  const safe = applyNoRegress(mission);
   const listJoined = Array.isArray(enrollments) ? enrollments.length : 0;
   const fromApi    = (mission?.enrolled_players != null)
     ? Number(mission.enrolled_players)
@@ -4088,12 +3952,11 @@ function        renderMissionDetail     ({ mission, enrollments, rounds }){
 
   const joinedPlayers = Math.max(
     fromApi,
-    Number(__lastChainPlayers || 0),
-    Number(optimisticGuard?.players || 0)
+    Number(__lastChainPlayers || 0)
   );
 
-  const minP = Number(safe?.enrollment_min_players ?? mission.enrollment_min_players ?? 0);
-  const maxP = Number(safe?.enrollment_max_players ?? mission.enrollment_max_players ?? 0);
+  const minP = Number(mission?.enrollment_min_players ?? mission.enrollment_min_players ?? 0);
+  const maxP = Number(mission?.enrollment_max_players ?? mission.enrollment_max_players ?? 0);
   const joinedCls   = (joinedPlayers >= minP) ? "text-success" : "text-error";
 
   const prettyDet = prettyStatusForList(
@@ -4735,7 +4598,6 @@ async function init(){
   window.addEventListener("wallet:connected", () => {
     ctaBusy = false;
     fetchAndRenderAllMissions();
-    if (walletAddress) enableGamePush(walletAddress);
   });
 
   window.addEventListener("wallet:changed", async () => {
