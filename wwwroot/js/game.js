@@ -4594,7 +4594,7 @@ async function init(){
   } catch {}
   // ───────────────────────────────────────────────────────────────
 
-  // event-based (if we add wallet events in walletConnect.js, see 1D)
+  // event-based (wallet events emitted in walletConnect.js)
   window.addEventListener("wallet:connected", () => {
     ctaBusy = false;
     fetchAndRenderAllMissions();
@@ -4639,10 +4639,7 @@ async function init(){
     } catch {}
 
     renderAllMissions([]);
-    // optional: no-op (enableGamePush(null) returns early)
   });
-
-  if (walletAddress) enableGamePush(walletAddress);
 
   window.addEventListener("wallet:connected",               refreshStageCtaIfOpen);
   window.addEventListener("wallet:changed",                 refreshStageCtaIfOpen);

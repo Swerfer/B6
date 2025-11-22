@@ -13,8 +13,8 @@ const j = (resp) => {
   return resp.json();
 };
 
-// Keep same-origin credentials like push.js
-// (push.js uses: fetch(`/api${p}`, { credentials: "include", ... }) )
+// Keep same-origin credentials for all API calls
+// Always send credentials so cookies/session are included.
 const apiFetch = (path, init) => fetch(`${API_ROOT}${path}`, { credentials: "include", ...init });
 
 const toLc = (s) => (s ? String(s).toLowerCase() : "");
@@ -22,7 +22,7 @@ const toLc = (s) => (s ? String(s).toLowerCase() : "");
 // ------------------------ GET: snapshots ----------------------------
 
 /** GET /missions/all/{n} — latest N missions (DB) */
-export async function getMissionsAll(limit = 100) {
+export async function getMissionsAll        (limit = 100)                       {
   // hard-cap to 100 on the client as requested
   const n = Math.min(Math.max(Number(limit) || 0, 1), 100);
   const r = await apiFetch(`/missions/all/${n}`);
@@ -30,26 +30,26 @@ export async function getMissionsAll(limit = 100) {
 }
 
 /** GET /missions/not-ended — list of active/upcoming missions */
-export async function   getMissionsNotEnded() {
+export async function   getMissionsNotEnded ()                                  {
   const r = await apiFetch("/missions/not-ended");
   return j(r);
 }
 
 /** GET /missions/joinable — missions currently in enrollment */
-export async function   getMissionsJoinable() {
+export async function   getMissionsJoinable ()                                  {
   const r = await apiFetch("/missions/joinable");
   return j(r);
 }
 
 /** GET /missions/mission/{address} — mission detail (snapshot) */
-export async function   getMission(addressLc) {
+export async function   getMission          (addressLc)                         {
   const addr = toLc(addressLc);
   const r = await apiFetch(`/missions/mission/${addr}`, { cache: "no-store" });
   return j(r);
 }
 
 /** GET /missions/player/{address} — missions a player is in */
-export async function   getPlayerMissions(playerAddressLc) {
+export async function   getPlayerMissions   (playerAddressLc)                   {
   const addr = toLc(playerAddressLc);
   const r = await apiFetch(`/missions/player/${addr}`);
   return j(r);
@@ -61,7 +61,7 @@ export async function   getPlayerMissions(playerAddressLc) {
 const __kickGuard = new Map();
 const KICK_TTL_MS = 2000;
 
-function                shouldSendKick(type, missionLc) {
+function                shouldSendKick      (type, missionLc)                   {
   const key = `${type}:${missionLc}`;
   const now = Date.now();
   const last = __kickGuard.get(key) || 0;
@@ -70,7 +70,7 @@ function                shouldSendKick(type, missionLc) {
   return true;
 }
 
-async function          postJson(path, body) {
+async function          postJson            (path, body)                        {
   const r = await apiFetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -82,7 +82,7 @@ async function          postJson(path, body) {
 }
 
 /** POST /events/created → { mission, txHash? } */
-export async function   postKickCreated({ mission, txHash } = {}) {
+export async function   postKickCreated     ({ mission, txHash }          = {}) {
   const missionLc = toLc(mission);
   if (!missionLc) return false;
   if (!shouldSendKick("created", missionLc)) return false;
@@ -90,7 +90,7 @@ export async function   postKickCreated({ mission, txHash } = {}) {
 }
 
 /** POST /events/enrolled → { mission, player, txHash? } */
-export async function   postKickEnrolled({ mission, player, txHash } = {}) {
+export async function   postKickEnrolled    ({ mission, player, txHash }  = {}) {
   const missionLc = toLc(mission);
   const playerLc  = toLc(player);
   if (!missionLc || !playerLc) return false;
@@ -99,7 +99,7 @@ export async function   postKickEnrolled({ mission, player, txHash } = {}) {
 }
 
 /** POST /events/banked → { mission, player, txHash? } */
-export async function   postKickBanked({ mission, player, txHash } = {}) {
+export async function   postKickBanked      ({ mission, player, txHash }  = {}) {
   const missionLc = toLc(mission);
   const playerLc  = toLc(player);
   if (!missionLc || !playerLc) return false;
@@ -108,7 +108,7 @@ export async function   postKickBanked({ mission, player, txHash } = {}) {
 }
 
 /** POST /events/finalized → { mission, txHash? } */
-export async function   postKickFinalized({ mission, txHash } = {}) {
+export async function   postKickFinalized   ({ mission, txHash }          = {}) {
   const missionLc = toLc(mission);
   if (!missionLc) return false;
   if (!shouldSendKick("finalized", missionLc)) return false;
@@ -119,7 +119,7 @@ export async function   postKickFinalized({ mission, txHash } = {}) {
 const __eligCache = new Map();  // addrLc -> { ts, p }
 const ELIG_TTL_MS = 10_000;
 
-export async function getPlayerEligibility(addressLc) {
+export async function getPlayerEligibility  (addressLc)                         {
   const addr = toLc(addressLc);
   if (!addr) return { error: true, message: "No address" };
 
