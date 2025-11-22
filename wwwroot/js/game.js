@@ -711,10 +711,35 @@ function        cooldownInfo(mission, now = Math.floor(Date.now()/1000)){
   const lastRoundPauseSecs  = Number(mission?.last_round_pause_secs ?? 60);
   const secsTotal           = (roundCount === (roundsTotal - 1)) ? lastRoundPauseSecs : roundPauseSecs;
 
-  const pauseTs     = Number(mission?.pause_timestamp || 0);
-  const pauseEnd    = pauseTs ? (pauseTs + secsTotal) : 0;
-  const secsLeft    = pauseEnd ? Math.max(0, pauseEnd - now) : 0;
+  const pauseTs  = Number(mission?.pause_timestamp || 0);
+  const pauseEnd = pauseTs && secsTotal > 0 ? (pauseTs + secsTotal) : 0;
+  const secsLeft = pauseEnd ? Math.max(0, pauseEnd - now) : 0;
+
   return { isPaused, secsTotal, secsLeft, pauseEnd };
+}
+
+function        formatCooldownLabel    (secsTotal){
+  const total   = Math.max(0, Math.floor(Number(secsTotal || 0)));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+
+  if (minutes > 0 && seconds > 0) {
+    const minLabel = minutes === 1 ? "1 minute" : `${minutes} minutes`;
+    const secLabel = seconds === 1 ? "1 second"  : `${seconds} seconds`;
+    return `Cooldown ${minLabel} ${secLabel}`;
+  }
+
+  if (minutes > 0) {
+    const minLabel = minutes === 1 ? "1 minute" : `${minutes} minutes`;
+    return `Cooldown ${minLabel}`;
+  }
+
+  if (seconds > 0) {
+    const secLabel = seconds === 1 ? "1 second" : `${seconds} seconds`;
+    return `Cooldown ${secLabel}`;
+  }
+
+  return "Cooldown";
 }
 
 function        formatMMSS(s){
@@ -938,8 +963,6 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
 
   let zeroFired = false;
   let currentUnit = null;
-  let pillFlipDone = false; // NEW: debounce single front-end flip at the deadline
-  let __watchdogCooldownUntil = 0;
 
   const paint = async () => {
     const now  = Math.floor(Date.now()/1000);
@@ -990,47 +1013,6 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
       el.textContent = `${label} ${cro} CRO`;
       applyCounterColor(el, missionObj, wei);
     });
-
-    // NEW: update Paused cooldown mm:ss
-    document.querySelectorAll('#stageCtaGroup [data-cooldown-end]').forEach(async el => {
-      const end = Number(el.getAttribute('data-cooldown-end') || 0);
-      if (end > 0) {
-        const left = Math.max(0, end - now);
-        el.textContent = formatMMSS(left);
-
-        if (left === 0 && missionObj && Number(missionObj.status) === 4 && !el.dataset.flipDone) {
-          el.dataset.flipDone = "1"; // debounce
-          const m2 = { ...missionObj, status: 3, pause_timestamp: 0 };
-
-          // cooldown ended → allow 4→3 again
-          __pauseUntilSec = 0;
-          __postCooldownUntilSec = Math.floor(Date.now()/1000) + 60;
-
-          // prevent double tickers and flip immediately
-          stopStageTimer();
-          setStageStatusImage(statusSlug(3));
-          buildStageLowerHudForStatus(m2); // status 3 → paint directly (no chain hydrate)
-          await bindRingToMission(m2);
-          await bindCenterTimerToMission(m2);
-          renderStageCtaForStatus(m2);
-          await renderStageEndedPanelIfNeeded(m2);
-          stageCurrentStatus = 3;
-          refreshOpenStageFromServer(1);
-        }
-      }
-    });
-
-    // --- LOW-WEIGHT WATCHDOG (missed-push fallback) --------------------
-    // If we are on the stage, the timer is still running, and we haven't
-    // seen a push in a while, do one gentle reconcile with a short cooldown.
-    const onStage = document.getElementById('gameMain')?.classList.contains('stage-mode');
-    if (onStage && left > 0) {
-      const gapMs = Date.now() - (__lastPushTs || 0);
-      if (gapMs > 30000 && Date.now() > __watchdogCooldownUntil) {  // >30s silence
-        __watchdogCooldownUntil = Date.now() + 15000;                // 15s cooldown
-        smartReconcile("watchdog");
-      }
-    }
     // -------------------------------------------------------------------    
 
     // Rebind ring when the unit changes...
@@ -1048,9 +1030,9 @@ async function  startStageTimer(endTs, phaseStartTs = 0, missionObj){
       if (!zeroFired) {
         zeroFired = true;
 
-        // Flip locally (by clock) so banner/timer advance immediately; then reconcile.
-        const advanced = await localAdvanceIfDue(missionObj);
-        refreshOpenStageFromServer(advanced ? 2 : 5);
+        // Flip alleen lokaal op basis van de klok; geen extra API-call.
+        // Immutable tijden zijn leidend, indexer/backend komen via pushes vanzelf bij.
+        await localAdvanceIfDue(missionObj);
       }
     }
 
@@ -1457,7 +1439,7 @@ async function  startHub() { // SignalR HUB via shared hub.js
 
   // Wire the three server → client events to our existing UI logic.
   setHandlers({
-    onMissionUpdated: async (addr) => {
+    onMissionUpdated: async (addr, reason, txHash, eventType) => {
       __lastPushTs = Date.now();
       touchUpdatedAtStampFromPush();
       dbg("MissionUpdated PUSH", { addr, currentMissionAddr, groups: Array.from(subscribedGroups) });
@@ -1619,7 +1601,50 @@ async function  startHub() { // SignalR HUB via shared hub.js
         try {
           const m = enrichMissionFromApi(await apiMission(currentMissionAddr, true));
 
-          // Immediately flip UI to Paused so cooldown + accumulating reset from bank time (and keep counting during cooldown)
+          // Zoek de tx-hash van de winnende ronde (indien beschikbaar)
+          let winTx = "";
+          if (amt > 0n && Array.isArray(m.rounds)) {
+            try {
+              const rNo    = Number(round);
+              const rounds = m.rounds || [];
+              const winRound =
+                rounds.find(r => {
+                  const rr = Number(r.round_number ?? r.round_no ?? r.round ?? 0);
+                  const w  = String(r.winner_address || "").toLowerCase();
+                  return rr === rNo && w === win;
+                }) ||
+                rounds.find(r => {
+                  const rr = Number(r.round_number ?? r.round_no ?? r.round ?? 0);
+                  return rr === rNo;
+                });
+
+              if (winRound && winRound.tx_hash) {
+                winTx = String(winRound.tx_hash);
+              }
+            } catch {}
+          }
+
+          // WINNER (met mission open): vul pending video-popup aan met definitieve cro + tx-hash
+          if (win === me && amt > 0n) {
+            const prev = __vaultVideoPendingWin || {};
+            __vaultVideoPendingWin = {
+              ...prev,
+              cro,
+              round,
+              txHash: winTx || prev.txHash
+            };
+          }
+
+          // SPECTATORS / andere spelers (met mission open): popup met optionele TX-link
+          if (win !== me && amt > 0n) {
+            let msg = `${copyableAddr(winner)} won <b>${cro} CRO</b> in round ${round}`;
+            if (winTx) {
+              msg += `<br/><small>TX: ${txLinkIcon(winTx)}</small>`;
+            }
+            showAlert(msg, "info", 5000);
+          }
+
+          // Immediately flip UI to Paused so cooldown + accumulating reset from bank time
           await flipStageToPausedOptimistic(m);
 
           // If the video already ended, finish the win flow now for the player
@@ -1634,9 +1659,18 @@ async function  startHub() { // SignalR HUB via shared hub.js
             renderMissionDetail({ mission: m, enrollments: m.enrollments || [], rounds: m.rounds || [] });
           }
         } catch {
-          console.log("startHub MissionUpdated error: " + err)
+          console.log("startHub MissionUpdated error: " + err);
+
+          // Fallback: als mission-fetch faalt maar we wel op deze mission zitten en geen winnaar zijn,
+          // toon dan tenminste de simpele popup zonder TX-link.
+          if (win !== me && amt > 0n) {
+            try {
+              showAlert(`${copyableAddr(winner)} won <b>${cro} CRO</b> in round ${round}`, "info", 5000);
+            } catch {}
+          }
         }
       }
+
     }
 
   });
@@ -2044,7 +2078,7 @@ if (vaultVideo) { try { vaultVideo.preload = "auto"; vaultVideo.load(); } catch 
 
 let __vaultVideoFlowActive = false;
 let __vaultVideoEndedAwaitingResult = false;
-let __vaultVideoPendingWin = null; // { cro, round }
+let __vaultVideoPendingWin = null; // { cro, round, txHash }
 
 function closeAnyModals(){
   const overlay = document.getElementById("modalOverlay");
@@ -2791,7 +2825,7 @@ async function  handleBankItClick       (mission){
 
     // Defer the winner popup to after the vault video finishes.
     // Stash the result so finalizeVaultOpenVideoWin() can display it later.
-    __vaultVideoPendingWin = { cro: winCro, round: nextRnd };
+    __vaultVideoPendingWin = { cro: winCro, round: nextRnd, txHash: tx.hash };
 
     // Optimistically drop the pool by the payout right away
     let croAfter = mission.cro_current_wei;
@@ -3321,7 +3355,7 @@ function        renderCtaPaused         (host, mission){
 
   } else {
 
-    // Paused: disabled button with visible "Cooldown: mm:ss"
+    // Paused: disabled button met statische "Cooldown X minute(s)" tekst
     const g = document.createElementNS(SVG_NS, "g");
     g.setAttribute("class", "cta-btn cta-disabled");
     g.setAttribute("transform", `translate(${x},${y})`);
@@ -3329,7 +3363,7 @@ function        renderCtaPaused         (host, mission){
     // draw the PNG button background (bg is an image path, not a CSS class)
     g.appendChild(svgImage(bg, 0, 0, btnW, btnH));
 
-    // centered countdown text on top of the button
+    // centered cooldown text on top of the button
     const label = document.createElementNS(SVG_NS, "text");
     label.setAttribute("x", String(Math.round(btnW / 2)));
     label.setAttribute("y", String(Math.round(btnH / 2) + txtDy + 5));
@@ -3337,16 +3371,13 @@ function        renderCtaPaused         (host, mission){
     label.setAttribute("dominant-baseline", "middle");
     label.setAttribute("class", "cta-sub");
     label.style.fill = stageTextFill();
-    label.textContent = "Cooldown: ";
 
-    // live-updating countdown value (ticked elsewhere via data-cooldown-end)
-    const t = document.createElementNS(SVG_NS, "tspan");
-    const info = cooldownInfo(mission);
-    const end = Number(info.pauseEnd || 0);
-    t.setAttribute("data-cooldown-end", String(end));
-    t.textContent = end > 0 ? formatMMSS(Math.max(0, end - Math.floor(Date.now() / 1000))) : "—";
+    const info      = cooldownInfo(mission);
+    const secsTotal = Number(info.secsTotal || 0);
+    const text      = secsTotal > 0 ? formatCooldownLabel(secsTotal) : "Cooldown";
 
-    label.appendChild(t);
+    label.textContent = text;
+
     g.appendChild(label);
     host.appendChild(g);
   }
@@ -3497,12 +3528,17 @@ async function  maybeShowMissionEndPopup(mission){
 
     if (hasLocalWin || myWins.length){
       __endPopupShown.add(addr); // mark only when we are about to show something
-      const last = myWins.length ? myWins[myWins.length - 1] : null;
+      const last    = myWins.length ? myWins[myWins.length - 1] : null;
       const roundNo = last ? Number(last.round_number ?? last.round_no ?? last.round ?? 0) : "";
-      const cro = last ? weiToCro(String(last.payout_wei || last.amountWei || "0"), 2)
-                       : ""; // local-only: amount may be unknown here
-      const winMsg = last
-        ? `🎉 Congratulations!<br/>You won round ${roundNo} and claimed <b>${cro} CRO</b>.<br/><small>${reasonText}</small>`
+      const cro     = last ? weiToCro(String(last.payout_wei || last.amountWei || "0"), 2)
+                           : ""; // local-only: amount may be unknown here
+
+      // TX-hash van de winnende ronde (uit mission_rounds)
+      const txHash  = last && last.tx_hash ? String(last.tx_hash) : "";
+      const txHtml  = txHash ? `<br/><small>TX: ${txLinkIcon(txHash)}</small>` : "";
+
+      const winMsg  = last
+        ? `🎉 Congratulations!<br/>You won round ${roundNo} and claimed <b>${cro} CRO</b>.<br/><small>${reasonText}</small>${txHtml}`
         : `🎉 Congratulations!<br/>You won a round!<br/><small>${reasonText}</small>`;
       showAlert(winMsg, "success");
       return;
@@ -4215,7 +4251,7 @@ function        renderMissionDetail     ({ mission, enrollments, rounds }){
                   </span>` : ""}
         </div>
         <div class="text-end small">
-          ${e.refunded ? `<div class="text-warning">Refunded ${txLinkIcon(e.refund_tx_hash)}</div>` : ""}
+          ${e.refunded ? `<div class="text-warning">Refunded</div>` : ""}
         </div>
       </div>
     `;

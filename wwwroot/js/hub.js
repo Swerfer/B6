@@ -41,8 +41,8 @@ export async function   startHub()                  {
     .build();
 
   // Wire server → client events
-  connection.on("MissionUpdated", (addr) => {
-    try { onMissionUpdated(addr); } catch (e) { console.error("MissionUpdated handler error:", e); }
+  connection.on("MissionUpdated", (addr, reason, txHash, eventType) => {
+    try { onMissionUpdated(addr, reason, txHash, eventType); } catch (e) { console.error("MissionUpdated handler error:", e); }
   });
 
   connection.on("StatusChanged", (addr, newStatus) => {

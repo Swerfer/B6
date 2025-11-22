@@ -107,6 +107,14 @@ export async function   postKickBanked({ mission, player, txHash } = {}) {
   return postJson("/events/banked", { mission: missionLc, player: playerLc, txHash });
 }
 
+/** POST /events/finalized → { mission, txHash? } */
+export async function   postKickFinalized({ mission, txHash } = {}) {
+  const missionLc = toLc(mission);
+  if (!missionLc) return false;
+  if (!shouldSendKick("finalized", missionLc)) return false;
+  return postJson("/events/finalized", { mission: missionLc, txHash });
+}
+
 /** GET /players/{address}/eligibility — memorized ~10s per address */
 const __eligCache = new Map();  // addrLc -> { ts, p }
 const ELIG_TTL_MS = 10_000;

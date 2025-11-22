@@ -2,29 +2,34 @@
  admin.js – admin page logic (createMission + section gating)
 **********************************************************************/
 import { 
-    connectWallet, 
-    disconnectWallet, 
-    walletAddress 
+  connectWallet, 
+  disconnectWallet, 
+  walletAddress 
 } from "./walletConnect.js";
 
 import { 
-    FACTORY_ADDRESS, 
-    READ_ONLY_RPC, 
-    FACTORY_ABI,
-    MISSION_ABI,
-    getReadProvider,
-    showAlert, 
-    showConfirm,
-    setBtnLoading,
-    clearSelection,
-    statusText,
-    fadeSpinner,
-    missionTypeName,
-    copyableAddr,
-    shorten,
-    decodeError,
-    formatLocalDateTime,
+  FACTORY_ADDRESS, 
+  READ_ONLY_RPC, 
+  FACTORY_ABI,
+  MISSION_ABI,
+  getReadProvider,
+  showAlert, 
+  showConfirm,
+  setBtnLoading,
+  clearSelection,
+  statusText,
+  fadeSpinner,
+  missionTypeName,
+  copyableAddr,
+  shorten,
+  decodeError,
+  formatLocalDateTime,
 } from "./core.js";
+
+import { 
+  postKickCreated, 
+  postKickFinalized 
+} from "./api.js";
 
 /* ---------- DOM ---------- */
 const adminSections     = document.querySelectorAll (".section-box");
@@ -377,11 +382,13 @@ async function forceFinalizeMission(address, btnRef, factoryStatus = null) {
        This will call <code>forceFinalizeMission()</code> on the contract.`,
       async () => {
         let success = false;
+        let txHash  = null;
 
         setBtnLoading(btnRef, true, "Finalizing");
 
         try {
           const tx = await mc.forceFinalizeMission();
+          txHash   = tx.hash || null;
           await tx.wait();
           success = true;
         } catch (e) {
@@ -399,11 +406,11 @@ async function forceFinalizeMission(address, btnRef, factoryStatus = null) {
           showAlert("Mission finalized.", "success");
 
           // Kick the indexer so Factory Status refreshes immediately
-          fetch("/api/events/finalized", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ mission: address.toLowerCase() })
-          }).catch(()=>{ /* non-fatal */ });
+          try {
+            await postKickFinalized({ mission: address, txHash });
+          } catch {
+            // non-fatal; finalize staat al on-chain
+          }
         }
 
         // Always reload the modal to reflect the new state
@@ -1196,25 +1203,24 @@ form?.addEventListener("submit", async e => {
 
     // Fire the kick (optional but recommended)
     if (missionLc) {
-      fetch("/api/events/created", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mission: missionLc, txHash: tx.hash })
-      }).catch(()=>{ /* non-fatal */ });
+      // use shared helper (de-dup + lowercase)
+      postKickCreated({ mission: missionLc, txHash: tx.hash }).catch(() => { /* non-fatal */ });
     }
+
     showAlert("Mission created successfully!","success");
     await loadMissions();
     form.reset();
-    }catch (err){
 
-        /* ---------- extract a meaningful revert reason ---------- */
-        let msg = decodeError(err);
+  } catch (err){
 
-        if (!msg) msg = err.message || "Transaction failed";
-        showAlert(msg, "error");
-    } finally {
-      setBtnLoading(createBtn,false,"Create Mission",false);                  // always stop
-      updateBtn();                                     // re-validate after reset
+      /* ---------- extract a meaningful revert reason ---------- */
+      let msg = decodeError(err);
+
+      if (!msg) msg = err.message || "Transaction failed";
+      showAlert(msg, "error");
+  } finally {
+    setBtnLoading(createBtn,false,"Create Mission",false);                  // always stop
+    updateBtn();                                     // re-validate after reset
     }
 });
 
