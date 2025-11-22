@@ -2520,7 +2520,7 @@ function        buildStageLowerHudForStatus(mission){ // Build (and fill) the pi
     val.setAttribute("fill", valueFill);
 
     if (typeof def.countdown === "function") {
-      const ts = def.countdown(safe);
+      const ts = def.countdown(mission);
       if (ts > 0) {
         val.setAttribute("data-countdown", String(ts));
         val.textContent = formatCountdown(ts);
@@ -2529,9 +2529,9 @@ function        buildStageLowerHudForStatus(mission){ // Build (and fill) the pi
       }
     } else if (typeof def.renderSvg === "function") {
       // Let the pill define its own SVG rendering (single source)
-      def.renderSvg(val, safe);
+      def.renderSvg(val, mission);
     } else {
-      val.textContent = def.value ? def.value(safe) : "—";
+      val.textContent = def.value ? def.value(mission) : "—";
     }
 
     g.appendChild(val);
@@ -3903,9 +3903,6 @@ function        renderMissionDetail     ({ mission, enrollments, rounds }){
     btn.addEventListener("click", async () => {
       await cleanupMissionDetail();
 
-      // ↓↓↓ prevent pill bleed from previous mission
-      resetMissionLocalState();
-
       currentMissionAddr = String(mission.mission_address).toLowerCase();
       await startHub();
       await subscribeToMission(currentMissionAddr);
@@ -4540,8 +4537,6 @@ async function init(){
     if (bareAddr) {
       // NEW: open the GAME STAGE directly for a bare address deep-link
       await cleanupMissionDetail();
-      // prevent pill bleed from any previous mission
-      resetMissionLocalState?.();
 
       currentMissionAddr = String(bareAddr).toLowerCase();
       await startHub?.();
